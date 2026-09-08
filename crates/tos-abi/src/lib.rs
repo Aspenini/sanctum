@@ -75,12 +75,16 @@ pub struct CTask {
     pub pix_width: i64,
     pub pix_height: i64,
     pub draw_it: Option<extern "C" fn(*mut CTask, *mut CDC)>,
+    pub task_end_cb: Option<extern "C" fn()>,
+    pub song_task: *mut CTask,
+    pub animate_task: *mut CTask,
 }
 
 /// Current CPU. HolyC `Gs` points here.
 #[repr(C)]
 pub struct CCPU {
     pub num: i64,
+    pub idle_factor: f64,
 }
 
 /// Graphics device context. Layout will be matched to KernelA.HH in Phase 3.

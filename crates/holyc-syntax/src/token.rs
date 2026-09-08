@@ -37,7 +37,7 @@ pub enum TokenKind {
     Dot,
     DotDot,
     Ellipsis,
-    Question, // unused in HolyC expressions; still lexed
+    Question,     // unused in HolyC expressions; still lexed
     DollarDollar, // `$$`  (RIP / class offset)
 
     // operators
@@ -79,9 +79,13 @@ pub enum TokenKind {
     SubEq,
 
     /// `$IB,...$` — yields a pointer to a DolDoc bin (sprite).
-    InsBin { idx: i64 },
+    InsBin {
+        idx: i64,
+    },
     /// `$BS,...$` size of a bin.
-    InsBinSize { idx: i64 },
+    InsBinSize {
+        idx: i64,
+    },
 
     /// Preprocessor / compiler directive at line start: `#include` etc.
     /// The ident is the directive name (include, define, if, ...).

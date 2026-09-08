@@ -42,3 +42,19 @@ pub unsafe fn rem(entry: *mut CQue) {
         (*entry).last = entry;
     }
 }
+
+pub unsafe fn del(head: *mut CQue, remove_first: bool) {
+    if head.is_null() {
+        return;
+    }
+    let mut entry = unsafe { (*head).next };
+    while !entry.is_null() && entry != head {
+        let next = unsafe { (*entry).next };
+        if remove_first {
+            unsafe { rem(entry) };
+        }
+        unsafe { crate::heap::free(entry.cast()) };
+        entry = next;
+    }
+    unsafe { init(head) };
+}

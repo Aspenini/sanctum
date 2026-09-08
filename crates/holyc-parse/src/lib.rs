@@ -2,7 +2,7 @@
 //! the way TempleOS does (`I64 x;` vs `Foo;` as a call).
 
 use holyc_ast::*;
-use holyc_syntax::{is_keyword, Span, SyntaxError, Token, TokenKind};
+use holyc_syntax::{Span, SyntaxError, Token, TokenKind, is_keyword};
 use std::collections::{HashSet, VecDeque};
 
 pub struct Parser<'a> {
@@ -19,9 +19,35 @@ impl<'a> Parser<'a> {
     pub fn new(tokens: &'a [Token], path: &str, src: &'a str) -> Self {
         let mut types = HashSet::new();
         for b in [
-            "I0", "I8", "I8i", "I16", "I16i", "I32", "I32i", "I64", "I64i", "U0", "U8", "U8i",
-            "U16", "U16i", "U32", "U32i", "U64", "U64i", "F64", "F64i", "Bool",
-            "CColorROPU32", "CQue", "CD3", "CD3I32", "CD3I64", "CTask", "CCPU", "CDC",
+            "I0",
+            "I8",
+            "I8i",
+            "I16",
+            "I16i",
+            "I32",
+            "I32i",
+            "I64",
+            "I64i",
+            "U0",
+            "U8",
+            "U8i",
+            "U16",
+            "U16i",
+            "U32",
+            "U32i",
+            "U64",
+            "U64i",
+            "F64",
+            "F64i",
+            "Bool",
+            "CColorROPU32",
+            "CQue",
+            "CD3",
+            "CD3I32",
+            "CD3I64",
+            "CTask",
+            "CCPU",
+            "CDC",
         ] {
             types.insert(b.into());
         }
@@ -77,7 +103,10 @@ impl<'a> Parser<'a> {
 
     fn eat_kind(&mut self, k: &TokenKind) -> bool {
         if std::mem::discriminant(self.peek()) == std::mem::discriminant(k)
-            && !matches!(k, TokenKind::Ident(_) | TokenKind::Str(_) | TokenKind::Int(_))
+            && !matches!(
+                k,
+                TokenKind::Ident(_) | TokenKind::Str(_) | TokenKind::Int(_)
+            )
         {
             // discriminant match is too loose for Ident. Handle simple units:
         }
@@ -264,7 +293,10 @@ impl<'a> Parser<'a> {
                     self.expect(TokenKind::RBracket, "]")?;
                     mty = TypeRef::Array(Box::new(mty), n);
                 }
-                members.push(Member { name: mname, ty: mty });
+                members.push(Member {
+                    name: mname,
+                    ty: mty,
+                });
                 if !self.eat_punct(TokenKind::Comma) {
                     break;
                 }
@@ -338,7 +370,15 @@ impl<'a> Parser<'a> {
                 _ => break,
             }
         }
-        let ret = self.parse_type()?;
+        let mut ret = self.parse_type()?;
+        // HolyC also accepts the register hint between the base type and the
+        // declarator: `Panel reg *panel`. It has no semantic effect here.
+        if self.ident_is(0, "reg") || self.ident_is(0, "noreg") {
+            self.bump();
+            while self.eat_punct(TokenKind::Star) {
+                ret = ret.ptr();
+            }
+        }
         let (name, _) = self.expect_ident()?;
         if self.eat_punct(TokenKind::LParen) {
             let (params, variadic) = self.parse_param_list()?;
@@ -358,13 +398,17 @@ impl<'a> Parser<'a> {
                 ret,
                 params,
                 variadic,
-                body: if extern_ && body.is_none() { None } else { body },
+                body: if extern_ && body.is_none() {
+                    None
+                } else {
+                    body
+                },
                 extern_name: None,
             }));
         }
-        Ok(Item::Stmt(self.parse_var_decls(
-            span0, ret, name, static_, public,
-        )?))
+        Ok(Item::Stmt(
+            self.parse_var_decls(span0, ret, name, static_, public)?,
+        ))
     }
 
     fn parse_var_decls(
@@ -426,10 +470,7 @@ impl<'a> Parser<'a> {
         if decls.len() == 1 {
             Ok(decls.pop().unwrap())
         } else {
-            Ok(Stmt::Block {
-                span,
-                stmts: decls,
-            })
+            Ok(Stmt::Block { span, stmts: decls })
         }
     }
 
@@ -758,7 +799,10 @@ impl<'a> Parser<'a> {
             }
         } else {
             let e = self.parse_comma_expr()?;
-            Some(Box::new(Stmt::Expr { span: e.span, expr: e }))
+            Some(Box::new(Stmt::Expr {
+                span: e.span,
+                expr: e,
+            }))
         };
         self.eat_punct(TokenKind::Semicolon);
         let cond = if matches!(self.peek(), TokenKind::Semicolon) {
@@ -1176,7 +1220,7 @@ fn bin_prec(op: BinOp) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use holyc_syntax::{lex_buffer, Session};
+    use holyc_syntax::{Session, lex_buffer};
 
     fn parse(src: &str) -> Module {
         let mut sess = Session::new();

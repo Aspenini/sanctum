@@ -8,3 +8,4 @@ description = "Host window, input, sound, filesystem mapping"
 [dependencies]
 tos-abi = { path = "../tos-abi" }
 tos-runtime = { path = "../tos-runtime" }
+tos-gr = { path = "../tos-gr" }

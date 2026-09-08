@@ -6,8 +6,8 @@ mod preprocess;
 mod span;
 mod token;
 
-pub use error::{line_col, SyntaxError};
+pub use error::{SyntaxError, line_col};
 pub use lexer::Lexer;
-pub use preprocess::{lex_buffer, preprocess, PreprocessOpts, Session};
+pub use preprocess::{PreprocessOpts, Session, lex_buffer, preprocess};
 pub use span::{FileId, SourceFile, Span};
-pub use token::{is_keyword, Token, TokenKind};
+pub use token::{Token, TokenKind, is_keyword};

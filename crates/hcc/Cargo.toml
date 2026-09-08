@@ -20,4 +20,6 @@ holyc-parse = { path = "../holyc-parse" }
 holyc-sema = { path = "../holyc-sema" }
 holyc-codegen = { path = "../holyc-codegen" }
 tos-runtime = { path = "../tos-runtime" }
+tos-gr = { path = "../tos-gr" }
+tos-host = { path = "../tos-host" }
 thiserror.workspace = true

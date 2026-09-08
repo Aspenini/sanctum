@@ -133,7 +133,11 @@ impl<'a> Lexer<'a> {
             return self.lex_ident(start);
         }
         if ch.is_ascii_digit()
-            || (ch == '.' && self.bytes.get(self.pos + 1).is_some_and(|b| b.is_ascii_digit()))
+            || (ch == '.'
+                && self
+                    .bytes
+                    .get(self.pos + 1)
+                    .is_some_and(|b| b.is_ascii_digit()))
         {
             return self.lex_number(start);
         }
@@ -208,13 +212,22 @@ impl<'a> Lexer<'a> {
                     Ok(Token::new(TokenKind::Dot, self.span(start, self.pos)))
                 }
             }
-            '+' => self.lex_op2(start, '+', TokenKind::Plus, TokenKind::PlusPlus, TokenKind::AddEq),
+            '+' => self.lex_op2(
+                start,
+                '+',
+                TokenKind::Plus,
+                TokenKind::PlusPlus,
+                TokenKind::AddEq,
+            ),
             '-' => {
                 self.bump();
                 match self.peek() {
                     Some('-') => {
                         self.bump();
-                        Ok(Token::new(TokenKind::MinusMinus, self.span(start, self.pos)))
+                        Ok(Token::new(
+                            TokenKind::MinusMinus,
+                            self.span(start, self.pos),
+                        ))
                     }
                     Some('=') => {
                         self.bump();
@@ -494,11 +507,15 @@ impl<'a> Lexer<'a> {
             Some('"') => Ok('"'),
             Some('\'') => Ok('\''),
             Some('x') => {
-                let h1 = self.bump().ok_or_else(|| self.err(start, "bad \\x escape"))?;
-                let h2 = self.bump().ok_or_else(|| self.err(start, "bad \\x escape"))?;
+                let h1 = self
+                    .bump()
+                    .ok_or_else(|| self.err(start, "bad \\x escape"))?;
+                let h2 = self
+                    .bump()
+                    .ok_or_else(|| self.err(start, "bad \\x escape"))?;
                 let s = format!("{h1}{h2}");
-                let v = u8::from_str_radix(&s, 16)
-                    .map_err(|_| self.err(start, "bad \\x escape"))?;
+                let v =
+                    u8::from_str_radix(&s, 16).map_err(|_| self.err(start, "bad \\x escape"))?;
                 Ok(v as char)
             }
             Some(ch) => Ok(ch),

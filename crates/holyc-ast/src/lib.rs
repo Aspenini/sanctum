@@ -62,8 +62,14 @@ pub struct VarDecl {
 
 #[derive(Clone, Debug)]
 pub enum Stmt {
-    Block { span: Span, stmts: Vec<Stmt> },
-    Expr { span: Span, expr: Expr },
+    Block {
+        span: Span,
+        stmts: Vec<Stmt>,
+    },
+    Expr {
+        span: Span,
+        expr: Expr,
+    },
     Decl(VarDecl),
     If {
         span: Span,

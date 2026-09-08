@@ -1,4 +1,4 @@
-use hcc::{run_file, run_source, CompileOptions};
+use hcc::{CompileOptions, compile_file, run_file, run_source};
 use std::env;
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -15,10 +15,11 @@ fn main() -> ExitCode {
     let mut opts = CompileOptions::default();
     let mut eval: Option<String> = None;
     let mut file: Option<PathBuf> = None;
+    let mut should_run = false;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
-            "--run" | "-r" => {}
+            "--run" | "-r" => should_run = true,
             "--eval" => {
                 i += 1;
                 eval = args.get(i).cloned();
@@ -53,7 +54,11 @@ fn main() -> ExitCode {
     let res = if let Some(src) = eval {
         run_source("<eval>", &src)
     } else if let Some(path) = file {
-        run_file(&path, &opts)
+        if should_run {
+            run_file(&path, &opts)
+        } else {
+            compile_file(&path, &opts).map(|_| ())
+        }
     } else {
         eprintln!("no input file");
         return ExitCode::from(2);

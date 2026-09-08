@@ -26,13 +26,39 @@ pub fn boot_task() {
             pix_width: GR_WIDTH,
             pix_height: GR_HEIGHT,
             draw_it: None,
+            task_end_cb: None,
+            song_task: ptr::null_mut(),
+            animate_task: ptr::null_mut(),
         }))
     });
-    let cpu = CPU0.get_or_init(|| HostCpu(UnsafeCell::new(CCPU { num: 0 })));
+    let cpu = CPU0.get_or_init(|| {
+        HostCpu(UnsafeCell::new(CCPU {
+            num: 0,
+            idle_factor: 0.01,
+        }))
+    });
     let tp = task.0.get();
     unsafe { (*tp).addr = tp };
     FS.set(tp);
     GS.set(cpu.0.get());
+}
+
+/// Create a host-side task record. Cooperative scheduling is introduced later;
+/// keeping spawned game loops dormant makes initialization deterministic today.
+pub fn spawn(parent: *mut CTask) -> *mut CTask {
+    let parent = if parent.is_null() { fs() } else { parent };
+    let task = Box::new(CTask {
+        addr: ptr::null_mut(),
+        pix_width: unsafe { (*parent).pix_width },
+        pix_height: unsafe { (*parent).pix_height },
+        draw_it: None,
+        task_end_cb: None,
+        song_task: ptr::null_mut(),
+        animate_task: ptr::null_mut(),
+    });
+    let task = Box::into_raw(task);
+    unsafe { (*task).addr = task };
+    task
 }
 
 pub fn fs() -> *mut CTask {

@@ -56,26 +56,26 @@ impl Sema {
             path: path.into(),
             src: src.into(),
         };
-        s.add_builtin("Print", Ty::U0, vec![("fmt", Ty::Ptr(Box::new(Ty::U8)))], true);
         s.add_builtin(
-            "PutChars",
+            "Print",
             Ty::U0,
-            vec![("ch", Ty::I64)],
-            false,
+            vec![("fmt", Ty::Ptr(Box::new(Ty::U8)))],
+            true,
         );
+        s.add_builtin("PutChars", Ty::U0, vec![("ch", Ty::I64)], false);
         s.add_builtin("ToI64", Ty::I64, vec![("x", Ty::F64)], false);
         s.add_builtin("ToF64", Ty::F64, vec![("x", Ty::I64)], false);
         s.add_builtin("ToBool", Ty::I64, vec![("x", Ty::I64)], false);
         s.add_builtin(
             "MAlloc",
             Ty::Ptr(Box::new(Ty::U8)),
-            vec![("size", Ty::I64)],
+            vec![("size", Ty::I64), ("task", Ty::Ptr(Box::new(Ty::U8)))],
             false,
         );
         s.add_builtin(
             "CAlloc",
             Ty::Ptr(Box::new(Ty::U8)),
-            vec![("size", Ty::I64)],
+            vec![("size", Ty::I64), ("task", Ty::Ptr(Box::new(Ty::U8)))],
             false,
         );
         s.add_builtin(
@@ -84,7 +84,12 @@ impl Sema {
             vec![("ptr", Ty::Ptr(Box::new(Ty::U8)))],
             false,
         );
-        s.add_builtin("StrLen", Ty::I64, vec![("s", Ty::Ptr(Box::new(Ty::U8)))], false);
+        s.add_builtin(
+            "StrLen",
+            Ty::I64,
+            vec![("s", Ty::Ptr(Box::new(Ty::U8)))],
+            false,
+        );
         s.add_builtin(
             "MemCpy",
             Ty::Ptr(Box::new(Ty::U8)),
@@ -111,7 +116,12 @@ impl Sema {
             vec![("ptr", Ty::Ptr(Box::new(Ty::U8)))],
             false,
         );
-        s.add_builtin("QueInit", Ty::U0, vec![("head", Ty::Ptr(Box::new(Ty::U8)))], false);
+        s.add_builtin(
+            "QueInit",
+            Ty::U0,
+            vec![("head", Ty::Ptr(Box::new(Ty::U8)))],
+            false,
+        );
         s.add_builtin(
             "QueIns",
             Ty::U0,
@@ -121,7 +131,21 @@ impl Sema {
             ],
             false,
         );
-        s.add_builtin("QueRem", Ty::U0, vec![("entry", Ty::Ptr(Box::new(Ty::U8)))], false);
+        s.add_builtin(
+            "QueRem",
+            Ty::U0,
+            vec![("entry", Ty::Ptr(Box::new(Ty::U8)))],
+            false,
+        );
+        s.add_builtin(
+            "QueDel",
+            Ty::U0,
+            vec![
+                ("head", Ty::Ptr(Box::new(Ty::U8))),
+                ("remove_first", Ty::I64),
+            ],
+            false,
+        );
         s.add_builtin(
             "Bt",
             Ty::I64,
@@ -153,6 +177,8 @@ impl Sema {
             false,
         );
         s.add_builtin("tS", Ty::F64, vec![], false);
+        s.add_builtin("Jiffies", Ty::I64, vec![], false);
+        s.add_builtin("Blink", Ty::I64, vec![], false);
         s.add_builtin("Rand", Ty::F64, vec![], false);
         s.add_builtin("RandU16", Ty::I64, vec![], false);
         s.add_builtin("RandU32", Ty::I64, vec![], false);
@@ -166,25 +192,368 @@ impl Sema {
             vec![("x", Ty::I64), ("lo", Ty::I64), ("hi", Ty::I64)],
             false,
         );
-        s.add_builtin("Wrap", Ty::F64, vec![("a", Ty::F64)], false);
+        s.add_builtin(
+            "Wrap",
+            Ty::F64,
+            vec![("a", Ty::F64), ("base", Ty::F64)],
+            false,
+        );
+        let i64_ptr = Ty::Ptr(Box::new(Ty::I64));
+        let cd3_ptr = Ty::Ptr(Box::new(Ty::Class {
+            name: "CD3".into(),
+            size: 24,
+        }));
+        s.add_builtin(
+            "Mat4x4IdentEqu",
+            i64_ptr.clone(),
+            vec![("r", i64_ptr.clone())],
+            false,
+        );
+        s.add_builtin("Mat4x4IdentNew", i64_ptr.clone(), vec![], false);
+        for name in ["Mat4x4RotX", "Mat4x4RotZ", "Mat4x4Scale"] {
+            s.add_builtin(
+                name,
+                i64_ptr.clone(),
+                vec![("r", i64_ptr.clone()), ("value", Ty::F64)],
+                false,
+            );
+        }
+        s.add_builtin(
+            "Mat4x4MulXYZ",
+            Ty::U0,
+            vec![
+                ("r", i64_ptr.clone()),
+                ("x", i64_ptr.clone()),
+                ("y", i64_ptr.clone()),
+                ("z", i64_ptr.clone()),
+            ],
+            false,
+        );
+        s.add_builtin(
+            "Mat4x4TranslationEqu",
+            i64_ptr.clone(),
+            vec![
+                ("r", i64_ptr.clone()),
+                ("x", Ty::I64),
+                ("y", Ty::I64),
+                ("z", Ty::I64),
+            ],
+            false,
+        );
+        s.add_builtin(
+            "D3Sub",
+            cd3_ptr.clone(),
+            vec![
+                ("dst", cd3_ptr.clone()),
+                ("lhs", cd3_ptr.clone()),
+                ("rhs", cd3_ptr.clone()),
+            ],
+            false,
+        );
+        s.add_builtin(
+            "D3NormSqr",
+            Ty::F64,
+            vec![("value", cd3_ptr.clone())],
+            false,
+        );
+        s.add_builtin("D3Unit", cd3_ptr.clone(), vec![("value", cd3_ptr)], false);
+        s.add_builtin(
+            "SwapI64",
+            Ty::U0,
+            vec![("lhs", i64_ptr.clone()), ("rhs", i64_ptr.clone())],
+            false,
+        );
+        for name in ["Sin", "Cos", "Sqrt", "ACos"] {
+            s.add_builtin(name, Ty::F64, vec![("value", Ty::F64)], false);
+        }
+        for name in ["Min", "Max"] {
+            s.add_builtin(name, Ty::F64, vec![("a", Ty::F64), ("b", Ty::F64)], false);
+        }
+        s.add_builtin(
+            "Clamp",
+            Ty::F64,
+            vec![("value", Ty::F64), ("lo", Ty::F64), ("hi", Ty::F64)],
+            false,
+        );
+        s.add_builtin("Sign", Ty::F64, vec![("value", Ty::F64)], false);
         s.add_builtin("Sleep", Ty::U0, vec![("ms", Ty::I64)], false);
         s.add_builtin("Yield", Ty::U0, vec![], false);
         s.add_builtin("Fs", Ty::Ptr(Box::new(Ty::U8)), vec![], false);
         s.add_builtin("Gs", Ty::Ptr(Box::new(Ty::U8)), vec![], false);
         s.add_builtin("mp_cnt", Ty::I64, vec![], false);
+        let task_ptr = Ty::Ptr(Box::new(Ty::Class {
+            name: "CTask".into(),
+            size: 56,
+        }));
+        s.add_builtin(
+            "Spawn",
+            task_ptr.clone(),
+            vec![
+                ("fp_start_addr", Ty::Ptr(Box::new(Ty::U8))),
+                ("data", Ty::Ptr(Box::new(Ty::U8))),
+                ("task_name", Ty::Ptr(Box::new(Ty::U8))),
+                ("target_cpu", Ty::I64),
+                ("parent", task_ptr.clone()),
+                ("stk_size", Ty::I64),
+                ("flags", Ty::I64),
+            ],
+            false,
+        );
+        s.add_builtin("SndTaskEndCB", Ty::U0, vec![], false);
+        s.add_builtin(
+            "Beep",
+            Ty::U0,
+            vec![("ona", Ty::I64), ("busy", Ty::I64)],
+            false,
+        );
+        s.add_builtin("Snd", Ty::U0, vec![("ona", Ty::I64)], false);
+        s.add_builtin(
+            "Play",
+            Ty::U0,
+            vec![
+                ("song", Ty::Ptr(Box::new(Ty::U8))),
+                ("words", Ty::Ptr(Box::new(Ty::U8))),
+            ],
+            false,
+        );
+        s.add_builtin("MusicSettingsRst", Ty::U0, vec![], false);
+        s.add_builtin(
+            "RegDft",
+            Ty::U0,
+            vec![
+                ("path", Ty::Ptr(Box::new(Ty::U8))),
+                ("defaults", Ty::Ptr(Box::new(Ty::U8))),
+            ],
+            false,
+        );
+        s.add_builtin(
+            "RegExe",
+            Ty::U0,
+            vec![("path", Ty::Ptr(Box::new(Ty::U8)))],
+            false,
+        );
+        s.add_builtin(
+            "RegWrite",
+            Ty::U0,
+            vec![
+                ("path", Ty::Ptr(Box::new(Ty::U8))),
+                ("fmt", Ty::Ptr(Box::new(Ty::U8))),
+                ("value", Ty::F64),
+            ],
+            false,
+        );
+        for name in [
+            "Refresh",
+            "MenuPop",
+            "WinMax",
+            "DocClear",
+            "PutExcept",
+            "Exit",
+            "SettingsPop",
+        ] {
+            s.add_builtin(name, Ty::U0, vec![], false);
+        }
+        s.add_builtin("SettingsPush", Ty::Ptr(Box::new(Ty::U8)), vec![], false);
+        s.add_builtin(
+            "MenuPush",
+            Ty::Ptr(Box::new(Ty::U8)),
+            vec![("menu", Ty::Ptr(Box::new(Ty::U8)))],
+            false,
+        );
+        for name in ["AutoComplete", "WinBorder", "DocCursor"] {
+            s.add_builtin(name, Ty::I64, vec![], false);
+        }
+        s.add_builtin(
+            "ScanKey",
+            Ty::I64,
+            vec![
+                ("ch", Ty::Ptr(Box::new(Ty::I64))),
+                ("scan_code", Ty::Ptr(Box::new(Ty::I64))),
+                ("echo", Ty::I64),
+            ],
+            false,
+        );
+        let cdc_ptr = Ty::Ptr(Box::new(Ty::Class {
+            name: "CDC".into(),
+            size: 64,
+        }));
+        let u8_ptr = Ty::Ptr(Box::new(Ty::U8));
+        let i32_ptr = Ty::Ptr(Box::new(Ty::I32));
+        s.add_builtin(
+            "DCNew",
+            cdc_ptr.clone(),
+            vec![
+                ("width", Ty::I64),
+                ("height", Ty::I64),
+                ("task", task_ptr.clone()),
+                ("null_bitmap", Ty::I64),
+            ],
+            false,
+        );
+        s.add_builtin(
+            "DCAlias",
+            cdc_ptr.clone(),
+            vec![("dc", cdc_ptr.clone()), ("task", task_ptr.clone())],
+            false,
+        );
+        s.add_builtin("DCDel", Ty::U0, vec![("dc", cdc_ptr.clone())], false);
+        s.add_builtin(
+            "DCFill",
+            Ty::U0,
+            vec![("dc", cdc_ptr.clone()), ("color", Ty::I64)],
+            false,
+        );
+        for name in ["DCDepthBufAlloc", "DCDepthBufRst"] {
+            s.add_builtin(name, i32_ptr.clone(), vec![("dc", cdc_ptr.clone())], false);
+        }
+        s.add_builtin(
+            "DCMat4x4Set",
+            Ty::U0,
+            vec![("dc", cdc_ptr.clone()), ("r", i64_ptr.clone())],
+            false,
+        );
+        s.add_builtin(
+            "DCSymmetrySet",
+            Ty::I64,
+            vec![
+                ("dc", cdc_ptr.clone()),
+                ("x1", Ty::I64),
+                ("y1", Ty::I64),
+                ("x2", Ty::I64),
+                ("y2", Ty::I64),
+            ],
+            false,
+        );
+        s.add_builtin(
+            "DCClipLine",
+            Ty::I64,
+            vec![
+                ("dc", cdc_ptr.clone()),
+                ("x1", i64_ptr.clone()),
+                ("y1", i64_ptr.clone()),
+                ("x2", i64_ptr.clone()),
+                ("y2", i64_ptr.clone()),
+                ("width", Ty::I64),
+                ("height", Ty::I64),
+            ],
+            false,
+        );
+        s.add_builtin(
+            "GrLine3",
+            Ty::I64,
+            vec![
+                ("dc", cdc_ptr.clone()),
+                ("x1", Ty::I64),
+                ("y1", Ty::I64),
+                ("z1", Ty::I64),
+                ("x2", Ty::I64),
+                ("y2", Ty::I64),
+                ("z2", Ty::I64),
+                ("step", Ty::I64),
+                ("start", Ty::I64),
+            ],
+            false,
+        );
+        s.add_builtin(
+            "GrFillPoly3",
+            Ty::I64,
+            vec![
+                ("dc", cdc_ptr.clone()),
+                ("n", Ty::I64),
+                (
+                    "poly",
+                    Ty::Ptr(Box::new(Ty::Class {
+                        name: "CD3I32".into(),
+                        size: 12,
+                    })),
+                ),
+            ],
+            false,
+        );
+        s.add_builtin(
+            "GrBlot",
+            Ty::I64,
+            vec![
+                ("dc", cdc_ptr.clone()),
+                ("x", Ty::I64),
+                ("y", Ty::I64),
+                ("image", cdc_ptr.clone()),
+            ],
+            false,
+        );
+        s.add_builtin(
+            "GrPrint",
+            Ty::I64,
+            vec![
+                ("dc", cdc_ptr.clone()),
+                ("x", Ty::I64),
+                ("y", Ty::I64),
+                ("fmt", u8_ptr.clone()),
+            ],
+            true,
+        );
+        s.add_builtin(
+            "Sprite3",
+            Ty::U0,
+            vec![
+                ("dc", cdc_ptr.clone()),
+                ("x", Ty::I64),
+                ("y", Ty::I64),
+                ("z", Ty::I64),
+                ("elems", u8_ptr.clone()),
+                ("just_one_elem", Ty::I64),
+            ],
+            false,
+        );
+        s.add_builtin(
+            "Sprite3B",
+            Ty::U0,
+            vec![
+                ("dc", cdc_ptr.clone()),
+                ("x", Ty::I64),
+                ("y", Ty::I64),
+                ("z", Ty::I64),
+                ("elems", u8_ptr.clone()),
+            ],
+            false,
+        );
+        s.add_builtin(
+            "SpriteInterpolate",
+            u8_ptr.clone(),
+            vec![("t", Ty::F64), ("a", u8_ptr.clone()), ("b", u8_ptr.clone())],
+            false,
+        );
+        s.add_builtin(
+            "SpriteTransform",
+            u8_ptr.clone(),
+            vec![("elems", u8_ptr), ("r", i64_ptr.clone())],
+            false,
+        );
+        s.add_builtin(
+            "Tri",
+            Ty::F64,
+            vec![("t", Ty::F64), ("period", Ty::F64)],
+            false,
+        );
+        s.add_builtin(
+            "Saw",
+            Ty::F64,
+            vec![("t", Ty::F64), ("period", Ty::F64)],
+            false,
+        );
         // Minimal CTask / CCPU so `Fs->pix_width` type-checks. Offsets match tos-abi.
         s.classes.insert(
             "CTask".into(),
             ClassInfo {
                 name: "CTask".into(),
-                size: 32,
+                size: 56,
                 union_: false,
                 members: vec![
                     MemberInfo {
                         name: "addr".into(),
                         ty: Ty::Ptr(Box::new(Ty::Class {
                             name: "CTask".into(),
-                            size: 32,
+                            size: 56,
                         })),
                         offset: 0,
                         size: 8,
@@ -207,6 +576,24 @@ impl Sema {
                         offset: 24,
                         size: 8,
                     },
+                    MemberInfo {
+                        name: "task_end_cb".into(),
+                        ty: Ty::Ptr(Box::new(Ty::U8)),
+                        offset: 32,
+                        size: 8,
+                    },
+                    MemberInfo {
+                        name: "song_task".into(),
+                        ty: task_ptr.clone(),
+                        offset: 40,
+                        size: 8,
+                    },
+                    MemberInfo {
+                        name: "animate_task".into(),
+                        ty: task_ptr.clone(),
+                        offset: 48,
+                        size: 8,
+                    },
                 ],
             },
         );
@@ -214,14 +601,22 @@ impl Sema {
             "CCPU".into(),
             ClassInfo {
                 name: "CCPU".into(),
-                size: 8,
+                size: 16,
                 union_: false,
-                members: vec![MemberInfo {
-                    name: "num".into(),
-                    ty: Ty::I64,
-                    offset: 0,
-                    size: 8,
-                }],
+                members: vec![
+                    MemberInfo {
+                        name: "num".into(),
+                        ty: Ty::I64,
+                        offset: 0,
+                        size: 8,
+                    },
+                    MemberInfo {
+                        name: "idle_factor".into(),
+                        ty: Ty::F64,
+                        offset: 8,
+                        size: 8,
+                    },
+                ],
             },
         );
         s.classes.insert(
@@ -284,16 +679,73 @@ impl Sema {
                 ],
             ),
         );
+        s.classes.insert(
+            "CWinMgrGlbls".into(),
+            packed_class(
+                "CWinMgrGlbls",
+                vec![
+                    ("updates", Ty::I64),
+                    ("ode_time", Ty::F64),
+                    ("last_ode_time", Ty::F64),
+                    ("fps", Ty::F64),
+                    ("ideal_refresh_tS", Ty::F64),
+                    ("last_refresh_tS", Ty::F64),
+                    ("t", Ty::Ptr(Box::new(Ty::U8))),
+                    ("show_menu", Ty::I64),
+                    ("grab_scroll", Ty::I64),
+                    ("grab_scroll_closed", Ty::I64),
+                ],
+            ),
+        );
+        s.classes.insert(
+            "CMusicGlbls".into(),
+            packed_class(
+                "CMusicGlbls",
+                vec![
+                    ("cur_song", Ty::Ptr(Box::new(Ty::U8))),
+                    ("cur_song_task", task_ptr.clone()),
+                    ("octave", Ty::I64),
+                    ("note_len", Ty::F64),
+                    ("note_map", Ty::Array(Box::new(Ty::U8), Some(7))),
+                    ("mute", Ty::I64),
+                    ("meter_top", Ty::I64),
+                    ("meter_bottom", Ty::I64),
+                    ("tempo", Ty::F64),
+                    ("stacatto_factor", Ty::F64),
+                    ("play_note_num", Ty::I64),
+                    ("tM_correction", Ty::F64),
+                    ("last_Beat", Ty::F64),
+                    ("last_tM", Ty::F64),
+                ],
+            ),
+        );
+        s.globals.insert(
+            "winmgr".into(),
+            Ty::Class {
+                name: "CWinMgrGlbls".into(),
+                size: 80,
+            },
+        );
+        s.globals.insert(
+            "music".into(),
+            Ty::Class {
+                name: "CMusicGlbls".into(),
+                size: 111,
+            },
+        );
+        // Talons declares this persisted setting through RegDft source text.
+        // Model it as a normal JIT global until the host registry is persistent.
+        s.globals.insert("best_score".into(), Ty::F64);
         if let Some(f) = s.functions.get_mut("Fs") {
             f.ret = Ty::Ptr(Box::new(Ty::Class {
                 name: "CTask".into(),
-                size: 32,
+                size: 56,
             }));
         }
         if let Some(f) = s.functions.get_mut("Gs") {
             f.ret = Ty::Ptr(Box::new(Ty::Class {
                 name: "CCPU".into(),
-                size: 8,
+                size: 16,
             }));
         }
         s
@@ -398,7 +850,11 @@ impl Sema {
                 self.rewrite_stmt(body);
             }
             Stmt::For {
-                init, cond, inc, body, ..
+                init,
+                cond,
+                inc,
+                body,
+                ..
             } => {
                 if let Some(i) = init {
                     self.rewrite_stmt(i);
@@ -420,6 +876,16 @@ impl Sema {
                 self.rewrite_expr(expr);
                 self.rewrite_stmt(body);
             }
+            Stmt::Case {
+                value, range_end, ..
+            } => {
+                if let Some(value) = value {
+                    self.rewrite_expr(value);
+                }
+                if let Some(range_end) = range_end {
+                    self.rewrite_expr(range_end);
+                }
+            }
             Stmt::Start { body, .. } => {
                 for s in body {
                     self.rewrite_stmt(s);
@@ -440,10 +906,23 @@ impl Sema {
     }
 
     fn rewrite_expr(&mut self, expr: &mut Expr) {
+        if let ExprKind::Field { base, name, .. } = &expr.kind
+            && name == "jiffies"
+            && matches!(&base.kind, ExprKind::Ident(base_name) if base_name == "cnts")
+        {
+            expr.kind = ExprKind::Call {
+                callee: Box::new(Expr {
+                    span: expr.span,
+                    kind: ExprKind::Ident("Jiffies".into()),
+                }),
+                args: vec![],
+            };
+            return;
+        }
         match &mut expr.kind {
-            ExprKind::Unary { expr, .. }
-            | ExprKind::Deref(expr)
-            | ExprKind::Cast { expr, .. } => self.rewrite_expr(expr),
+            ExprKind::Unary { expr, .. } | ExprKind::Deref(expr) | ExprKind::Cast { expr, .. } => {
+                self.rewrite_expr(expr)
+            }
             ExprKind::Addr(inner) => {
                 if !matches!(&inner.kind, ExprKind::Ident(n) if self.functions.contains_key(n)) {
                     self.rewrite_expr(inner);
@@ -489,6 +968,10 @@ impl Sema {
                     expr.kind = ExprKind::Int(1);
                 } else if name == "FALSE" || name == "OFF" || name == "false" || name == "NULL" {
                     expr.kind = ExprKind::Int(0);
+                } else if name == "F64_MAX" {
+                    expr.kind = ExprKind::Float(f64::MAX);
+                } else if let Some(value) = builtin_integer_constant(name) {
+                    expr.kind = ExprKind::Int(value);
                 } else if let Some(f) = self.functions.get(name) {
                     // `tS` / `Dir` — no-arg (or all-default) call without `()`.
                     if f.params.is_empty() {
@@ -510,7 +993,51 @@ impl Sema {
     }
 }
 
-fn collect_globals(stmt: &Stmt, classes: &HashMap<String, ClassInfo>, out: &mut HashMap<String, Ty>) {
+fn builtin_integer_constant(name: &str) -> Option<i64> {
+    Some(match name {
+        "BLACK" => 0,
+        "BLUE" => 1,
+        "GREEN" => 2,
+        "CYAN" => 3,
+        "RED" => 4,
+        "PURPLE" => 5,
+        "BROWN" => 6,
+        "LTGRAY" => 7,
+        "DKGRAY" => 8,
+        "LTBLUE" => 9,
+        "LTGREEN" => 10,
+        "LTCYAN" => 11,
+        "LTRED" => 12,
+        "LTPURPLE" => 13,
+        "YELLOW" => 14,
+        "WHITE" => 15,
+        "TRANSPARENT" => 0xff,
+        "ROPF_DITHER" => 0x4000_0000,
+        "DCF_NO_TRANSPARENTS" => 4,
+        "DCF_TRANSFORMATION" => 0x100,
+        "DCF_SYMMETRY" => 0x200,
+        "SC_CURSOR_UP" => 0x48,
+        "SC_CURSOR_DOWN" => 0x50,
+        "SC_CURSOR_LEFT" => 0x4b,
+        "SC_CURSOR_RIGHT" => 0x4d,
+        "CH_ESC" => 0x1b,
+        "CH_SHIFT_ESC" => 0x1c,
+        "FONT_WIDTH" | "FONT_HEIGHT" => 8,
+        "GR_WIDTH" => 640,
+        "GR_HEIGHT" => 480,
+        "JIFFY_FREQ" => 1000,
+        "MP_PROCESSORS_NUM" => 128,
+        "U16_MAX" => 0xffff,
+        "I64_MAX" => i64::MAX,
+        _ => return None,
+    })
+}
+
+fn collect_globals(
+    stmt: &Stmt,
+    classes: &HashMap<String, ClassInfo>,
+    out: &mut HashMap<String, Ty>,
+) {
     match stmt {
         Stmt::Decl(var) => {
             out.insert(var.name.clone(), resolve_ty(&var.ty, classes));

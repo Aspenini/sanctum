@@ -290,6 +290,8 @@ dependencies = [
  "holyc-sema",
  "holyc-syntax",
  "thiserror",
+ "tos-gr",
+ "tos-host",
  "tos-runtime",
 ]
 
@@ -565,7 +567,6 @@ name = "tos-gr"
 version = "0.1.0"
 dependencies = [
  "tos-abi",
- "tos-runtime",
 ]
 
 [[package]]
@@ -573,6 +574,7 @@ name = "tos-host"
 version = "0.1.0"
 dependencies = [
  "tos-abi",
+ "tos-gr",
  "tos-runtime",
 ]
 

@@ -7,4 +7,3 @@ description = "TempleOS 16-color graphics and sprites"
 
 [dependencies]
 tos-abi = { path = "../tos-abi" }
-tos-runtime = { path = "../tos-runtime" }

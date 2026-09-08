@@ -20,10 +20,20 @@ against a Rust runtime (`Print`, heaps, …).
 preprocessor (`#include` `#define` `#if`), parser (functions, control flow,
 initializers, multi-declarations, chained compares, TempleOS precedence), packed
 `class`/`union` layout, globals and field/index access, Cranelift JIT `--run`, and
-core runtime primitives (`Print`, heaps, queues, bits, time/random, `Fs`/`Gs`).
+mixed integer/`F64` arithmetic, indirect callbacks, switch/loop control flow,
+fixed-point matrix/vector math, task records and deterministic single-core
+`Spawn`, and core runtime primitives (`Print`, heaps, queues, bits, time/random,
+`Fs`/`Gs`). `tos-gr` now provides indexed-color device contexts, depth buffers,
+line/polygon rasterization, blits, and the sprite-facing ABI.
 
-**Next:** matrix/math runtime APIs, 16-color `CDC`/`Gr*` in `tos-gr`, DolDoc
-sprite bins, then end-to-end `TempleOS/Demo/Games/Talons.HC` bring-up.
+`TempleOS/Demo/Games/Talons.HC` now compiles end-to-end and passes a JIT smoke
+run through terrain initialization, its real `DrawIt` callback, a non-empty
+640×480 rendered frame, and cleanup. Without `--run`, `hcc` performs a
+compile-only validation.
+
+**Next:** decode DolDoc sprite-bin payloads, present the 16-color framebuffer in
+a host window, feed live keyboard input, and schedule animation/music tasks so
+Talons is interactively playable rather than a deterministic smoke run.
 
 TempleOS HolyC stays source-compatible (no `F32`/`auto`). Keep a local
 `TempleOS/` tree as the language/API spec if you have one; it is gitignored and

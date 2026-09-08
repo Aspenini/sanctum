@@ -1,19 +1,19 @@
 //! Cranelift JIT (and later object) backend.
 
-use cranelift_codegen::ir::condcodes::IntCC;
+use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
 use cranelift_codegen::ir::immediates::Ieee64;
 use cranelift_codegen::ir::{
-    types, AbiParam, InstBuilder, MemFlagsData, Signature, StackSlot, StackSlotData, StackSlotKind,
-    Type, Value,
+    AbiParam, Block, InstBuilder, MemFlagsData, Signature, StackSlot, StackSlotData, StackSlotKind,
+    Type, Value, types,
 };
 use cranelift_codegen::settings::{self, Configurable};
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{
-    default_libcall_names, DataDescription, DataId, FuncId, Linkage, Module as _,
+    DataDescription, DataId, FuncId, Linkage, Module as _, default_libcall_names,
 };
 use holyc_ast::*;
-use holyc_sema::{resolve_ty, FunctionInfo, Sema};
+use holyc_sema::{FunctionInfo, Sema, resolve_ty};
 use std::collections::HashMap;
 use std::mem;
 use thiserror::Error;
@@ -61,8 +61,7 @@ pub fn compile_jit(
     flag_builder
         .set("is_pic", "false")
         .map_err(|e| CodegenError::Msg(e.to_string()))?;
-    let isa_builder = cranelift_native::builder()
-        .map_err(|e| CodegenError::Msg(e.to_string()))?;
+    let isa_builder = cranelift_native::builder().map_err(|e| CodegenError::Msg(e.to_string()))?;
     let isa = isa_builder
         .finish(settings::Flags::new(flag_builder))
         .map_err(|e| CodegenError::Msg(e.to_string()))?;
@@ -104,7 +103,11 @@ pub fn compile_jit(
     for (index, (name, ty)) in sema.globals.iter().enumerate() {
         let id = module.declare_data(&format!("global{index}"), Linkage::Local, true, false)?;
         let mut desc = DataDescription::new();
-        desc.define_zeroinit(ty.size().max(1) as usize);
+        if name == "best_score" && matches!(ty, Ty::F64) {
+            desc.define(9999.0_f64.to_le_bytes().to_vec().into_boxed_slice());
+        } else {
+            desc.define_zeroinit(ty.size().max(1) as usize);
+        }
         module.define_data(id, &desc)?;
         globals.insert(name.clone(), (id, ty.clone()));
     }
@@ -137,6 +140,7 @@ pub fn compile_jit(
                     vars: HashMap::new(),
                     globals: &globals,
                     module_scope: false,
+                    break_targets: Vec::new(),
                     sema,
                 };
                 for (i, (pname, ty)) in info.params.iter().enumerate() {
@@ -154,7 +158,7 @@ pub fn compile_jit(
         let id = func_ids[&f.name];
         module
             .define_function(id, &mut ctx)
-            .map_err(|e| CodegenError::Cranelift(e.to_string()))?;
+            .map_err(|e| CodegenError::Cranelift(format!("{e:?}")))?;
         module.clear_context(&mut ctx);
     }
 
@@ -178,6 +182,7 @@ pub fn compile_jit(
                 vars: HashMap::new(),
                 globals: &globals,
                 module_scope: true,
+                break_targets: Vec::new(),
                 sema,
             };
             for item in &ast.items {
@@ -190,7 +195,9 @@ pub fn compile_jit(
         }
         bcx.finalize(module.target_config());
     }
-    module.define_function(main_id, &mut ctx)?;
+    module
+        .define_function(main_id, &mut ctx)
+        .map_err(|e| CodegenError::Cranelift(format!("{e:?}")))?;
     module.clear_context(&mut ctx);
 
     Ok(JitProgram { module, main_id })
@@ -200,6 +207,17 @@ fn make_sig(module: &mut JITModule, info: &FunctionInfo, ptr_ty: Type) -> Signat
     let mut sig = module.make_signature();
     if info.name == "Print" {
         // fmt*, argc, argv*
+        sig.params.push(AbiParam::new(ptr_ty));
+        sig.params.push(AbiParam::new(types::I64));
+        sig.params.push(AbiParam::new(ptr_ty));
+        sig.returns.push(AbiParam::new(types::I64));
+        return sig;
+    }
+    if info.name == "GrPrint" {
+        // dc*, x, y, fmt*, argc, argv*
+        sig.params.push(AbiParam::new(ptr_ty));
+        sig.params.push(AbiParam::new(types::I64));
+        sig.params.push(AbiParam::new(types::I64));
         sig.params.push(AbiParam::new(ptr_ty));
         sig.params.push(AbiParam::new(types::I64));
         sig.params.push(AbiParam::new(ptr_ty));
@@ -234,6 +252,27 @@ fn mem_clif(ty: &Ty) -> Type {
     }
 }
 
+fn scalar_lane_view(ty: &Ty, name: &str) -> Option<Ty> {
+    if !ty.is_int() {
+        return None;
+    }
+    let elem = match name {
+        "i8" => Ty::I8,
+        "u8" => Ty::U8,
+        "i16" => Ty::I16,
+        "u16" => Ty::U16,
+        "i32" => Ty::I32,
+        "u32" => Ty::U32,
+        "i64" => Ty::I64,
+        "u64" => Ty::U64,
+        _ => return None,
+    };
+    Some(Ty::Array(
+        Box::new(elem.clone()),
+        Some(ty.size().max(8) / elem.size()),
+    ))
+}
+
 struct FnCg<'a, 'b> {
     module: &'a mut JITModule,
     bcx: &'a mut FunctionBuilder<'b>,
@@ -244,6 +283,7 @@ struct FnCg<'a, 'b> {
     vars: HashMap<String, (LocalStorage, Ty)>,
     globals: &'a HashMap<String, (DataId, Ty)>,
     module_scope: bool,
+    break_targets: Vec<Block>,
     sema: &'a Sema,
 }
 
@@ -251,6 +291,17 @@ struct FnCg<'a, 'b> {
 enum LocalStorage {
     Value(Variable),
     Stack(StackSlot),
+}
+
+fn flatten_switch_body<'a>(stmt: &'a Stmt, out: &mut Vec<&'a Stmt>) {
+    match stmt {
+        Stmt::Block { stmts, .. } | Stmt::Start { body: stmts, .. } => {
+            for stmt in stmts {
+                flatten_switch_body(stmt, out);
+            }
+        }
+        stmt => out.push(stmt),
+    }
 }
 
 impl FnCg<'_, '_> {
@@ -287,6 +338,9 @@ impl FnCg<'_, '_> {
                 .or_else(|| self.sema.functions.get(n).map(|f| f.ret.clone())),
             ExprKind::Field { base, name, .. } => {
                 let bt = self.expr_ty(base)?;
+                if let Some(view) = scalar_lane_view(&bt, name) {
+                    return Some(view);
+                }
                 let cname = bt.class_name()?;
                 self.sema
                     .classes
@@ -306,7 +360,58 @@ impl FnCg<'_, '_> {
             ExprKind::Int(_) | ExprKind::Char(_) => Some(Ty::I64),
             ExprKind::Float(_) => Some(Ty::F64),
             ExprKind::Str(_) => Some(Ty::Ptr(Box::new(Ty::U8))),
+            ExprKind::Unary { expr, .. } => self.expr_ty(expr),
+            ExprKind::Binary { op, lhs, rhs } => {
+                if op.is_assign() {
+                    self.expr_ty(lhs)
+                } else if op.is_cmp() || matches!(op, BinOp::And | BinOp::Or | BinOp::XorBool) {
+                    Some(Ty::I64)
+                } else if matches!(op, BinOp::Add | BinOp::Sub)
+                    && matches!(self.expr_ty(lhs), Some(Ty::Ptr(_)))
+                {
+                    self.expr_ty(lhs)
+                } else if op == &BinOp::Add && matches!(self.expr_ty(rhs), Some(Ty::Ptr(_))) {
+                    self.expr_ty(rhs)
+                } else if self.expr_ty(lhs)?.is_float() || self.expr_ty(rhs)?.is_float() {
+                    Some(Ty::F64)
+                } else {
+                    Some(Ty::I64)
+                }
+            }
+            ExprKind::ChainCmp { .. } => Some(Ty::I64),
+            ExprKind::Sequence(exprs) => exprs.last().and_then(|expr| self.expr_ty(expr)),
+            ExprKind::Cast { ty, .. } => Some(resolve_ty(ty, &self.sema.classes)),
             _ => None,
+        }
+    }
+
+    fn value_ty(&self, value: Value) -> Type {
+        self.bcx.func.dfg.value_type(value)
+    }
+
+    fn coerce_to(&mut self, value: Value, target: Type) -> Value {
+        let source = self.value_ty(value);
+        if source == target {
+            value
+        } else if target == types::F64 {
+            self.bcx.ins().fcvt_from_sint(types::F64, value)
+        } else if source == types::F64 {
+            self.bcx.ins().fcvt_to_sint_sat(target, value)
+        } else {
+            value
+        }
+    }
+
+    fn promote_numeric(&mut self, lhs: Value, rhs: Value) -> (Value, Value, bool) {
+        let float = self.value_ty(lhs) == types::F64 || self.value_ty(rhs) == types::F64;
+        if float {
+            (
+                self.coerce_to(lhs, types::F64),
+                self.coerce_to(rhs, types::F64),
+                true,
+            )
+        } else {
+            (lhs, rhs, false)
         }
     }
 
@@ -317,6 +422,10 @@ impl FnCg<'_, '_> {
         let bt = self
             .expr_ty(base)
             .ok_or_else(|| CodegenError::Msg(format!("cannot type field base for `{name}`")))?;
+        if let Some(view) = scalar_lane_view(&bt, name) {
+            let (ptr, _, off) = self.place(base)?;
+            return Ok((ptr, view, off));
+        }
         let cname = bt
             .class_name()
             .ok_or_else(|| CodegenError::Msg(format!("`{name}` on non-class")))?
@@ -345,7 +454,7 @@ impl FnCg<'_, '_> {
                         LocalStorage::Value(_) => {
                             return Err(CodegenError::Msg(format!(
                                 "local `{name}` is not addressable"
-                            )))
+                            )));
                         }
                     };
                     return Ok((ptr, ty, 0));
@@ -361,14 +470,24 @@ impl FnCg<'_, '_> {
             ExprKind::Deref(inner) => {
                 let ty = match self.expr_ty(inner) {
                     Some(Ty::Ptr(ty)) => *ty,
-                    _ => return Err(CodegenError::Msg("cannot dereference non-pointer".into())),
+                    other => {
+                        return Err(CodegenError::Msg(format!(
+                            "cannot dereference non-pointer expression {:?} (type {other:?})",
+                            inner.kind
+                        )));
+                    }
                 };
                 Ok((self.expr(inner)?, ty, 0))
             }
             ExprKind::Index { base, index } => {
                 let elem = match self.expr_ty(base) {
                     Some(Ty::Array(elem, _)) | Some(Ty::Ptr(elem)) => *elem,
-                    _ => return Err(CodegenError::Msg("cannot index non-array value".into())),
+                    other => {
+                        return Err(CodegenError::Msg(format!(
+                            "cannot index expression {:?} with type {other:?}",
+                            base.kind
+                        )));
+                    }
                 };
                 let base_ptr = self.expr(base)?;
                 let index = self.expr(index)?;
@@ -376,7 +495,9 @@ impl FnCg<'_, '_> {
                 let ptr = self.bcx.ins().iadd(base_ptr, byte_offset);
                 Ok((ptr, elem, 0))
             }
-            _ => Err(CodegenError::Msg("expression is not an addressable place".into())),
+            _ => Err(CodegenError::Msg(
+                "expression is not an addressable place".into(),
+            )),
         }
     }
 
@@ -420,9 +541,8 @@ impl FnCg<'_, '_> {
                     let offset = elem.size().checked_mul(index as i64).ok_or_else(|| {
                         CodegenError::Msg("array initializer offset overflow".into())
                     })?;
-                    let offset = i32::try_from(offset).map_err(|_| {
-                        CodegenError::Msg("array initializer is too large".into())
-                    })?;
+                    let offset = i32::try_from(offset)
+                        .map_err(|_| CodegenError::Msg("array initializer is too large".into()))?;
                     let item_dst = self.place_addr(dst, offset);
                     self.initialize(item_dst, elem, value)?;
                 }
@@ -463,10 +583,7 @@ impl FnCg<'_, '_> {
 
     fn load_mem(&mut self, ptr: Value, off: i32, ty: &Ty) -> Result<Value, CodegenError> {
         let mt = mem_clif(ty);
-        let v = self
-            .bcx
-            .ins()
-            .load(mt, MemFlagsData::trusted(), ptr, off);
+        let v = self.bcx.ins().load(mt, MemFlagsData::trusted(), ptr, off);
         if mt == types::I64 || mt == types::F64 {
             Ok(v)
         } else if ty.is_unsigned() {
@@ -478,6 +595,11 @@ impl FnCg<'_, '_> {
 
     fn store_mem(&mut self, ptr: Value, off: i32, ty: &Ty, val: Value) -> Result<(), CodegenError> {
         let mt = mem_clif(ty);
+        let val = if mt == types::F64 || self.value_ty(val) == types::F64 {
+            self.coerce_to(val, mt)
+        } else {
+            val
+        };
         let v = if mt == types::I64 || mt == types::F64 {
             val
         } else {
@@ -614,7 +736,9 @@ impl FnCg<'_, '_> {
                 let c = self.truthy(cv)?;
                 self.bcx.ins().brif(c, body_b, &[], exit, &[]);
                 self.bcx.switch_to_block(body_b);
+                self.break_targets.push(exit);
                 self.stmt(body)?;
+                self.break_targets.pop();
                 if !self.bcx.is_unreachable() {
                     self.bcx.ins().jump(header, &[]);
                 }
@@ -624,8 +748,37 @@ impl FnCg<'_, '_> {
                 self.bcx.seal_block(exit);
                 Ok(())
             }
+            Stmt::DoWhile { body, cond, .. } => {
+                let body_block = self.bcx.create_block();
+                let condition_block = self.bcx.create_block();
+                let exit = self.bcx.create_block();
+                self.bcx.ins().jump(body_block, &[]);
+
+                self.bcx.switch_to_block(body_block);
+                self.break_targets.push(exit);
+                self.stmt(body)?;
+                self.break_targets.pop();
+                if !self.bcx.is_unreachable() {
+                    self.bcx.ins().jump(condition_block, &[]);
+                }
+
+                self.bcx.switch_to_block(condition_block);
+                self.bcx.seal_block(condition_block);
+                let condition = self.expr(cond)?;
+                let condition = self.truthy(condition)?;
+                self.bcx.ins().brif(condition, body_block, &[], exit, &[]);
+                self.bcx.seal_block(body_block);
+
+                self.bcx.switch_to_block(exit);
+                self.bcx.seal_block(exit);
+                Ok(())
+            }
             Stmt::For {
-                init, cond, inc, body, ..
+                init,
+                cond,
+                inc,
+                body,
+                ..
             } => {
                 if let Some(i) = init {
                     self.stmt(i)?;
@@ -643,7 +796,9 @@ impl FnCg<'_, '_> {
                 };
                 self.bcx.ins().brif(c, body_b, &[], exit, &[]);
                 self.bcx.switch_to_block(body_b);
+                self.break_targets.push(exit);
                 self.stmt(body)?;
+                self.break_targets.pop();
                 if let Some(i) = inc {
                     let _ = self.expr(i)?;
                 }
@@ -656,10 +811,92 @@ impl FnCg<'_, '_> {
                 self.bcx.seal_block(exit);
                 Ok(())
             }
+            Stmt::Switch { expr, body, .. } => {
+                let switch_value = self.expr(expr)?;
+                let exit = self.bcx.create_block();
+                let mut flat = Vec::new();
+                flatten_switch_body(body, &mut flat);
+                let case_positions: Vec<usize> = flat
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, stmt)| matches!(stmt, Stmt::Case { .. }).then_some(index))
+                    .collect();
+                if case_positions.is_empty() {
+                    self.bcx.ins().jump(exit, &[]);
+                    self.bcx.switch_to_block(exit);
+                    self.bcx.seal_block(exit);
+                    return Ok(());
+                }
+                let case_blocks: Vec<Block> = case_positions
+                    .iter()
+                    .map(|_| self.bcx.create_block())
+                    .collect();
+                let default = case_positions.iter().enumerate().find_map(|(i, pos)| {
+                    matches!(flat[*pos], Stmt::Case { value: None, .. }).then_some(case_blocks[i])
+                });
+
+                for (case_index, pos) in case_positions.iter().enumerate() {
+                    let Stmt::Case {
+                        value, range_end, ..
+                    } = flat[*pos]
+                    else {
+                        unreachable!()
+                    };
+                    let Some(value) = value else { continue };
+                    let low = self.expr(value)?;
+                    let low = self.coerce_to(low, self.value_ty(switch_value));
+                    let condition = if let Some(end) = range_end {
+                        let high = self.expr(end)?;
+                        let high = self.coerce_to(high, self.value_ty(switch_value));
+                        let ge =
+                            self.bcx
+                                .ins()
+                                .icmp(IntCC::SignedGreaterThanOrEqual, switch_value, low);
+                        let le =
+                            self.bcx
+                                .ins()
+                                .icmp(IntCC::SignedLessThanOrEqual, switch_value, high);
+                        self.bcx.ins().band(ge, le)
+                    } else {
+                        self.bcx.ins().icmp(IntCC::Equal, switch_value, low)
+                    };
+                    let next_test = self.bcx.create_block();
+                    self.bcx
+                        .ins()
+                        .brif(condition, case_blocks[case_index], &[], next_test, &[]);
+                    self.bcx.switch_to_block(next_test);
+                    self.bcx.seal_block(next_test);
+                }
+                self.bcx.ins().jump(default.unwrap_or(exit), &[]);
+
+                self.break_targets.push(exit);
+                for (case_index, pos) in case_positions.iter().enumerate() {
+                    self.bcx.switch_to_block(case_blocks[case_index]);
+                    let end = case_positions
+                        .get(case_index + 1)
+                        .copied()
+                        .unwrap_or(flat.len());
+                    for stmt in &flat[pos + 1..end] {
+                        self.stmt(stmt)?;
+                    }
+                    if !self.bcx.is_unreachable() {
+                        let next = case_blocks.get(case_index + 1).copied().unwrap_or(exit);
+                        self.bcx.ins().jump(next, &[]);
+                    }
+                }
+                self.break_targets.pop();
+                for block in case_blocks {
+                    self.bcx.seal_block(block);
+                }
+                self.bcx.switch_to_block(exit);
+                self.bcx.seal_block(exit);
+                Ok(())
+            }
             Stmt::Return { expr, .. } => {
                 match (expr, self.ret_ty) {
                     (Some(e), Some(_)) => {
                         let v = self.expr(e)?;
+                        let v = self.coerce_to(v, self.ret_ty.unwrap());
                         self.bcx.ins().return_(&[v]);
                     }
                     (Some(e), None) => {
@@ -678,7 +915,24 @@ impl FnCg<'_, '_> {
                 self.bcx.switch_to_block(dead);
                 Ok(())
             }
-            Stmt::Break { .. } => Err(CodegenError::Msg("break not yet bound to a loop".into())),
+            Stmt::Break { .. } => {
+                let target = self.break_targets.last().copied().ok_or_else(|| {
+                    CodegenError::Msg("break used outside a loop or switch".into())
+                })?;
+                self.bcx.ins().jump(target, &[]);
+                let dead = self.bcx.create_block();
+                self.bcx.switch_to_block(dead);
+                Ok(())
+            }
+            Stmt::Start { body, .. } => {
+                for stmt in body {
+                    if !matches!(stmt, Stmt::Case { .. }) {
+                        self.stmt(stmt)?;
+                    }
+                }
+                Ok(())
+            }
+            Stmt::Try { body, .. } => self.stmt(body),
             other => Err(CodegenError::Msg(format!(
                 "statement not implemented: {other:?}"
             ))),
@@ -686,7 +940,12 @@ impl FnCg<'_, '_> {
     }
 
     fn truthy(&mut self, v: Value) -> Result<Value, CodegenError> {
-        Ok(self.bcx.ins().icmp_imm_s(IntCC::NotEqual, v, 0))
+        if self.value_ty(v) == types::F64 {
+            let zero = self.bcx.ins().f64const(Ieee64::with_float(0.0));
+            Ok(self.bcx.ins().fcmp(FloatCC::NotEqual, v, zero))
+        } else {
+            Ok(self.bcx.ins().icmp_imm_s(IntCC::NotEqual, v, 0))
+        }
     }
 
     fn zero(&mut self, ty: Type) -> Value {
@@ -704,7 +963,9 @@ impl FnCg<'_, '_> {
             let mut bytes = s.as_bytes().to_vec();
             bytes.push(0);
             let name = format!("str{}", self.strings.len());
-            let id = self.module.declare_data(&name, Linkage::Local, false, false)?;
+            let id = self
+                .module
+                .declare_data(&name, Linkage::Local, false, false)?;
             let mut desc = DataDescription::new();
             desc.define(bytes.into_boxed_slice());
             self.module.define_data(id, &desc)?;
@@ -740,9 +1001,11 @@ impl FnCg<'_, '_> {
             ExprKind::Unary { op, expr, .. } => {
                 let v = self.expr(expr)?;
                 Ok(match op {
+                    UnOp::Neg if self.value_ty(v) == types::F64 => self.bcx.ins().fneg(v),
                     UnOp::Neg => self.bcx.ins().ineg(v),
                     UnOp::Not => {
-                        let z = self.bcx.ins().icmp_imm_s(IntCC::Equal, v, 0);
+                        let truth = self.truthy(v)?;
+                        let z = self.bcx.ins().icmp_imm_s(IntCC::Equal, truth, 0);
                         self.bcx.ins().uextend(types::I64, z)
                     }
                     UnOp::BitNot => self.bcx.ins().bnot(v),
@@ -776,6 +1039,13 @@ impl FnCg<'_, '_> {
             }
             ExprKind::Call { callee, args } => self.call(callee, args),
             ExprKind::Addr(inner) => {
+                if let ExprKind::Ident(name) = &inner.kind {
+                    if self.sema.functions.contains_key(name) {
+                        let id = self.func_ids[name];
+                        let f = self.module.declare_func_in_func(id, self.bcx.func);
+                        return Ok(self.bcx.ins().func_addr(self.ptr_ty, f));
+                    }
+                }
                 let (ptr, _, off) = self.place(inner)?;
                 Ok(self.place_addr(ptr, off))
             }
@@ -818,9 +1088,19 @@ impl FnCg<'_, '_> {
                 return Err(CodegenError::Msg("cannot increment aggregate value".into()));
             }
             let cur = self.load_mem(ptr, off, &ty)?;
-            let one = self.bcx.ins().iconst(types::I64, 1);
-            let nxt = match op {
-                UnOp::PreInc | UnOp::PostInc => self.bcx.ins().iadd(cur, one),
+            let one = if ty.is_float() {
+                self.bcx.ins().f64const(Ieee64::with_float(1.0))
+            } else {
+                let stride = match &ty {
+                    Ty::Ptr(elem) => elem.size().max(1),
+                    _ => 1,
+                };
+                self.bcx.ins().iconst(types::I64, stride)
+            };
+            let nxt = match (op, ty.is_float()) {
+                (UnOp::PreInc | UnOp::PostInc, true) => self.bcx.ins().fadd(cur, one),
+                (UnOp::PreDec | UnOp::PostDec, true) => self.bcx.ins().fsub(cur, one),
+                (UnOp::PreInc | UnOp::PostInc, false) => self.bcx.ins().iadd(cur, one),
                 _ => self.bcx.ins().isub(cur, one),
             };
             self.write_place(ptr, &ty, off, nxt)?;
@@ -829,12 +1109,24 @@ impl FnCg<'_, '_> {
                 _ => nxt,
             });
         }
-        Err(CodegenError::Msg(
-            "++/-- target is not addressable".into(),
-        ))
+        Err(CodegenError::Msg("++/-- target is not addressable".into()))
     }
 
     fn cmp(&mut self, op: BinOp, l: Value, r: Value) -> Result<Value, CodegenError> {
+        let (l, r, float) = self.promote_numeric(l, r);
+        if float {
+            let cc = match op {
+                BinOp::Eq => FloatCC::Equal,
+                BinOp::Ne => FloatCC::NotEqual,
+                BinOp::Lt => FloatCC::LessThan,
+                BinOp::Le => FloatCC::LessThanOrEqual,
+                BinOp::Gt => FloatCC::GreaterThan,
+                BinOp::Ge => FloatCC::GreaterThanOrEqual,
+                _ => return Err(CodegenError::Msg("not a comparison".into())),
+            };
+            let b = self.bcx.ins().fcmp(cc, l, r);
+            return Ok(self.bcx.ins().uextend(types::I64, b));
+        }
         let cc = match op {
             BinOp::Eq => IntCC::Equal,
             BinOp::Ne => IntCC::NotEqual,
@@ -852,8 +1144,60 @@ impl FnCg<'_, '_> {
         if op.is_assign() {
             return self.assign(op, lhs, rhs);
         }
+        if matches!(op, BinOp::And | BinOp::Or) {
+            return self.short_circuit(op, lhs, rhs);
+        }
+        let lhs_ty = self.expr_ty(lhs);
+        let rhs_ty = self.expr_ty(rhs);
         let l = self.expr(lhs)?;
         let r = self.expr(rhs)?;
+        if op.is_cmp() {
+            return self.cmp(op, l, r);
+        }
+        match (&lhs_ty, &rhs_ty, op) {
+            (Some(Ty::Ptr(elem)), Some(Ty::Ptr(_)), BinOp::Sub) => {
+                let bytes = self.bcx.ins().isub(l, r);
+                let stride = self.bcx.ins().iconst(types::I64, elem.size().max(1));
+                return Ok(self.bcx.ins().sdiv(bytes, stride));
+            }
+            (Some(Ty::Ptr(elem)), _, BinOp::Add | BinOp::Sub) => {
+                let scaled = self.bcx.ins().imul_imm_s(r, elem.size().max(1));
+                return Ok(if op == BinOp::Add {
+                    self.bcx.ins().iadd(l, scaled)
+                } else {
+                    self.bcx.ins().isub(l, scaled)
+                });
+            }
+            (_, Some(Ty::Ptr(elem)), BinOp::Add) => {
+                let scaled = self.bcx.ins().imul_imm_s(l, elem.size().max(1));
+                return Ok(self.bcx.ins().iadd(scaled, r));
+            }
+            _ => {}
+        }
+        let (l, r, float) = self.promote_numeric(l, r);
+        if float {
+            return Ok(match op {
+                BinOp::Add => self.bcx.ins().fadd(l, r),
+                BinOp::Sub => self.bcx.ins().fsub(l, r),
+                BinOp::Mul => self.bcx.ins().fmul(l, r),
+                BinOp::Div => self.bcx.ins().fdiv(l, r),
+                BinOp::And | BinOp::Or | BinOp::XorBool => {
+                    let a = self.truthy(l)?;
+                    let b = self.truthy(r)?;
+                    let value = match op {
+                        BinOp::And => self.bcx.ins().band(a, b),
+                        BinOp::Or => self.bcx.ins().bor(a, b),
+                        _ => self.bcx.ins().bxor(a, b),
+                    };
+                    self.bcx.ins().uextend(types::I64, value)
+                }
+                _ => {
+                    return Err(CodegenError::Msg(format!(
+                        "operator {op:?} is invalid for F64"
+                    )));
+                }
+            });
+        }
         Ok(match op {
             BinOp::Add => self.bcx.ins().iadd(l, r),
             BinOp::Sub => self.bcx.ins().isub(l, r),
@@ -894,9 +1238,38 @@ impl FnCg<'_, '_> {
                 let _ = rf;
                 self.bcx.ins().fmul(lf, lf)
             }
-            cmp if cmp.is_cmp() => return self.cmp(op, l, r),
             _ => return Err(CodegenError::Msg(format!("binop {op:?}"))),
         })
+    }
+
+    fn short_circuit(&mut self, op: BinOp, lhs: &Expr, rhs: &Expr) -> Result<Value, CodegenError> {
+        let lhs = self.expr(lhs)?;
+        let lhs = self.truthy(lhs)?;
+        let rhs_block = self.bcx.create_block();
+        let join = self.bcx.create_block();
+        self.bcx.append_block_param(join, types::I64);
+
+        let zero = self.bcx.ins().iconst(types::I64, 0);
+        let one = self.bcx.ins().iconst(types::I64, 1);
+        let zero_arg = [zero.into()];
+        let one_arg = [one.into()];
+        match op {
+            BinOp::And => self.bcx.ins().brif(lhs, rhs_block, &[], join, &zero_arg),
+            BinOp::Or => self.bcx.ins().brif(lhs, join, &one_arg, rhs_block, &[]),
+            _ => unreachable!(),
+        };
+
+        self.bcx.switch_to_block(rhs_block);
+        self.bcx.seal_block(rhs_block);
+        let rhs = self.expr(rhs)?;
+        let rhs = self.truthy(rhs)?;
+        let rhs = self.bcx.ins().uextend(types::I64, rhs);
+        let rhs_arg = [rhs.into()];
+        self.bcx.ins().jump(join, &rhs_arg);
+
+        self.bcx.switch_to_block(join);
+        self.bcx.seal_block(join);
+        Ok(self.bcx.block_params(join)[0])
     }
 
     fn assign(&mut self, op: BinOp, lhs: &Expr, rhs: &Expr) -> Result<Value, CodegenError> {
@@ -914,21 +1287,39 @@ impl FnCg<'_, '_> {
                     "compound assignment is invalid for aggregates".into(),
                 ));
             }
+            let r = if ty.is_aggregate() {
+                r
+            } else {
+                self.coerce_to(r, clif_ty(&ty, self.ptr_ty))
+            };
             let val = if op == BinOp::Assign {
                 r
             } else {
                 let cur = self.load_mem(ptr, off, &ty)?;
-                match op {
-                    BinOp::AddEq => self.bcx.ins().iadd(cur, r),
-                    BinOp::SubEq => self.bcx.ins().isub(cur, r),
-                    BinOp::MulEq => self.bcx.ins().imul(cur, r),
-                    BinOp::DivEq => self.bcx.ins().sdiv(cur, r),
-                    BinOp::ModEq => self.bcx.ins().srem(cur, r),
-                    BinOp::AndEq => self.bcx.ins().band(cur, r),
-                    BinOp::OrEq => self.bcx.ins().bor(cur, r),
-                    BinOp::XorEq => self.bcx.ins().bxor(cur, r),
-                    BinOp::ShlEq => self.bcx.ins().ishl(cur, r),
-                    BinOp::ShrEq => self.bcx.ins().sshr(cur, r),
+                let r = if matches!(op, BinOp::AddEq | BinOp::SubEq) {
+                    if let Ty::Ptr(elem) = &ty {
+                        self.bcx.ins().imul_imm_s(r, elem.size().max(1))
+                    } else {
+                        r
+                    }
+                } else {
+                    r
+                };
+                match (op, ty.is_float()) {
+                    (BinOp::AddEq, true) => self.bcx.ins().fadd(cur, r),
+                    (BinOp::SubEq, true) => self.bcx.ins().fsub(cur, r),
+                    (BinOp::MulEq, true) => self.bcx.ins().fmul(cur, r),
+                    (BinOp::DivEq, true) => self.bcx.ins().fdiv(cur, r),
+                    (BinOp::AddEq, false) => self.bcx.ins().iadd(cur, r),
+                    (BinOp::SubEq, false) => self.bcx.ins().isub(cur, r),
+                    (BinOp::MulEq, false) => self.bcx.ins().imul(cur, r),
+                    (BinOp::DivEq, false) => self.bcx.ins().sdiv(cur, r),
+                    (BinOp::ModEq, false) => self.bcx.ins().srem(cur, r),
+                    (BinOp::AndEq, false) => self.bcx.ins().band(cur, r),
+                    (BinOp::OrEq, false) => self.bcx.ins().bor(cur, r),
+                    (BinOp::XorEq, false) => self.bcx.ins().bxor(cur, r),
+                    (BinOp::ShlEq, false) => self.bcx.ins().ishl(cur, r),
+                    (BinOp::ShrEq, false) => self.bcx.ins().sshr(cur, r),
                     _ => r,
                 }
             };
@@ -942,23 +1333,78 @@ impl FnCg<'_, '_> {
 
     fn call(&mut self, callee: &Expr, args: &[Option<Expr>]) -> Result<Value, CodegenError> {
         let ExprKind::Ident(name) = &callee.kind else {
-            return Err(CodegenError::Msg("indirect calls later".into()));
+            let address = if let ExprKind::Deref(inner) = &callee.kind {
+                self.expr(inner)?
+            } else {
+                self.expr(callee)?
+            };
+            let mut values = Vec::new();
+            let mut signature = self.module.make_signature();
+            for arg in args {
+                let value = match arg {
+                    Some(expr) => self.expr(expr)?,
+                    None => self.bcx.ins().iconst(types::I64, 0),
+                };
+                signature.params.push(AbiParam::new(self.value_ty(value)));
+                values.push(value);
+            }
+            let signature = self.bcx.import_signature(signature);
+            self.bcx.ins().call_indirect(signature, address, &values);
+            return Ok(self.bcx.ins().iconst(types::I64, 0));
         };
         if name == "Print" {
             return self.call_print(args);
+        }
+        if name == "GrPrint" {
+            return self.call_gr_print(args);
         }
         let id = *self
             .func_ids
             .get(name)
             .ok_or_else(|| CodegenError::Msg(format!("unknown function `{name}`")))?;
+        let params = self
+            .sema
+            .functions
+            .get(name)
+            .map(|info| info.params.clone())
+            .unwrap_or_default();
         let local = self.module.declare_func_in_func(id, self.bcx.func);
         let mut vals = Vec::new();
-        for a in args {
+        for (index, a) in args.iter().enumerate() {
             if let Some(e) = a {
-                vals.push(self.expr(e)?);
+                let value = self.expr(e)?;
+                let value = params.get(index).map_or(value, |(_, ty)| {
+                    self.coerce_to(value, clif_ty(ty, self.ptr_ty))
+                });
+                vals.push(value);
             } else {
-                vals.push(self.bcx.ins().iconst(types::I64, 0));
+                let ty = params
+                    .get(index)
+                    .map(|(_, ty)| clif_ty(ty, self.ptr_ty))
+                    .unwrap_or(types::I64);
+                let value = match (name.as_str(), index) {
+                    ("Spawn", 3) => self.bcx.ins().iconst(types::I64, -1),
+                    ("Spawn", 6) => self.bcx.ins().iconst(types::I64, 1),
+                    ("Wrap", 1) => self
+                        .bcx
+                        .ins()
+                        .f64const(Ieee64::with_float(-std::f64::consts::PI)),
+                    _ => self.zero(ty),
+                };
+                vals.push(value);
             }
+        }
+        for (index, (_, ty)) in params.iter().enumerate().skip(args.len()) {
+            let value = match (name.as_str(), index) {
+                ("Spawn", 3) => self.bcx.ins().iconst(types::I64, -1),
+                ("Spawn", 6) => self.bcx.ins().iconst(types::I64, 1),
+                ("Wrap", 1) => self
+                    .bcx
+                    .ins()
+                    .f64const(Ieee64::with_float(-std::f64::consts::PI)),
+                _ => self.zero(clif_ty(ty, self.ptr_ty)),
+            };
+            vals.push(value);
         }
         let call = self.bcx.ins().call(local, &vals);
         let results = self.bcx.inst_results(call);
@@ -987,7 +1433,9 @@ impl FnCg<'_, '_> {
             ));
             for (i, e) in extra.iter().enumerate() {
                 let v = self.expr(e)?;
-                self.bcx.ins().stack_store(self.ptr_ty, v, slot, (i * 8) as i32);
+                self.bcx
+                    .ins()
+                    .stack_store(self.ptr_ty, v, slot, (i * 8) as i32);
             }
             self.bcx.ins().stack_addr(self.ptr_ty, slot, 0)
         };
@@ -995,6 +1443,46 @@ impl FnCg<'_, '_> {
         let id = self.func_ids["Print"];
         let local = self.module.declare_func_in_func(id, self.bcx.func);
         let call = self.bcx.ins().call(local, &[fmt, argc_v, argv]);
+        Ok(self.bcx.inst_results(call)[0])
+    }
+
+    fn call_gr_print(&mut self, args: &[Option<Expr>]) -> Result<Value, CodegenError> {
+        let params = self.sema.functions["GrPrint"].params.clone();
+        let mut fixed = Vec::new();
+        for index in 0..4 {
+            let ty = clif_ty(&params[index].1, self.ptr_ty);
+            let value = match args.get(index).and_then(|a| a.as_ref()) {
+                Some(expr) => {
+                    let raw = self.expr(expr)?;
+                    self.coerce_to(raw, ty)
+                }
+                None => self.zero(ty),
+            };
+            fixed.push(value);
+        }
+        let extra: Vec<&Expr> = args.iter().skip(4).filter_map(|a| a.as_ref()).collect();
+        let argc = extra.len() as i64;
+        let argv = if extra.is_empty() {
+            self.bcx.ins().iconst(self.ptr_ty, 0)
+        } else {
+            let slot = self.bcx.create_sized_stack_slot(StackSlotData::new(
+                StackSlotKind::ExplicitSlot,
+                (extra.len() * 8) as u32,
+                0,
+            ));
+            for (i, expr) in extra.iter().enumerate() {
+                let value = self.expr(expr)?;
+                self.bcx
+                    .ins()
+                    .stack_store(self.ptr_ty, value, slot, (i * 8) as i32);
+            }
+            self.bcx.ins().stack_addr(self.ptr_ty, slot, 0)
+        };
+        fixed.push(self.bcx.ins().iconst(types::I64, argc));
+        fixed.push(argv);
+        let id = self.func_ids["GrPrint"];
+        let local = self.module.declare_func_in_func(id, self.bcx.func);
+        let call = self.bcx.ins().call(local, &fixed);
         Ok(self.bcx.inst_results(call)[0])
     }
 }

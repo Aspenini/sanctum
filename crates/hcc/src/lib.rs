@@ -1,7 +1,7 @@
-use holyc_codegen::{compile_jit, CodegenError, JitProgram};
+use holyc_codegen::{CodegenError, JitProgram, compile_jit};
 use holyc_parse::Parser;
 use holyc_sema::Sema;
-use holyc_syntax::{lex_buffer, preprocess, PreprocessOpts, Session, SyntaxError};
+use holyc_syntax::{PreprocessOpts, Session, SyntaxError, lex_buffer, preprocess};
 use std::path::Path;
 use thiserror::Error;
 
@@ -38,7 +38,9 @@ pub fn compile_source(path: &str, src: &str) -> Result<JitProgram, HccError> {
     let mut ast = parser.parse_module()?;
     let mut sema = Sema::new(path, src);
     sema.run(&mut ast)?;
-    let syms = tos_runtime::jit_symbols();
+    let mut syms = tos_runtime::jit_symbols();
+    syms.extend(tos_gr::jit_symbols());
+    syms.extend(tos_host::jit_symbols());
     let refs: Vec<(&str, *const u8)> = syms.iter().map(|(n, p)| (*n, *p)).collect();
     Ok(compile_jit(&ast, &sema, &refs)?)
 }
@@ -59,18 +61,22 @@ pub fn compile_file(path: &Path, opts: &CompileOptions) -> Result<JitProgram, Hc
     let mut ast = parser.parse_module()?;
     let mut sema = Sema::new(&path_str, &src);
     sema.run(&mut ast)?;
-    let syms = tos_runtime::jit_symbols();
+    let mut syms = tos_runtime::jit_symbols();
+    syms.extend(tos_gr::jit_symbols());
+    syms.extend(tos_host::jit_symbols());
     let refs: Vec<(&str, *const u8)> = syms.iter().map(|(n, p)| (*n, *p)).collect();
     Ok(compile_jit(&ast, &sema, &refs)?)
 }
 
 pub fn run_source(path: &str, src: &str) -> Result<(), HccError> {
+    tos_host::reset();
     let mut prog = compile_source(path, src)?;
     prog.run()?;
     Ok(())
 }
 
 pub fn run_file(path: &Path, opts: &CompileOptions) -> Result<(), HccError> {
+    tos_host::reset();
     let mut prog = compile_file(path, opts)?;
     prog.run()?;
     Ok(())
@@ -136,6 +142,9 @@ U0 Main()
     s=s+10;
   for (i=0,j=2; i<2; i++,j--)
     s=s+j;
+  do {
+    s++;
+  } while (s<30);
   "%d\n",s;
 }
 Main;
@@ -143,8 +152,7 @@ Main;
         )
         .unwrap();
         let out = tos_runtime::capture_take().unwrap();
-        // 1 + (0+1+2) + 10+10 + (2+1) = 27
-        assert_eq!(out, b"27\n");
+        assert_eq!(out, b"30\n");
     }
 
     #[test]
@@ -167,6 +175,157 @@ Main;
         .unwrap();
         let out = tos_runtime::capture_take().unwrap();
         assert_eq!(out, b"42\n");
+    }
+
+    #[test]
+    fn register_hint_between_type_and_pointer() {
+        run_source(
+            "reg.HC",
+            "class Node { I64 value; }; U0 Main() { Node reg *p=NULL; if (!p) return; } Main;",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn calls_callback_stored_in_class_field() {
+        tos_runtime::capture_begin();
+        run_source(
+            "callback.HC",
+            r#"
+U0 Move(CDC *dc,I64 *x,I64 *y,I64 *z) { (*x)++; (*y)+=2; (*z)+=3; }
+U0 Main() {
+  CDC dc;
+  I64 x=1,y=2,z=3;
+  dc.transform=&Move;
+  (*dc.transform)(&dc,&x,&y,&z);
+  "%d %d %d\n",x,y,z;
+}
+Main;
+"#,
+        )
+        .unwrap();
+        assert_eq!(tos_runtime::capture_take().unwrap(), b"2 4 6\n");
+    }
+
+    #[test]
+    fn integer_lane_views_are_addressable() {
+        tos_runtime::capture_begin();
+        run_source(
+            "lanes.HC",
+            r#"
+U0 Main() {
+  I64 packed=0;
+  packed.u8[0]=17;
+  packed.u8[1]=34;
+  packed.i32[1]=-2;
+  "%d %d %d\n",packed.u8[0],packed.u8[1],packed.i32[1];
+}
+Main;
+"#,
+        )
+        .unwrap();
+        assert_eq!(tos_runtime::capture_take().unwrap(), b"17 34 -2\n");
+    }
+
+    #[test]
+    fn logical_operators_short_circuit_rhs_evaluation() {
+        tos_runtime::capture_begin();
+        run_source(
+            "short_circuit.HC",
+            r#"
+class Thing { I64 value; };
+I64 calls=0;
+I64 Hit() { calls++; return 1; }
+U0 Main() {
+  Thing *p=NULL;
+  if (p && p->value) calls=99;
+  if (0 && Hit) calls=98;
+  if (1 || Hit) calls+=0;
+  "%d\n",calls;
+}
+Main;
+"#,
+        )
+        .unwrap();
+        assert_eq!(tos_runtime::capture_take().unwrap(), b"0\n");
+    }
+
+    #[test]
+    fn typed_pointer_arithmetic_uses_element_stride() {
+        tos_runtime::capture_begin();
+        run_source(
+            "pointer_arithmetic.HC",
+            r#"
+U0 Main() {
+  I64 values[4]={10,20,30,40};
+  I64 *p=&values[0];
+  "%d ",*(p+2);
+  p++;
+  "%d ",*p;
+  p+=2;
+  "%d ",*p;
+  p--;
+  "%d %d\n",*p,p-&values[0];
+}
+Main;
+"#,
+        )
+        .unwrap();
+        assert_eq!(tos_runtime::capture_take().unwrap(), b"30 20 40 30 2\n");
+    }
+
+    #[test]
+    fn talons_compiles_initializes_and_reaches_input() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let source = root.join("TempleOS/Demo/Games/Talons.HC");
+        if !source.exists() {
+            return;
+        }
+        let opts = CompileOptions {
+            system_root: Some(root.join("TempleOS")),
+            ..CompileOptions::default()
+        };
+        tos_runtime::capture_begin();
+        run_file(&source, &opts).unwrap();
+        let output = tos_runtime::capture_take().unwrap();
+        assert!(
+            output
+                .windows(b"Initializing...".len())
+                .any(|part| part == b"Initializing...")
+        );
+        assert_eq!(tos_host::frames_presented(), 1);
+        let framebuffer = tos_host::framebuffer_rgb();
+        assert_eq!(
+            framebuffer.len(),
+            tos_host::DEFAULT_WIDTH as usize * tos_host::DEFAULT_HEIGHT as usize * 3
+        );
+        assert!(framebuffer.chunks_exact(3).any(|pixel| pixel != [0, 0, 0]));
+    }
+
+    #[test]
+    fn mixed_float_arithmetic_and_comparisons() {
+        tos_runtime::capture_begin();
+        run_source(
+            "float.HC",
+            r#"
+F64 Calc()
+{
+  F64 x=1.5;
+  x+=2;
+  return -x*2+8;
+}
+U0 Main()
+{
+  F64 value=Calc;
+  if (0.5<value<2.0)
+    "%d\n",ToI64(value);
+}
+Main;
+"#,
+        )
+        .unwrap();
+        let out = tos_runtime::capture_take().unwrap();
+        assert_eq!(out, b"1\n");
     }
 
     #[test]
@@ -195,10 +354,9 @@ Main;
     #[test]
     fn include_and_file() {
         tos_runtime::capture_begin();
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../tests/holyc/inc_main.HC");
-        run_file(&path, &CompileOptions::default())
-        .unwrap();
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/holyc/inc_main.HC");
+        run_file(&path, &CompileOptions::default()).unwrap();
         let out = tos_runtime::capture_take().unwrap();
         assert_eq!(out, b"included\n");
     }

@@ -2,6 +2,7 @@
 
 mod bit;
 mod heap;
+mod math;
 mod que;
 mod rand;
 mod task;
@@ -43,12 +44,15 @@ pub fn jit_symbols() -> Vec<(&'static str, *const u8)> {
         ("tos_QueInit", tos_QueInit as *const u8),
         ("tos_QueIns", tos_QueIns as *const u8),
         ("tos_QueRem", tos_QueRem as *const u8),
+        ("tos_QueDel", tos_QueDel as *const u8),
         ("tos_Bt", tos_Bt as *const u8),
         ("tos_Bts", tos_Bts as *const u8),
         ("tos_Btr", tos_Btr as *const u8),
         ("tos_LBts", tos_LBts as *const u8),
         ("tos_LBtr", tos_LBtr as *const u8),
         ("tos_tS", tos_tS as *const u8),
+        ("tos_Jiffies", tos_Jiffies as *const u8),
+        ("tos_Blink", tos_Blink as *const u8),
         ("tos_Rand", tos_Rand as *const u8),
         ("tos_RandU16", tos_RandU16 as *const u8),
         ("tos_RandU32", tos_RandU32 as *const u8),
@@ -63,6 +67,50 @@ pub fn jit_symbols() -> Vec<(&'static str, *const u8)> {
         ("tos_Fs", tos_Fs as *const u8),
         ("tos_Gs", tos_Gs as *const u8),
         ("tos_mp_cnt", tos_mp_cnt as *const u8),
+        ("tos_Spawn", tos_Spawn as *const u8),
+        ("tos_SndTaskEndCB", tos_SndTaskEndCB as *const u8),
+        ("tos_Beep", tos_Beep as *const u8),
+        ("tos_Snd", tos_Snd as *const u8),
+        ("tos_Play", tos_Play as *const u8),
+        ("tos_MusicSettingsRst", tos_MusicSettingsRst as *const u8),
+        ("tos_RegDft", tos_RegDft as *const u8),
+        ("tos_RegExe", tos_RegExe as *const u8),
+        ("tos_RegWrite", tos_RegWrite as *const u8),
+        ("tos_SettingsPush", tos_SettingsPush as *const u8),
+        ("tos_SettingsPop", tos_SettingsPop as *const u8),
+        ("tos_MenuPush", tos_MenuPush as *const u8),
+        ("tos_MenuPop", tos_MenuPop as *const u8),
+        ("tos_AutoComplete", tos_AutoComplete as *const u8),
+        ("tos_WinBorder", tos_WinBorder as *const u8),
+        ("tos_WinMax", tos_WinMax as *const u8),
+        ("tos_DocCursor", tos_DocCursor as *const u8),
+        ("tos_DocClear", tos_DocClear as *const u8),
+        ("tos_PutExcept", tos_PutExcept as *const u8),
+        ("tos_Exit", tos_Exit as *const u8),
+        ("tos_Mat4x4IdentEqu", tos_Mat4x4IdentEqu as *const u8),
+        ("tos_Mat4x4IdentNew", tos_Mat4x4IdentNew as *const u8),
+        ("tos_Mat4x4RotX", tos_Mat4x4RotX as *const u8),
+        ("tos_Mat4x4RotZ", tos_Mat4x4RotZ as *const u8),
+        ("tos_Mat4x4MulXYZ", tos_Mat4x4MulXYZ as *const u8),
+        (
+            "tos_Mat4x4TranslationEqu",
+            tos_Mat4x4TranslationEqu as *const u8,
+        ),
+        ("tos_Mat4x4Scale", tos_Mat4x4Scale as *const u8),
+        ("tos_D3Sub", tos_D3Sub as *const u8),
+        ("tos_D3NormSqr", tos_D3NormSqr as *const u8),
+        ("tos_D3Unit", tos_D3Unit as *const u8),
+        ("tos_SwapI64", tos_SwapI64 as *const u8),
+        ("tos_Sin", tos_Sin as *const u8),
+        ("tos_Cos", tos_Cos as *const u8),
+        ("tos_Sqrt", tos_Sqrt as *const u8),
+        ("tos_ACos", tos_ACos as *const u8),
+        ("tos_Min", tos_Min as *const u8),
+        ("tos_Max", tos_Max as *const u8),
+        ("tos_Clamp", tos_Clamp as *const u8),
+        ("tos_Sign", tos_Sign as *const u8),
+        ("tos_Tri", tos_Tri as *const u8),
+        ("tos_Saw", tos_Saw as *const u8),
         ("tos_boot", tos_boot as *const u8),
     ]
 }
@@ -72,6 +120,109 @@ pub extern "C" fn tos_boot() {
     time::boot();
     task::boot_task();
 }
+
+#[unsafe(no_mangle)]
+pub extern "C" fn tos_Jiffies() -> i64 {
+    time::jiffies()
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn tos_Blink() -> i64 {
+    if ((time::ts() * 5.0) as i64 & 1) == 0 {
+        1
+    } else {
+        0
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tos_Spawn(
+    fp_start_addr: *const u8,
+    data: *mut u8,
+    _task_name: *const u8,
+    target_cpu: i64,
+    parent: *mut tos_abi::CTask,
+    _stk_size: i64,
+    _flags: i64,
+) -> *mut tos_abi::CTask {
+    let spawned = task::spawn(parent);
+    // CPU-addressed jobs are TempleOS data-parallel work units. Running them
+    // inline gives the single-core host correct completion semantics.
+    // Untargeted tasks are long-lived UI/music loops and remain dormant until
+    // the cooperative scheduler lands.
+    if target_cpu >= 0 && !fp_start_addr.is_null() {
+        let entry: extern "C" fn(*mut u8) = unsafe { std::mem::transmute(fp_start_addr) };
+        entry(data);
+    }
+    spawned
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn tos_SndTaskEndCB() {}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn tos_Beep(_ona: i64, _busy: i64) {}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn tos_Snd(_ona: i64) {}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn tos_Play(_song: *const u8, _words: *const u8) {}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn tos_MusicSettingsRst() {}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn tos_RegDft(_path: *const u8, _defaults: *const u8) {}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn tos_RegExe(_path: *const u8) {}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn tos_RegWrite(_path: *const u8, _fmt: *const u8, _value: f64) {}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn tos_SettingsPush() -> *mut u8 {
+    std::ptr::null_mut()
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn tos_SettingsPop() {}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn tos_MenuPush(_menu: *const u8) -> *mut u8 {
+    std::ptr::null_mut()
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn tos_MenuPop() {}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn tos_AutoComplete() -> i64 {
+    0
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn tos_WinBorder() -> i64 {
+    0
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn tos_WinMax() {}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn tos_DocCursor() -> i64 {
+    0
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn tos_DocClear() {}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn tos_PutExcept() {}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn tos_Exit() {}
 
 fn emit(bytes: &[u8]) {
     CAPTURE.with(|c| {
@@ -133,12 +284,60 @@ pub extern "C" fn tos_ToBool(x: i64) -> i64 {
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn tos_MAlloc(size: i64) -> *mut u8 {
+pub extern "C" fn tos_Tri(t: f64, period: f64) -> f64 {
+    if period == 0.0 {
+        return 0.0;
+    }
+    let phase = 2.0 * (t.abs() % period) / period;
+    if phase <= 1.0 { phase } else { 2.0 - phase }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn tos_Saw(t: f64, period: f64) -> f64 {
+    if period == 0.0 {
+        0.0
+    } else if t >= 0.0 {
+        (t % period) / period
+    } else {
+        1.0 + (t % period) / period
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn tos_Min(a: f64, b: f64) -> f64 {
+    a.min(b)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn tos_Max(a: f64, b: f64) -> f64 {
+    a.max(b)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn tos_Clamp(value: f64, lo: f64, hi: f64) -> f64 {
+    value.clamp(lo, hi)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn tos_Sign(value: f64) -> f64 {
+    value.signum()
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn tos_Mat4x4IdentNew() -> *mut i64 {
+    // TempleOS callers own this result and release it with `Free`, so it must
+    // come from the same header-bearing heap as `MAlloc`/`CAlloc`.
+    let matrix = unsafe { heap::calloc((16 * size_of::<i64>()) as i64) }.cast::<i64>();
+    unsafe { math::mat_identity(matrix) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tos_MAlloc(size: i64, _task: *mut tos_abi::CTask) -> *mut u8 {
     unsafe { heap::malloc(size) }
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn tos_CAlloc(size: i64) -> *mut u8 {
+pub unsafe extern "C" fn tos_CAlloc(size: i64, _task: *mut tos_abi::CTask) -> *mut u8 {
     unsafe { heap::calloc(size) }
 }
 
@@ -165,6 +364,11 @@ pub unsafe extern "C" fn tos_QueIns(entry: *mut CQue, pred: *mut CQue) {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn tos_QueRem(entry: *mut CQue) {
     unsafe { que::rem(entry) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tos_QueDel(head: *mut CQue, remove_first: i64) {
+    unsafe { que::del(head, remove_first != 0) }
 }
 
 #[unsafe(no_mangle)]
@@ -238,14 +442,14 @@ pub extern "C" fn tos_ClampI64(x: i64, lo: i64, hi: i64) -> i64 {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn tos_Wrap(a: f64) -> f64 {
-    // Wrap to (-π, π].
+pub extern "C" fn tos_Wrap(a: f64, base: f64) -> f64 {
+    // Wrap to [base, base + 2π), matching TempleOS AMath.HC.
     let tau = std::f64::consts::TAU;
     let mut x = a % tau;
-    if x > std::f64::consts::PI {
+    if x >= base + tau {
         x -= tau;
     }
-    if x <= -std::f64::consts::PI {
+    if x < base {
         x += tau;
     }
     x
@@ -276,6 +480,80 @@ pub extern "C" fn tos_Gs() -> *mut tos_abi::CCPU {
 #[unsafe(no_mangle)]
 pub extern "C" fn tos_mp_cnt() -> i64 {
     1
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tos_Mat4x4IdentEqu(r: *mut i64) -> *mut i64 {
+    unsafe { math::mat_identity(r) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tos_Mat4x4RotX(r: *mut i64, angle: f64) -> *mut i64 {
+    unsafe { math::mat_rotate_x(r, angle) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tos_Mat4x4RotZ(r: *mut i64, angle: f64) -> *mut i64 {
+    unsafe { math::mat_rotate_z(r, angle) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tos_Mat4x4MulXYZ(r: *const i64, x: *mut i64, y: *mut i64, z: *mut i64) {
+    unsafe { math::mat_mul_xyz(r, x, y, z) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tos_Mat4x4TranslationEqu(r: *mut i64, x: i64, y: i64, z: i64) -> *mut i64 {
+    unsafe { math::mat_translate(r, x, y, z) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tos_Mat4x4Scale(r: *mut i64, scale: f64) -> *mut i64 {
+    unsafe { math::mat_scale(r, scale) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tos_D3Sub(
+    dst: *mut tos_abi::CD3,
+    lhs: *const tos_abi::CD3,
+    rhs: *const tos_abi::CD3,
+) -> *mut tos_abi::CD3 {
+    unsafe { math::d3_sub(dst, lhs, rhs) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tos_D3NormSqr(value: *const tos_abi::CD3) -> f64 {
+    unsafe { math::d3_norm_sqr(value) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tos_D3Unit(value: *mut tos_abi::CD3) -> *mut tos_abi::CD3 {
+    unsafe { math::d3_unit(value) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tos_SwapI64(lhs: *mut i64, rhs: *mut i64) {
+    unsafe { math::swap_i64(lhs, rhs) }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn tos_Sin(value: f64) -> f64 {
+    value.sin()
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn tos_Cos(value: f64) -> f64 {
+    value.cos()
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn tos_Sqrt(value: f64) -> f64 {
+    value.sqrt()
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn tos_ACos(value: f64) -> f64 {
+    value.acos()
 }
 
 #[unsafe(no_mangle)]
@@ -379,5 +657,13 @@ mod tests {
         }
         let out = capture_take().unwrap();
         assert_eq!(out, b"Hello world\n");
+    }
+
+    #[test]
+    fn new_matrix_uses_the_templeos_heap() {
+        let matrix = tos_Mat4x4IdentNew();
+        assert!(!matrix.is_null());
+        assert!(unsafe { tos_MSize(matrix.cast()) } >= (16 * size_of::<i64>()) as i64);
+        unsafe { tos_Free(matrix.cast()) };
     }
 }

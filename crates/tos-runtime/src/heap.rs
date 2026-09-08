@@ -1,6 +1,6 @@
 //! Per-allocation header so `MSize`/`Free` work like TempleOS.
 
-use std::alloc::{alloc, dealloc, Layout};
+use std::alloc::{Layout, alloc, dealloc};
 
 const HDR: usize = 16;
 const MAGIC: u64 = 0x544F53414C4C4F43; // "TOSALLOC"

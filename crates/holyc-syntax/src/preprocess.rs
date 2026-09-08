@@ -129,7 +129,9 @@ impl<'a> PpCtx<'a> {
             }
             if matches!(tokens[i].kind, TokenKind::Hash) {
                 i += 1;
-                let Some(name) = tokens.get(i).and_then(|t| t.kind.ident().map(|s| s.to_string()))
+                let Some(name) = tokens
+                    .get(i)
+                    .and_then(|t| t.kind.ident().map(|s| s.to_string()))
                 else {
                     return Err(SyntaxError::at(
                         &from.display().to_string(),
@@ -145,7 +147,8 @@ impl<'a> PpCtx<'a> {
                             self.skip_to_eol(tokens, &mut i);
                             continue;
                         }
-                        let Some(TokenKind::Str(inc)) = tokens.get(i).map(|t| t.kind.clone()) else {
+                        let Some(TokenKind::Str(inc)) = tokens.get(i).map(|t| t.kind.clone())
+                        else {
                             return Err(SyntaxError::Io(format!(
                                 "{}: #include expects a string",
                                 from.display()
@@ -161,7 +164,9 @@ impl<'a> PpCtx<'a> {
                             self.skip_to_eol(tokens, &mut i);
                             continue;
                         }
-                        let Some(ident) = tokens.get(i).and_then(|t| t.kind.ident().map(str::to_string))
+                        let Some(ident) = tokens
+                            .get(i)
+                            .and_then(|t| t.kind.ident().map(str::to_string))
                         else {
                             return Err(SyntaxError::Io("#define needs a name".into()));
                         };
@@ -180,9 +185,11 @@ impl<'a> PpCtx<'a> {
                                 break;
                             }
                             if let Some(file) = self.session.file(tokens[i].span.file) {
-                                let line =
-                                    crate::error::line_col(&file.src, tokens[i].span.start as usize)
-                                        .0;
+                                let line = crate::error::line_col(
+                                    &file.src,
+                                    tokens[i].span.start as usize,
+                                )
+                                .0;
                                 if Some(tokens[i].span.file) == def_file
                                     && def_line.is_some_and(|dl| line > dl)
                                 {
@@ -285,13 +292,20 @@ impl<'a> PpCtx<'a> {
                             let name;
                             if matches!(tokens.get(*i).map(|t| &t.kind), Some(TokenKind::LParen)) {
                                 *i += 1;
-                                name = tokens.get(*i).and_then(|t| t.kind.ident().map(str::to_string));
+                                name = tokens
+                                    .get(*i)
+                                    .and_then(|t| t.kind.ident().map(str::to_string));
                                 *i += 1;
-                                if matches!(tokens.get(*i).map(|t| &t.kind), Some(TokenKind::RParen)) {
+                                if matches!(
+                                    tokens.get(*i).map(|t| &t.kind),
+                                    Some(TokenKind::RParen)
+                                ) {
                                     *i += 1;
                                 }
                             } else {
-                                name = tokens.get(*i).and_then(|t| t.kind.ident().map(str::to_string));
+                                name = tokens
+                                    .get(*i)
+                                    .and_then(|t| t.kind.ident().map(str::to_string));
                                 *i += 1;
                             }
                             val = name.is_some_and(|n| self.defines.contains_key(&n));
@@ -325,7 +339,12 @@ impl<'a> PpCtx<'a> {
     fn skip_balanced_or_eol(&self, tokens: &[Token], i: &mut usize, name: &str) {
         if name == "exe" {
             // `#exe { ... }` — skip a brace block if present.
-            while *i < tokens.len() && !matches!(tokens[*i].kind, TokenKind::LBrace | TokenKind::Hash | TokenKind::Eof) {
+            while *i < tokens.len()
+                && !matches!(
+                    tokens[*i].kind,
+                    TokenKind::LBrace | TokenKind::Hash | TokenKind::Eof
+                )
+            {
                 *i += 1;
             }
             if matches!(tokens.get(*i).map(|t| &t.kind), Some(TokenKind::LBrace)) {
