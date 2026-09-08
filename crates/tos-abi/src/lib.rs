@@ -67,14 +67,20 @@ pub const WHITE: u32 = 15;
 
 pub const ROPF_DITHER: u32 = 0x40000000;
 
-/// Opaque until Phase 2 fills the real `CTask` layout.
+/// Current-task block. HolyC `Fs` points here. Offsets must match the
+/// compiler's injected `CTask` class (not yet the full KernelA.HH layout).
 #[repr(C)]
 pub struct CTask {
     pub addr: *mut CTask,
-    pub _pad_until_pix: [u8; 0],
     pub pix_width: i64,
     pub pix_height: i64,
     pub draw_it: Option<extern "C" fn(*mut CTask, *mut CDC)>,
+}
+
+/// Current CPU. HolyC `Gs` points here.
+#[repr(C)]
+pub struct CCPU {
+    pub num: i64,
 }
 
 /// Graphics device context. Layout will be matched to KernelA.HH in Phase 3.

@@ -1,16 +1,21 @@
 //! Kernel-ish primitives HolyC programs call (`Print`, heaps, …).
 
+mod bit;
+mod heap;
+mod que;
+mod rand;
+mod task;
+mod time;
+
 use std::cell::RefCell;
 use std::ffi::CStr;
 use std::io::{self, Write};
 use std::slice;
-use std::sync::Mutex;
+use tos_abi::CQue;
 
 thread_local! {
     static CAPTURE: RefCell<Option<Vec<u8>>> = const { RefCell::new(None) };
 }
-
-static BOOT_ONCE: Mutex<bool> = Mutex::new(false);
 
 /// Capture Print output for tests instead of writing stdout.
 pub fn capture_begin() {
@@ -34,16 +39,38 @@ pub fn jit_symbols() -> Vec<(&'static str, *const u8)> {
         ("tos_StrLen", tos_StrLen as *const u8),
         ("tos_MemCpy", tos_MemCpy as *const u8),
         ("tos_MemSet", tos_MemSet as *const u8),
+        ("tos_MSize", tos_MSize as *const u8),
+        ("tos_QueInit", tos_QueInit as *const u8),
+        ("tos_QueIns", tos_QueIns as *const u8),
+        ("tos_QueRem", tos_QueRem as *const u8),
+        ("tos_Bt", tos_Bt as *const u8),
+        ("tos_Bts", tos_Bts as *const u8),
+        ("tos_Btr", tos_Btr as *const u8),
+        ("tos_LBts", tos_LBts as *const u8),
+        ("tos_LBtr", tos_LBtr as *const u8),
+        ("tos_tS", tos_tS as *const u8),
+        ("tos_Rand", tos_Rand as *const u8),
+        ("tos_RandU16", tos_RandU16 as *const u8),
+        ("tos_RandU32", tos_RandU32 as *const u8),
+        ("tos_RandI16", tos_RandI16 as *const u8),
+        ("tos_RandI64", tos_RandI64 as *const u8),
+        ("tos_Abs", tos_Abs as *const u8),
+        ("tos_SqrI64", tos_SqrI64 as *const u8),
+        ("tos_ClampI64", tos_ClampI64 as *const u8),
+        ("tos_Wrap", tos_Wrap as *const u8),
+        ("tos_Sleep", tos_Sleep as *const u8),
+        ("tos_Yield", tos_Yield as *const u8),
+        ("tos_Fs", tos_Fs as *const u8),
+        ("tos_Gs", tos_Gs as *const u8),
+        ("tos_mp_cnt", tos_mp_cnt as *const u8),
         ("tos_boot", tos_boot as *const u8),
     ]
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn tos_boot() {
-    let mut g = BOOT_ONCE.lock().unwrap();
-    if !*g {
-        *g = true;
-    }
+    time::boot();
+    task::boot_task();
 }
 
 fn emit(bytes: &[u8]) {
@@ -107,30 +134,148 @@ pub extern "C" fn tos_ToBool(x: i64) -> i64 {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn tos_MAlloc(size: i64) -> *mut u8 {
-    if size <= 0 {
-        return std::ptr::null_mut();
-    }
-    let layout = std::alloc::Layout::from_size_align(size as usize, 8).unwrap();
-    unsafe { std::alloc::alloc(layout) }
+    unsafe { heap::malloc(size) }
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn tos_CAlloc(size: i64) -> *mut u8 {
-    let p = unsafe { tos_MAlloc(size) };
-    if !p.is_null() {
-        unsafe { std::ptr::write_bytes(p, 0, size as usize) };
-    }
-    p
+    unsafe { heap::calloc(size) }
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn tos_Free(ptr: *mut u8) {
-    if ptr.is_null() {
-        return;
+    unsafe { heap::free(ptr) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tos_MSize(ptr: *mut u8) -> i64 {
+    unsafe { heap::msize(ptr) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tos_QueInit(head: *mut CQue) {
+    unsafe { que::init(head) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tos_QueIns(entry: *mut CQue, pred: *mut CQue) {
+    unsafe { que::ins(entry, pred) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tos_QueRem(entry: *mut CQue) {
+    unsafe { que::rem(entry) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tos_Bt(field: *const u8, bit: i64) -> i64 {
+    unsafe { bit::bt(field, bit) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tos_Bts(field: *mut u8, bit: i64) -> i64 {
+    unsafe { bit::bts(field, bit) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tos_Btr(field: *mut u8, bit: i64) -> i64 {
+    unsafe { bit::btr(field, bit) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tos_LBts(field: *mut u8, bit: i64) -> i64 {
+    unsafe { bit::lbts(field, bit) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tos_LBtr(field: *mut u8, bit: i64) -> i64 {
+    unsafe { bit::lbtr(field, bit) }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn tos_tS() -> f64 {
+    time::ts()
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn tos_Rand() -> f64 {
+    rand::rand_f64()
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn tos_RandU16() -> i64 {
+    rand::rand_u16()
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn tos_RandU32() -> i64 {
+    rand::rand_u32()
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn tos_RandI16() -> i64 {
+    rand::rand_i16()
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn tos_RandI64() -> i64 {
+    rand::rand_i64()
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn tos_Abs(x: i64) -> i64 {
+    x.abs()
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn tos_SqrI64(x: i64) -> i64 {
+    x.wrapping_mul(x)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn tos_ClampI64(x: i64, lo: i64, hi: i64) -> i64 {
+    x.clamp(lo, hi)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn tos_Wrap(a: f64) -> f64 {
+    // Wrap to (-π, π].
+    let tau = std::f64::consts::TAU;
+    let mut x = a % tau;
+    if x > std::f64::consts::PI {
+        x -= tau;
     }
-    // Size is not tracked yet; Phase 2 heap will record MSize. Leak is
-    // acceptable for hello-world; Free(NULL) is defined.
-    let _ = ptr;
+    if x <= -std::f64::consts::PI {
+        x += tau;
+    }
+    x
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn tos_Sleep(ms: i64) {
+    if ms > 0 {
+        std::thread::sleep(std::time::Duration::from_millis(ms as u64));
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn tos_Yield() {
+    std::thread::yield_now();
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn tos_Fs() -> *mut tos_abi::CTask {
+    task::fs()
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn tos_Gs() -> *mut tos_abi::CCPU {
+    task::gs()
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn tos_mp_cnt() -> i64 {
+    1
 }
 
 #[unsafe(no_mangle)]

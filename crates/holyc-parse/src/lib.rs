@@ -3,7 +3,7 @@
 
 use holyc_ast::*;
 use holyc_syntax::{is_keyword, Span, SyntaxError, Token, TokenKind};
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 
 pub struct Parser<'a> {
     tokens: &'a [Token],
@@ -12,6 +12,7 @@ pub struct Parser<'a> {
     src: &'a str,
     /// Names currently known as types (`class` / builtin).
     types: HashSet<String>,
+    pending: VecDeque<Item>,
 }
 
 impl<'a> Parser<'a> {
@@ -20,6 +21,7 @@ impl<'a> Parser<'a> {
         for b in [
             "I0", "I8", "I8i", "I16", "I16i", "I32", "I32i", "I64", "I64i", "U0", "U8", "U8i",
             "U16", "U16i", "U32", "U32i", "U64", "U64i", "F64", "F64i", "Bool",
+            "CColorROPU32", "CQue", "CD3", "CD3I32", "CD3I64", "CTask", "CCPU", "CDC",
         ] {
             types.insert(b.into());
         }
@@ -29,12 +31,17 @@ impl<'a> Parser<'a> {
             path: path.to_string(),
             src,
             types,
+            pending: VecDeque::new(),
         }
     }
 
     pub fn parse_module(&mut self) -> Result<Module, SyntaxError> {
         let mut items = Vec::new();
-        while !self.at_eof() {
+        while !self.at_eof() || !self.pending.is_empty() {
+            if let Some(item) = self.pending.pop_front() {
+                items.push(item);
+                continue;
+            }
             if self.eat_kind(&TokenKind::Semicolon) {
                 continue;
             }
@@ -229,6 +236,8 @@ impl<'a> Parser<'a> {
                 continue;
             }
             let ty = self.parse_type()?;
+            let base_ty = without_ptrs(&ty);
+            let mut declarator_ty = ty;
             loop {
                 let (mname, _) = match self.peek() {
                     TokenKind::Ident(_) => self.expect_ident()?,
@@ -238,7 +247,7 @@ impl<'a> Parser<'a> {
                     }
                     _ => break,
                 };
-                let mut mty = ty.clone();
+                let mut mty = declarator_ty.clone();
                 while self.eat_punct(TokenKind::LBracket) {
                     let n = match self.peek() {
                         TokenKind::Int(v) => {
@@ -246,7 +255,11 @@ impl<'a> Parser<'a> {
                             self.bump();
                             Some(v)
                         }
-                        _ => None,
+                        TokenKind::RBracket => None,
+                        _ => {
+                            let _ = self.parse_expr()?;
+                            None
+                        }
                     };
                     self.expect(TokenKind::RBracket, "]")?;
                     mty = TypeRef::Array(Box::new(mty), n);
@@ -255,12 +268,24 @@ impl<'a> Parser<'a> {
                 if !self.eat_punct(TokenKind::Comma) {
                     break;
                 }
+                declarator_ty = base_ty.clone();
+                while self.eat_punct(TokenKind::Star) {
+                    declarator_ty = declarator_ty.ptr();
+                }
             }
             self.eat_punct(TokenKind::Semicolon);
         }
         self.expect(TokenKind::RBrace, "}")?;
-        self.eat_punct(TokenKind::Semicolon);
         self.types.insert(name.clone());
+        if !self.eat_punct(TokenKind::Semicolon) {
+            let mut ty = TypeRef::name(name.clone());
+            while self.eat_punct(TokenKind::Star) {
+                ty = ty.ptr();
+            }
+            let (var_name, _) = self.expect_ident()?;
+            let decls = self.parse_var_decls(span0, ty, var_name, false, public)?;
+            self.pending.push_back(Item::Stmt(decls));
+        }
         Ok(ClassDecl {
             span: span0,
             public,
@@ -337,33 +362,94 @@ impl<'a> Parser<'a> {
                 extern_name: None,
             }));
         }
-        // global var
-        let mut ty = ret;
-        while self.eat_punct(TokenKind::LBracket) {
-            let n = if let TokenKind::Int(v) = self.peek() {
-                let v = *v;
-                self.bump();
-                Some(v)
+        Ok(Item::Stmt(self.parse_var_decls(
+            span0, ret, name, static_, public,
+        )?))
+    }
+
+    fn parse_var_decls(
+        &mut self,
+        span: Span,
+        shared_ty: TypeRef,
+        first_name: String,
+        static_: bool,
+        public: bool,
+    ) -> Result<Stmt, SyntaxError> {
+        // Pointer stars belong to each declarator (`CD3 p,*ptr`), while the
+        // base type is shared across the comma-separated declaration.
+        let mut decls = Vec::new();
+        let mut name = first_name;
+        let base_ty = without_ptrs(&shared_ty);
+        let mut declarator_ty = shared_ty;
+        loop {
+            let mut ty = declarator_ty.clone();
+            while self.eat_punct(TokenKind::LBracket) {
+                let n = if let TokenKind::Int(v) = self.peek() {
+                    let v = *v;
+                    self.bump();
+                    Some(v)
+                } else if matches!(self.peek(), TokenKind::RBracket) {
+                    None
+                } else {
+                    // Runtime-sized arrays are represented as one element for
+                    // now. Consume the bound so authentic declarations such
+                    // as `per_cpu[mp_cnt]` remain parseable.
+                    let _ = self.parse_expr()?;
+                    None
+                };
+                self.expect(TokenKind::RBracket, "]")?;
+                ty = TypeRef::Array(Box::new(ty), n);
+            }
+            let init = if self.eat_punct(TokenKind::Assign) {
+                Some(self.parse_initializer()?)
             } else {
                 None
             };
-            self.expect(TokenKind::RBracket, "]")?;
-            ty = TypeRef::Array(Box::new(ty), n);
+            decls.push(Stmt::Decl(VarDecl {
+                span,
+                name,
+                ty,
+                init,
+                static_,
+                public,
+            }));
+            if !self.eat_punct(TokenKind::Comma) {
+                break;
+            }
+            declarator_ty = base_ty.clone();
+            while self.eat_punct(TokenKind::Star) {
+                declarator_ty = declarator_ty.ptr();
+            }
+            (name, _) = self.expect_ident()?;
         }
-        let init = if self.eat_punct(TokenKind::Assign) {
-            Some(self.parse_expr()?)
-        } else {
-            None
-        };
         self.eat_punct(TokenKind::Semicolon);
-        Ok(Item::Stmt(Stmt::Decl(VarDecl {
-            span: span0,
-            name,
-            ty,
-            init,
-            static_,
-            public,
-        })))
+        if decls.len() == 1 {
+            Ok(decls.pop().unwrap())
+        } else {
+            Ok(Stmt::Block {
+                span,
+                stmts: decls,
+            })
+        }
+    }
+
+    fn parse_initializer(&mut self) -> Result<Expr, SyntaxError> {
+        if !matches!(self.peek(), TokenKind::LBrace) {
+            return self.parse_expr();
+        }
+        let start = self.bump().span;
+        let mut values = Vec::new();
+        while !matches!(self.peek(), TokenKind::RBrace | TokenKind::Eof) {
+            values.push(self.parse_initializer()?);
+            if !self.eat_punct(TokenKind::Comma) {
+                break;
+            }
+        }
+        let end = self.expect(TokenKind::RBrace, "}")?.span;
+        Ok(Expr {
+            span: start.merge(end),
+            kind: ExprKind::InitList(values),
+        })
     }
 
     fn parse_param_list(&mut self) -> Result<(Vec<Param>, bool), SyntaxError> {
@@ -633,7 +719,7 @@ impl<'a> Parser<'a> {
             });
         }
 
-        let expr = self.parse_expr()?;
+        let expr = self.parse_comma_expr()?;
         self.eat_punct(TokenKind::Semicolon);
         Ok(Stmt::Expr { span, expr })
     }
@@ -671,7 +757,7 @@ impl<'a> Parser<'a> {
                 _ => None,
             }
         } else {
-            let e = self.parse_expr()?;
+            let e = self.parse_comma_expr()?;
             Some(Box::new(Stmt::Expr { span: e.span, expr: e }))
         };
         self.eat_punct(TokenKind::Semicolon);
@@ -684,7 +770,7 @@ impl<'a> Parser<'a> {
         let inc = if matches!(self.peek(), TokenKind::RParen) {
             None
         } else {
-            Some(self.parse_expr()?)
+            Some(self.parse_comma_expr()?)
         };
         self.expect(TokenKind::RParen, ")")?;
         let body = Box::new(self.parse_stmt()?);
@@ -701,6 +787,23 @@ impl<'a> Parser<'a> {
 
     fn parse_expr(&mut self) -> Result<Expr, SyntaxError> {
         self.parse_prec(PREC_ASSIGN)
+    }
+
+    fn parse_comma_expr(&mut self) -> Result<Expr, SyntaxError> {
+        let first = self.parse_expr()?;
+        if !matches!(self.peek(), TokenKind::Comma) {
+            return Ok(first);
+        }
+        let span = first.span;
+        let mut exprs = vec![first];
+        while self.eat_punct(TokenKind::Comma) {
+            exprs.push(self.parse_expr()?);
+        }
+        let end = exprs.last().unwrap().span;
+        Ok(Expr {
+            span: span.merge(end),
+            kind: ExprKind::Sequence(exprs),
+        })
     }
 
     fn parse_prec(&mut self, min: u8) -> Result<Expr, SyntaxError> {
@@ -960,10 +1063,17 @@ impl<'a> Parser<'a> {
                 span,
                 kind: ExprKind::Float(v),
             }),
-            TokenKind::Str(s) => Ok(Expr {
-                span,
-                kind: ExprKind::Str(s),
-            }),
+            TokenKind::Str(mut s) => {
+                let mut full_span = span;
+                while let TokenKind::Str(next) = self.peek() {
+                    s.push_str(next);
+                    full_span = full_span.merge(self.bump().span);
+                }
+                Ok(Expr {
+                    span: full_span,
+                    kind: ExprKind::Str(s),
+                })
+            }
             TokenKind::Char(v) => Ok(Expr {
                 span,
                 kind: ExprKind::Char(v),
@@ -1012,6 +1122,13 @@ impl<'a> Parser<'a> {
                 format!("expected expression, got {other:?}"),
             )),
         }
+    }
+}
+
+fn without_ptrs(ty: &TypeRef) -> TypeRef {
+    match ty {
+        TypeRef::Ptr(inner) => without_ptrs(inner),
+        _ => ty.clone(),
     }
 }
 

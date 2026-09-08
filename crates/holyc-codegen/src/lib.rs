@@ -3,8 +3,8 @@
 use cranelift_codegen::ir::condcodes::IntCC;
 use cranelift_codegen::ir::immediates::Ieee64;
 use cranelift_codegen::ir::{
-    types, AbiParam, InstBuilder, MemFlagsData, Signature, StackSlotData, StackSlotKind, Type,
-    Value,
+    types, AbiParam, InstBuilder, MemFlagsData, Signature, StackSlot, StackSlotData, StackSlotKind,
+    Type, Value,
 };
 use cranelift_codegen::settings::{self, Configurable};
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
@@ -100,6 +100,14 @@ pub fn compile_jit(
 
     // Data for string literals.
     let mut strings: HashMap<String, DataId> = HashMap::new();
+    let mut globals: HashMap<String, (DataId, Ty)> = HashMap::new();
+    for (index, (name, ty)) in sema.globals.iter().enumerate() {
+        let id = module.declare_data(&format!("global{index}"), Linkage::Local, true, false)?;
+        let mut desc = DataDescription::new();
+        desc.define_zeroinit(ty.size().max(1) as usize);
+        module.define_data(id, &desc)?;
+        globals.insert(name.clone(), (id, ty.clone()));
+    }
 
     // Define user functions.
     for item in &ast.items {
@@ -127,13 +135,13 @@ pub fn compile_jit(
                     func_ids: &func_ids,
                     strings: &mut strings,
                     vars: HashMap::new(),
+                    globals: &globals,
+                    module_scope: false,
                     sema,
                 };
                 for (i, (pname, ty)) in info.params.iter().enumerate() {
                     let val = cg.bcx.block_params(entry)[i];
-                    let var = cg.bcx.declare_var(clif_ty(ty, ptr_ty));
-                    cg.bcx.def_var(var, val);
-                    cg.vars.insert(pname.clone(), (var, ty.clone()));
+                    cg.define_local(pname.clone(), ty.clone(), val)?;
                 }
                 for stmt in body {
                     cg.stmt(stmt)?;
@@ -168,6 +176,8 @@ pub fn compile_jit(
                 func_ids: &func_ids,
                 strings: &mut strings,
                 vars: HashMap::new(),
+                globals: &globals,
+                module_scope: true,
                 sema,
             };
             for item in &ast.items {
@@ -208,8 +218,18 @@ fn make_sig(module: &mut JITModule, info: &FunctionInfo, ptr_ty: Type) -> Signat
 fn clif_ty(ty: &Ty, ptr_ty: Type) -> Type {
     match ty {
         Ty::F64 => types::F64,
-        Ty::Ptr(_) | Ty::Array(_, _) | Ty::Fun { .. } => ptr_ty,
+        Ty::Ptr(_) | Ty::Array(_, _) | Ty::Fun { .. } | Ty::Class { .. } => ptr_ty,
         Ty::U0 | Ty::I0 => types::I64,
+        _ => types::I64,
+    }
+}
+
+fn mem_clif(ty: &Ty) -> Type {
+    match ty {
+        Ty::F64 => types::F64,
+        Ty::I8 | Ty::U8 => types::I8,
+        Ty::I16 | Ty::U16 => types::I16,
+        Ty::I32 | Ty::U32 => types::I32,
         _ => types::I64,
     }
 }
@@ -221,11 +241,275 @@ struct FnCg<'a, 'b> {
     ret_ty: Option<Type>,
     func_ids: &'a HashMap<String, FuncId>,
     strings: &'a mut HashMap<String, DataId>,
-    vars: HashMap<String, (Variable, Ty)>,
+    vars: HashMap<String, (LocalStorage, Ty)>,
+    globals: &'a HashMap<String, (DataId, Ty)>,
+    module_scope: bool,
     sema: &'a Sema,
 }
 
+#[derive(Clone, Copy)]
+enum LocalStorage {
+    Value(Variable),
+    Stack(StackSlot),
+}
+
 impl FnCg<'_, '_> {
+    fn define_local(&mut self, name: String, ty: Ty, val: Value) -> Result<(), CodegenError> {
+        let storage = if ty.is_aggregate() {
+            let var = self.bcx.declare_var(self.ptr_ty);
+            self.bcx.def_var(var, val);
+            LocalStorage::Value(var)
+        } else {
+            let slot = self.bcx.create_sized_stack_slot(StackSlotData::new(
+                StackSlotKind::ExplicitSlot,
+                ty.size().max(8) as u32,
+                3,
+            ));
+            let ptr = self.bcx.ins().stack_addr(self.ptr_ty, slot, 0);
+            self.store_mem(ptr, 0, &ty, val)?;
+            LocalStorage::Stack(slot)
+        };
+        self.vars.insert(name, (storage, ty));
+        Ok(())
+    }
+
+    fn expr_ty(&self, e: &Expr) -> Option<Ty> {
+        match &e.kind {
+            ExprKind::Call { callee, .. } => match &callee.kind {
+                ExprKind::Ident(n) => self.sema.functions.get(n).map(|f| f.ret.clone()),
+                _ => None,
+            },
+            ExprKind::Ident(n) => self
+                .vars
+                .get(n)
+                .map(|(_, t)| t.clone())
+                .or_else(|| self.globals.get(n).map(|(_, t)| t.clone()))
+                .or_else(|| self.sema.functions.get(n).map(|f| f.ret.clone())),
+            ExprKind::Field { base, name, .. } => {
+                let bt = self.expr_ty(base)?;
+                let cname = bt.class_name()?;
+                self.sema
+                    .classes
+                    .get(cname)?
+                    .member(name)
+                    .map(|m| m.ty.clone())
+            }
+            ExprKind::Addr(inner) => Some(Ty::Ptr(Box::new(self.expr_ty(inner)?))),
+            ExprKind::Deref(inner) => match self.expr_ty(inner)? {
+                Ty::Ptr(t) => Some(*t),
+                _ => None,
+            },
+            ExprKind::Index { base, .. } => match self.expr_ty(base)? {
+                Ty::Array(elem, _) | Ty::Ptr(elem) => Some(*elem),
+                _ => None,
+            },
+            ExprKind::Int(_) | ExprKind::Char(_) => Some(Ty::I64),
+            ExprKind::Float(_) => Some(Ty::F64),
+            ExprKind::Str(_) => Some(Ty::Ptr(Box::new(Ty::U8))),
+            _ => None,
+        }
+    }
+
+    fn field_loc(&mut self, expr: &Expr) -> Result<(Value, Ty, i32), CodegenError> {
+        let ExprKind::Field { base, name, .. } = &expr.kind else {
+            return Err(CodegenError::Msg("not a field".into()));
+        };
+        let bt = self
+            .expr_ty(base)
+            .ok_or_else(|| CodegenError::Msg(format!("cannot type field base for `{name}`")))?;
+        let cname = bt
+            .class_name()
+            .ok_or_else(|| CodegenError::Msg(format!("`{name}` on non-class")))?
+            .to_string();
+        let member = self
+            .sema
+            .classes
+            .get(&cname)
+            .and_then(|c| c.member(name))
+            .ok_or_else(|| CodegenError::Msg(format!("no member `{name}` on {cname}")))?;
+        let ty = member.ty.clone();
+        let off = member.offset as i32;
+        let ptr = self.expr(base)?;
+        Ok((ptr, ty, off))
+    }
+
+    fn place(&mut self, expr: &Expr) -> Result<(Value, Ty, i32), CodegenError> {
+        match &expr.kind {
+            ExprKind::Ident(name) => {
+                if let Some((storage, ty)) = self.vars.get(name).cloned() {
+                    let ptr = match storage {
+                        LocalStorage::Value(var) if ty.is_aggregate() => self.bcx.use_var(var),
+                        LocalStorage::Stack(slot) => {
+                            self.bcx.ins().stack_addr(self.ptr_ty, slot, 0)
+                        }
+                        LocalStorage::Value(_) => {
+                            return Err(CodegenError::Msg(format!(
+                                "local `{name}` is not addressable"
+                            )))
+                        }
+                    };
+                    return Ok((ptr, ty, 0));
+                }
+                if let Some((id, ty)) = self.globals.get(name).cloned() {
+                    let global = self.module.declare_data_in_func(id, self.bcx.func);
+                    let ptr = self.bcx.ins().symbol_value(self.ptr_ty, global);
+                    return Ok((ptr, ty, 0));
+                }
+                Err(CodegenError::Msg(format!("unknown variable `{name}`")))
+            }
+            ExprKind::Field { .. } => self.field_loc(expr),
+            ExprKind::Deref(inner) => {
+                let ty = match self.expr_ty(inner) {
+                    Some(Ty::Ptr(ty)) => *ty,
+                    _ => return Err(CodegenError::Msg("cannot dereference non-pointer".into())),
+                };
+                Ok((self.expr(inner)?, ty, 0))
+            }
+            ExprKind::Index { base, index } => {
+                let elem = match self.expr_ty(base) {
+                    Some(Ty::Array(elem, _)) | Some(Ty::Ptr(elem)) => *elem,
+                    _ => return Err(CodegenError::Msg("cannot index non-array value".into())),
+                };
+                let base_ptr = self.expr(base)?;
+                let index = self.expr(index)?;
+                let byte_offset = self.bcx.ins().imul_imm_s(index, elem.size());
+                let ptr = self.bcx.ins().iadd(base_ptr, byte_offset);
+                Ok((ptr, elem, 0))
+            }
+            _ => Err(CodegenError::Msg("expression is not an addressable place".into())),
+        }
+    }
+
+    fn place_addr(&mut self, ptr: Value, off: i32) -> Value {
+        if off == 0 {
+            ptr
+        } else {
+            let off = self.bcx.ins().iconst(self.ptr_ty, i64::from(off));
+            self.bcx.ins().iadd(ptr, off)
+        }
+    }
+
+    fn read_place(&mut self, ptr: Value, ty: &Ty, off: i32) -> Result<Value, CodegenError> {
+        if ty.is_aggregate() {
+            Ok(self.place_addr(ptr, off))
+        } else {
+            self.load_mem(ptr, off, ty)
+        }
+    }
+
+    fn write_place(
+        &mut self,
+        ptr: Value,
+        ty: &Ty,
+        off: i32,
+        val: Value,
+    ) -> Result<(), CodegenError> {
+        if ty.is_aggregate() {
+            let dst = self.place_addr(ptr, off);
+            self.memcpy(dst, val, ty.size())
+        } else {
+            self.store_mem(ptr, off, ty, val)
+        }
+    }
+
+    fn initialize(&mut self, dst: Value, ty: &Ty, init: &Expr) -> Result<(), CodegenError> {
+        match (ty, &init.kind) {
+            (Ty::Array(elem, count), ExprKind::InitList(values)) => {
+                let limit = count.map_or(values.len(), |n| n.max(0) as usize);
+                for (index, value) in values.iter().take(limit).enumerate() {
+                    let offset = elem.size().checked_mul(index as i64).ok_or_else(|| {
+                        CodegenError::Msg("array initializer offset overflow".into())
+                    })?;
+                    let offset = i32::try_from(offset).map_err(|_| {
+                        CodegenError::Msg("array initializer is too large".into())
+                    })?;
+                    let item_dst = self.place_addr(dst, offset);
+                    self.initialize(item_dst, elem, value)?;
+                }
+                Ok(())
+            }
+            (Ty::Class { name, .. }, ExprKind::InitList(values)) => {
+                let members = self
+                    .sema
+                    .classes
+                    .get(name)
+                    .map(|class| class.members.clone())
+                    .ok_or_else(|| CodegenError::Msg(format!("unknown class `{name}`")))?;
+                for (member, value) in members.iter().zip(values) {
+                    let offset = i32::try_from(member.offset)
+                        .map_err(|_| CodegenError::Msg("class initializer is too large".into()))?;
+                    let member_dst = self.place_addr(dst, offset);
+                    self.initialize(member_dst, &member.ty, value)?;
+                }
+                Ok(())
+            }
+            (_, ExprKind::InitList(values)) => {
+                if let Some(value) = values.first() {
+                    self.initialize(dst, ty, value)
+                } else {
+                    Ok(())
+                }
+            }
+            _ if ty.is_aggregate() => {
+                let src = self.expr(init)?;
+                self.memcpy(dst, src, ty.size())
+            }
+            _ => {
+                let value = self.expr(init)?;
+                self.store_mem(dst, 0, ty, value)
+            }
+        }
+    }
+
+    fn load_mem(&mut self, ptr: Value, off: i32, ty: &Ty) -> Result<Value, CodegenError> {
+        let mt = mem_clif(ty);
+        let v = self
+            .bcx
+            .ins()
+            .load(mt, MemFlagsData::trusted(), ptr, off);
+        if mt == types::I64 || mt == types::F64 {
+            Ok(v)
+        } else if ty.is_unsigned() {
+            Ok(self.bcx.ins().uextend(types::I64, v))
+        } else {
+            Ok(self.bcx.ins().sextend(types::I64, v))
+        }
+    }
+
+    fn store_mem(&mut self, ptr: Value, off: i32, ty: &Ty, val: Value) -> Result<(), CodegenError> {
+        let mt = mem_clif(ty);
+        let v = if mt == types::I64 || mt == types::F64 {
+            val
+        } else {
+            self.bcx.ins().ireduce(mt, val)
+        };
+        self.bcx.ins().store(MemFlagsData::trusted(), v, ptr, off);
+        Ok(())
+    }
+
+    fn memset(&mut self, ptr: Value, val: i64, n: i64) -> Result<(), CodegenError> {
+        let id = *self
+            .func_ids
+            .get("MemSet")
+            .ok_or_else(|| CodegenError::Msg("MemSet missing".into()))?;
+        let local = self.module.declare_func_in_func(id, self.bcx.func);
+        let v = self.bcx.ins().iconst(types::I64, val);
+        let nv = self.bcx.ins().iconst(types::I64, n);
+        self.bcx.ins().call(local, &[ptr, v, nv]);
+        Ok(())
+    }
+
+    fn memcpy(&mut self, dst: Value, src: Value, n: i64) -> Result<(), CodegenError> {
+        let id = *self
+            .func_ids
+            .get("MemCpy")
+            .ok_or_else(|| CodegenError::Msg("MemCpy missing".into()))?;
+        let local = self.module.declare_func_in_func(id, self.bcx.func);
+        let nv = self.bcx.ins().iconst(types::I64, n);
+        self.bcx.ins().call(local, &[dst, src, nv]);
+        Ok(())
+    }
+
     fn finish_returns(&mut self) {
         if self.bcx.is_unreachable() {
             return;
@@ -256,16 +540,42 @@ impl FnCg<'_, '_> {
             }
             Stmt::Decl(v) => {
                 let ty = resolve_ty(&v.ty, &self.sema.classes);
+                if self.module_scope {
+                    let (id, global_ty) = self.globals.get(&v.name).cloned().ok_or_else(|| {
+                        CodegenError::Msg(format!("global `{}` was not declared", v.name))
+                    })?;
+                    let global = self.module.declare_data_in_func(id, self.bcx.func);
+                    let ptr = self.bcx.ins().symbol_value(self.ptr_ty, global);
+                    if let Some(init) = &v.init {
+                        self.initialize(ptr, &global_ty, init)?;
+                    }
+                    return Ok(());
+                }
+                if ty.is_aggregate() {
+                    let sz = ty.size().max(8) as u32;
+                    let slot = self.bcx.create_sized_stack_slot(StackSlotData::new(
+                        StackSlotKind::ExplicitSlot,
+                        sz,
+                        3,
+                    ));
+                    let ptr = self.bcx.ins().stack_addr(self.ptr_ty, slot, 0);
+                    self.memset(ptr, 0, ty.size())?;
+                    if let Some(init) = &v.init {
+                        self.initialize(ptr, &ty, init)?;
+                    }
+                    let var = self.bcx.declare_var(self.ptr_ty);
+                    self.bcx.def_var(var, ptr);
+                    self.vars
+                        .insert(v.name.clone(), (LocalStorage::Value(var), ty));
+                    return Ok(());
+                }
                 let cty = clif_ty(&ty, self.ptr_ty);
-                let var = self.bcx.declare_var(cty);
                 let init = if let Some(e) = &v.init {
                     self.expr(e)?
                 } else {
                     self.zero(cty)
                 };
-                self.bcx.def_var(var, init);
-                self.vars.insert(v.name.clone(), (var, ty));
-                Ok(())
+                self.define_local(v.name.clone(), ty, init)
             }
             Stmt::If {
                 cond, then, else_, ..
@@ -411,9 +721,13 @@ impl FnCg<'_, '_> {
             ExprKind::Char(v) => Ok(self.bcx.ins().iconst(types::I64, *v)),
             ExprKind::Float(v) => Ok(self.bcx.ins().f64const(Ieee64::with_float(*v))),
             ExprKind::Str(s) => self.intern_str(s),
+            ExprKind::InitList(_) => Err(CodegenError::Msg(
+                "initializer list used outside a declaration".into(),
+            )),
             ExprKind::Ident(name) => {
-                if let Some((var, _)) = self.vars.get(name) {
-                    Ok(self.bcx.use_var(*var))
+                if self.vars.contains_key(name) || self.globals.contains_key(name) {
+                    let (ptr, ty, off) = self.place(expr)?;
+                    self.read_place(ptr, &ty, off)
                 } else if self.sema.functions.contains_key(name) {
                     // function address
                     let id = self.func_ids[name];
@@ -453,71 +767,71 @@ impl FnCg<'_, '_> {
                 }
                 Ok(acc.unwrap())
             }
+            ExprKind::Sequence(exprs) => {
+                let mut value = self.bcx.ins().iconst(types::I64, 0);
+                for item in exprs {
+                    value = self.expr(item)?;
+                }
+                Ok(value)
+            }
             ExprKind::Call { callee, args } => self.call(callee, args),
             ExprKind::Addr(inner) => {
-                // only ident locals for now — return pointer via stack slot later
-                if let ExprKind::Ident(name) = &inner.kind {
-                    if let Some((var, ty)) = self.vars.get(name).cloned() {
-                        let slot = self
-                            .bcx
-                            .create_sized_stack_slot(StackSlotData::new(
-                                StackSlotKind::ExplicitSlot,
-                                ty.size().max(8) as u32,
-                                0,
-                            ));
-                        let v = self.bcx.use_var(var);
-                        self.bcx.ins().stack_store(self.ptr_ty, v, slot, 0);
-                        return Ok(self.bcx.ins().stack_addr(self.ptr_ty, slot, 0));
-                    }
-                }
-                Err(CodegenError::Msg("&expr only supports locals for now".into()))
+                let (ptr, _, off) = self.place(inner)?;
+                Ok(self.place_addr(ptr, off))
             }
-            ExprKind::Deref(inner) => {
-                let p = self.expr(inner)?;
-                let flags = MemFlagsData::trusted();
-                Ok(self.bcx.ins().load(types::I64, flags, p, 0))
-            }
-            ExprKind::Index { base, index } => {
-                let p = self.expr(base)?;
-                let i = self.expr(index)?;
-                let off = self.bcx.ins().imul_imm_s(i, 8);
-                let addr = self.bcx.ins().iadd(p, off);
-                let flags = MemFlagsData::trusted();
-                Ok(self.bcx.ins().load(types::I64, flags, addr, 0))
+            ExprKind::Deref(_) | ExprKind::Index { .. } | ExprKind::Field { .. } => {
+                let (ptr, ty, off) = self.place(expr)?;
+                self.read_place(ptr, &ty, off)
             }
             ExprKind::Cast { expr, .. } => self.expr(expr),
             ExprKind::Sizeof(ty) => {
                 let t = resolve_ty(ty, &self.sema.classes);
                 Ok(self.bcx.ins().iconst(types::I64, t.size()))
             }
+            ExprKind::Offset { class, member } => {
+                let offset = self
+                    .sema
+                    .classes
+                    .get(class)
+                    .and_then(|info| info.member(member))
+                    .map(|info| info.offset)
+                    .ok_or_else(|| {
+                        CodegenError::Msg(format!("unknown class member `{class}.{member}`"))
+                    })?;
+                Ok(self.bcx.ins().iconst(types::I64, offset))
+            }
             ExprKind::InsBin(_) => Ok(self.bcx.ins().iconst(self.ptr_ty, 0)),
             ExprKind::DollarDollar => Ok(self.bcx.ins().iconst(types::I64, 0)),
-            other => Err(CodegenError::Msg(format!(
-                "expression not implemented: {other:?}"
-            ))),
         }
     }
 
     fn incdec(&mut self, op: UnOp, expr: &Expr) -> Result<Value, CodegenError> {
-        let ExprKind::Ident(name) = &expr.kind else {
-            return Err(CodegenError::Msg("++/-- only on locals".into()));
-        };
-        let (var, _) = self
-            .vars
-            .get(name)
-            .cloned()
-            .ok_or_else(|| CodegenError::Msg(format!("unknown `{name}`")))?;
-        let cur = self.bcx.use_var(var);
-        let one = self.bcx.ins().iconst(types::I64, 1);
-        let nxt = match op {
-            UnOp::PreInc | UnOp::PostInc => self.bcx.ins().iadd(cur, one),
-            _ => self.bcx.ins().isub(cur, one),
-        };
-        self.bcx.def_var(var, nxt);
-        Ok(match op {
-            UnOp::PostInc | UnOp::PostDec => cur,
-            _ => nxt,
-        })
+        if matches!(
+            expr.kind,
+            ExprKind::Ident(_)
+                | ExprKind::Field { .. }
+                | ExprKind::Deref(_)
+                | ExprKind::Index { .. }
+        ) {
+            let (ptr, ty, off) = self.place(expr)?;
+            if ty.is_aggregate() {
+                return Err(CodegenError::Msg("cannot increment aggregate value".into()));
+            }
+            let cur = self.load_mem(ptr, off, &ty)?;
+            let one = self.bcx.ins().iconst(types::I64, 1);
+            let nxt = match op {
+                UnOp::PreInc | UnOp::PostInc => self.bcx.ins().iadd(cur, one),
+                _ => self.bcx.ins().isub(cur, one),
+            };
+            self.write_place(ptr, &ty, off, nxt)?;
+            return Ok(match op {
+                UnOp::PostInc | UnOp::PostDec => cur,
+                _ => nxt,
+            });
+        }
+        Err(CodegenError::Msg(
+            "++/-- target is not addressable".into(),
+        ))
     }
 
     fn cmp(&mut self, op: BinOp, l: Value, r: Value) -> Result<Value, CodegenError> {
@@ -587,34 +901,43 @@ impl FnCg<'_, '_> {
 
     fn assign(&mut self, op: BinOp, lhs: &Expr, rhs: &Expr) -> Result<Value, CodegenError> {
         let r = self.expr(rhs)?;
-        let ExprKind::Ident(name) = &lhs.kind else {
-            return Err(CodegenError::Msg("assignment target must be a local".into()));
-        };
-        let (var, _) = self
-            .vars
-            .get(name)
-            .cloned()
-            .ok_or_else(|| CodegenError::Msg(format!("unknown `{name}`")))?;
-        let val = if op == BinOp::Assign {
-            r
-        } else {
-            let cur = self.bcx.use_var(var);
-            match op {
-                BinOp::AddEq => self.bcx.ins().iadd(cur, r),
-                BinOp::SubEq => self.bcx.ins().isub(cur, r),
-                BinOp::MulEq => self.bcx.ins().imul(cur, r),
-                BinOp::DivEq => self.bcx.ins().sdiv(cur, r),
-                BinOp::ModEq => self.bcx.ins().srem(cur, r),
-                BinOp::AndEq => self.bcx.ins().band(cur, r),
-                BinOp::OrEq => self.bcx.ins().bor(cur, r),
-                BinOp::XorEq => self.bcx.ins().bxor(cur, r),
-                BinOp::ShlEq => self.bcx.ins().ishl(cur, r),
-                BinOp::ShrEq => self.bcx.ins().sshr(cur, r),
-                _ => r,
+        if matches!(
+            lhs.kind,
+            ExprKind::Ident(_)
+                | ExprKind::Field { .. }
+                | ExprKind::Deref(_)
+                | ExprKind::Index { .. }
+        ) {
+            let (ptr, ty, off) = self.place(lhs)?;
+            if ty.is_aggregate() && op != BinOp::Assign {
+                return Err(CodegenError::Msg(
+                    "compound assignment is invalid for aggregates".into(),
+                ));
             }
-        };
-        self.bcx.def_var(var, val);
-        Ok(val)
+            let val = if op == BinOp::Assign {
+                r
+            } else {
+                let cur = self.load_mem(ptr, off, &ty)?;
+                match op {
+                    BinOp::AddEq => self.bcx.ins().iadd(cur, r),
+                    BinOp::SubEq => self.bcx.ins().isub(cur, r),
+                    BinOp::MulEq => self.bcx.ins().imul(cur, r),
+                    BinOp::DivEq => self.bcx.ins().sdiv(cur, r),
+                    BinOp::ModEq => self.bcx.ins().srem(cur, r),
+                    BinOp::AndEq => self.bcx.ins().band(cur, r),
+                    BinOp::OrEq => self.bcx.ins().bor(cur, r),
+                    BinOp::XorEq => self.bcx.ins().bxor(cur, r),
+                    BinOp::ShlEq => self.bcx.ins().ishl(cur, r),
+                    BinOp::ShrEq => self.bcx.ins().sshr(cur, r),
+                    _ => r,
+                }
+            };
+            self.write_place(ptr, &ty, off, val)?;
+            return Ok(val);
+        }
+        Err(CodegenError::Msg(
+            "assignment target is not addressable".into(),
+        ))
     }
 
     fn call(&mut self, callee: &Expr, args: &[Option<Expr>]) -> Result<Value, CodegenError> {
@@ -675,4 +998,3 @@ impl FnCg<'_, '_> {
         Ok(self.bcx.inst_results(call)[0])
     }
 }
-

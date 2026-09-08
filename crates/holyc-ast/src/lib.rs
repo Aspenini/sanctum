@@ -173,6 +173,7 @@ pub enum ExprKind {
     Float(f64),
     Str(String),
     Char(i64),
+    InitList(Vec<Expr>),
     Ident(String),
     /// `$IB` sprite pointer.
     InsBin(i64),
@@ -191,6 +192,7 @@ pub enum ExprKind {
         first: Box<Expr>,
         rest: Vec<(BinOp, Expr)>,
     },
+    Sequence(Vec<Expr>),
     Call {
         callee: Box<Expr>,
         args: Vec<Option<Expr>>, // None = default-arg hole (`Test(,3)`)
@@ -397,6 +399,7 @@ impl Ty {
             "U64" | "U64i" => Ty::U64,
             "F64" | "F64i" => Ty::F64,
             "Bool" => Ty::I64,
+            "CColorROPU32" => Ty::U32,
             _ => return None,
         })
     }
@@ -437,6 +440,22 @@ impl Ty {
 
     pub fn is_void(&self) -> bool {
         matches!(self, Ty::U0 | Ty::I0)
+    }
+
+    pub fn is_unsigned(&self) -> bool {
+        matches!(self, Ty::U8 | Ty::U16 | Ty::U32 | Ty::U64)
+    }
+
+    pub fn is_aggregate(&self) -> bool {
+        matches!(self, Ty::Class { .. } | Ty::Array(_, _))
+    }
+
+    pub fn class_name(&self) -> Option<&str> {
+        match self {
+            Ty::Class { name, .. } => Some(name),
+            Ty::Ptr(inner) => inner.class_name(),
+            _ => None,
+        }
     }
 
     /// HolyC extends loaded values to I64.

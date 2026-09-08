@@ -93,6 +93,18 @@ mod tests {
     }
 
     #[test]
+    fn adjacent_strings_are_concatenated() {
+        tos_runtime::capture_begin();
+        run_source(
+            "strings.HC",
+            "U0 Main() { Print(\"Hello \" \"world\\n\"); } Main;",
+        )
+        .unwrap();
+        let out = tos_runtime::capture_take().unwrap();
+        assert_eq!(out, b"Hello world\n");
+    }
+
+    #[test]
     fn add_and_print() {
         tos_runtime::capture_begin();
         run_source(
@@ -122,6 +134,8 @@ U0 Main()
   }
   for (I64 j=0; j<2; j++)
     s=s+10;
+  for (i=0,j=2; i<2; i++,j--)
+    s=s+j;
   "%d\n",s;
 }
 Main;
@@ -129,8 +143,8 @@ Main;
         )
         .unwrap();
         let out = tos_runtime::capture_take().unwrap();
-        // 1 + (0+1+2) + 10+10 = 24
-        assert_eq!(out, b"24\n");
+        // 1 + (0+1+2) + 10+10 + (2+1) = 27
+        assert_eq!(out, b"27\n");
     }
 
     #[test]
@@ -187,5 +201,240 @@ Main;
         .unwrap();
         let out = tos_runtime::capture_take().unwrap();
         assert_eq!(out, b"included\n");
+    }
+
+    #[test]
+    fn class_fields_packed() {
+        tos_runtime::capture_begin();
+        run_source(
+            "pt.HC",
+            r#"
+class Point
+{
+  I64 x,y;
+};
+U0 Main()
+{
+  Point p;
+  p.x=3;
+  p.y=4;
+  "%d %d %d\n",p.x,p.y,sizeof(Point);
+}
+Main;
+"#,
+        )
+        .unwrap();
+        let out = tos_runtime::capture_take().unwrap();
+        assert_eq!(out, b"3 4 16\n");
+    }
+
+    #[test]
+    fn nested_packed_fields_arrays_and_offsets() {
+        tos_runtime::capture_begin();
+        run_source(
+            "layout.HC",
+            r#"
+class Vec
+{
+  I16 x;
+  U8 tag;
+};
+class Obj
+{
+  U8 lead;
+  Vec pos;
+  U8 samples[3];
+};
+U0 Main()
+{
+  Obj o;
+  o.pos.x=-2;
+  o.pos.tag=255;
+  o.samples[1]=42;
+  "%d %d %d %d %d\n",o.pos.x,o.pos.tag,o.samples[1],
+        offset(Obj.pos),sizeof(Obj);
+}
+Main;
+"#,
+        )
+        .unwrap();
+        let out = tos_runtime::capture_take().unwrap();
+        assert_eq!(out, b"-2 255 42 1 7\n");
+    }
+
+    #[test]
+    fn union_fields_overlap() {
+        tos_runtime::capture_begin();
+        run_source(
+            "union.HC",
+            r#"
+union Word
+{
+  U32 whole;
+  U8 lo;
+};
+U0 Main()
+{
+  Word w;
+  w.whole=258;
+  "%d %d\n",w.lo,sizeof(Word);
+}
+Main;
+"#,
+        )
+        .unwrap();
+        let out = tos_runtime::capture_take().unwrap();
+        assert_eq!(out, b"2 4\n");
+    }
+
+    #[test]
+    fn heap_msize_and_bits() {
+        tos_runtime::capture_begin();
+        run_source(
+            "heap.HC",
+            r#"
+U0 Main()
+{
+  U8 *p=MAlloc(10);
+  "%d\n",MSize(p);
+  Bts(p,0);
+  "%d\n",Bt(p,0);
+  Free(p);
+}
+Main;
+"#,
+        )
+        .unwrap();
+        let out = String::from_utf8(tos_runtime::capture_take().unwrap()).unwrap();
+        let mut lines = out.lines();
+        let sz: i64 = lines.next().unwrap().parse().unwrap();
+        assert!(sz >= 10);
+        assert_eq!(lines.next().unwrap(), "1");
+    }
+
+    #[test]
+    fn addressable_scalars_and_typed_indexing() {
+        tos_runtime::capture_begin();
+        run_source(
+            "places.HC",
+            r#"
+U0 Main()
+{
+  I64 value=3;
+  I64 *value_ptr=&value;
+  U8 bytes[2];
+  U8 *byte_ptr=bytes;
+  *value_ptr=9;
+  byte_ptr[1]=255;
+  "%d %d\n",value,bytes[1];
+}
+Main;
+"#,
+        )
+        .unwrap();
+        let out = tos_runtime::capture_take().unwrap();
+        assert_eq!(out, b"9 255\n");
+    }
+
+    #[test]
+    fn aggregate_initializers_and_multi_declarations() {
+        tos_runtime::capture_begin();
+        run_source(
+            "init.HC",
+            r#"
+class Pair
+{
+  I16 x,y;
+};
+U0 Main()
+{
+  U8 a[3]={1,2,3},b[2]={4,5};
+  Pair p={6,7};
+  "%d %d %d %d\n",a[2],b[1],p.x,p.y;
+}
+Main;
+"#,
+        )
+        .unwrap();
+        let out = tos_runtime::capture_take().unwrap();
+        assert_eq!(out, b"3 5 6 7\n");
+    }
+
+    #[test]
+    fn globals_are_shared_with_functions() {
+        tos_runtime::capture_begin();
+        run_source(
+            "globals.HC",
+            r#"
+I64 counter=5;
+U8 values[2]={10,20},other=3;
+class GlobalPoint
+{
+  I64 x;
+} point;
+U0 Bump()
+{
+  counter++;
+  values[1]+=2;
+  point.x=9;
+}
+U0 Main()
+{
+  Bump;
+  "%d %d %d %d\n",counter,values[1],other,point.x;
+}
+Main;
+"#,
+        )
+        .unwrap();
+        let out = tos_runtime::capture_take().unwrap();
+        assert_eq!(out, b"6 22 3 9\n");
+    }
+
+    #[test]
+    fn circular_queue() {
+        tos_runtime::capture_begin();
+        run_source(
+            "que.HC",
+            r#"
+class Node
+{
+  Node *next,*last;
+  I64 val;
+};
+U0 Main()
+{
+  Node head;
+  Node a;
+  QueInit(&head);
+  a.val=7;
+  QueIns(&a,&head);
+  Node *n=head.next;
+  "%d\n",n->val;
+}
+Main;
+"#,
+        )
+        .unwrap();
+        let out = tos_runtime::capture_take().unwrap();
+        assert_eq!(out, b"7\n");
+    }
+
+    #[test]
+    fn fs_pix_width() {
+        tos_runtime::capture_begin();
+        run_source(
+            "fs.HC",
+            r#"
+U0 Main()
+{
+  "%d\n",Fs->pix_width;
+}
+Main;
+"#,
+        )
+        .unwrap();
+        let out = tos_runtime::capture_take().unwrap();
+        assert_eq!(out, b"640\n");
     }
 }

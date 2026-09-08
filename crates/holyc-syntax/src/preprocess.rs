@@ -5,6 +5,44 @@ use crate::token::{Token, TokenKind};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+// TempleOS source files use Code Page 437 and may have a NUL-delimited binary
+// DolDoc payload appended after the source text.
+const CP437_HIGH: &str = concat!(
+    "ÇüéâäàåçêëèïîìÄÅ",
+    "ÉæÆôöòûùÿÖÜ¢£¥₧ƒ",
+    "áíóúñÑªº¿⌐¬½¼¡«»",
+    "░▒▓│┤╡╢╖╕╣║╗╝╜╛┐",
+    "└┴┬├─┼╞╟╚╔╩╦╠═╬╧",
+    "╨╤╥╙╘╒╓╫╪┘┌█▄▌▐▀",
+    "αßΓπΣσµτΦΘΩδ∞φε∩",
+    "≡±≥≤⌠⌡÷≈°∙·√ⁿ²■ ",
+);
+
+fn decode_source(bytes: &[u8]) -> String {
+    let text = bytes
+        .iter()
+        .position(|byte| *byte == 0)
+        .map_or(bytes, |end| &bytes[..end]);
+    if let Ok(utf8) = std::str::from_utf8(text) {
+        return utf8.to_owned();
+    }
+    let high: Vec<char> = CP437_HIGH.chars().collect();
+    text.iter()
+        .map(|byte| {
+            if byte.is_ascii() {
+                char::from(*byte)
+            } else {
+                high[usize::from(*byte) - 0x80]
+            }
+        })
+        .collect()
+}
+
+fn read_source(path: &Path) -> Result<String, SyntaxError> {
+    let bytes = std::fs::read(path).map_err(|e| SyntaxError::Io(format!("{path:?}: {e}")))?;
+    Ok(decode_source(&bytes))
+}
+
 pub struct PreprocessOpts {
     pub include_dirs: Vec<PathBuf>,
     /// `::/` → this directory (vendored TempleOS root).
@@ -56,7 +94,7 @@ pub fn preprocess(
     path: &Path,
     opts: &PreprocessOpts,
 ) -> Result<Vec<Token>, SyntaxError> {
-    let src = std::fs::read_to_string(path).map_err(|e| SyntaxError::Io(format!("{path:?}: {e}")))?;
+    let src = read_source(path)?;
     let id = session.add_file(path.to_path_buf(), src);
     let file = session.file(id.0).unwrap();
     let src = file.src.clone();
@@ -328,8 +366,7 @@ impl<'a> PpCtx<'a> {
                 path.display()
             )));
         }
-        let src =
-            std::fs::read_to_string(&path).map_err(|e| SyntaxError::Io(format!("{path:?}: {e}")))?;
+        let src = read_source(&path)?;
         let id = self.session.add_file(path.clone(), src);
         let file = self.session.file(id.0).unwrap();
         let src = file.src.clone();
@@ -384,4 +421,20 @@ pub fn lex_buffer(session: &mut Session, path: &str, src: &str) -> Result<Vec<To
     };
     let tokens = Lexer::new(&owned, path, id.0).tokenize()?;
     ctx.expand(&tokens, Path::new(path))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn decodes_cp437_and_ignores_appended_binary() {
+        assert_eq!(CP437_HIGH.chars().count(), 128);
+        assert_eq!(decode_source(b"F64 \xE3;\0\xFF\x00"), "F64 π;");
+    }
+
+    #[test]
+    fn preserves_utf8_sources() {
+        assert_eq!(decode_source("F64 π;".as_bytes()), "F64 π;");
+    }
 }
