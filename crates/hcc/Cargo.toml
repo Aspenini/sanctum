@@ -1,0 +1,23 @@
+[package]
+name = "hcc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "HolyC compiler CLI"
+
+[[bin]]
+name = "hcc"
+path = "src/main.rs"
+
+[lib]
+name = "hcc"
+path = "src/lib.rs"
+
+[dependencies]
+holyc-syntax = { path = "../holyc-syntax" }
+holyc-ast = { path = "../holyc-ast" }
+holyc-parse = { path = "../holyc-parse" }
+holyc-sema = { path = "../holyc-sema" }
+holyc-codegen = { path = "../holyc-codegen" }
+tos-runtime = { path = "../tos-runtime" }
+thiserror.workspace = true

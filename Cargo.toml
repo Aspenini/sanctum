@@ -1,0 +1,19 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "HolyC AOT compiler and TempleOS-compatible runtime"
+
+[workspace.dependencies]
+cranelift-codegen = "0.134"
+cranelift-frontend = "0.134"
+cranelift-module = "0.134"
+cranelift-jit = "0.134"
+cranelift-native = "0.134"
+cranelift-object = "0.134"
+target-lexicon = "0.13"
+thiserror = "2"

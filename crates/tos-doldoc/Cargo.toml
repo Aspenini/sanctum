@@ -1,0 +1,10 @@
+[package]
+name = "tos-doldoc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "DolDoc runtime (bins, Doc*, sprite payloads)"
+
+[dependencies]
+tos-abi = { path = "../tos-abi" }
+tos-runtime = { path = "../tos-runtime" }

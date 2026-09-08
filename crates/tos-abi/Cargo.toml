@@ -1,0 +1,6 @@
+[package]
+name = "tos-abi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "#[repr(C)] TempleOS struct layouts (KernelA.HH)"

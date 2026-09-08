@@ -1,0 +1,9 @@
+[package]
+name = "holyc-ir"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "TempleOS-shaped HolyC intermediate codes"
+
+[dependencies]
+holyc-ast = { path = "../holyc-ast" }

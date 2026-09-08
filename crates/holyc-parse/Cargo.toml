@@ -1,0 +1,11 @@
+[package]
+name = "holyc-parse"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "HolyC recursive-descent parser"
+
+[dependencies]
+holyc-syntax = { path = "../holyc-syntax" }
+holyc-ast = { path = "../holyc-ast" }
+thiserror.workspace = true

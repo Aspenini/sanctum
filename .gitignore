@@ -1,0 +1,14 @@
+/target
+**/*.exe
+**/*.pdb
+**/*.obj
+**/*.o
+**/*.lib
+**/*.rlib
+.idea/
+.vscode/
+*.ilk
+*.exp
+
+# Local TempleOS tree used as language/API spec. Not part of this repo.
+/TempleOS/

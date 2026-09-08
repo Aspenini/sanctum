@@ -1,0 +1,9 @@
+[package]
+name = "tos-runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "TempleOS kernel primitives for HolyC programs"
+
+[dependencies]
+tos-abi = { path = "../tos-abi" }

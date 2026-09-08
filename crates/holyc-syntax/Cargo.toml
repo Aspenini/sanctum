@@ -1,0 +1,9 @@
+[package]
+name = "holyc-syntax"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "HolyC lexer, tokens, DolDoc-in-source scanner, preprocessor"
+
+[dependencies]
+thiserror.workspace = true
