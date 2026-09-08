@@ -991,6 +991,7 @@ name = "tos-gr"
 version = "0.1.0"
 dependencies = [
  "tos-abi",
+ "tos-runtime",
 ]
 
 [[package]]

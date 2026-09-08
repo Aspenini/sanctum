@@ -1070,7 +1070,10 @@ impl FnCg<'_, '_> {
                     })?;
                 Ok(self.bcx.ins().iconst(types::I64, offset))
             }
-            ExprKind::InsBin(_) => Ok(self.bcx.ins().iconst(self.ptr_ty, 0)),
+            // Preserve unresolved DolDoc binary references as opaque non-null
+            // handles. The graphics runtime can render a fallback until the
+            // serialized sprite stream is decoded.
+            ExprKind::InsBin(idx) => Ok(self.bcx.ins().iconst(self.ptr_ty, idx.saturating_add(1))),
             ExprKind::DollarDollar => Ok(self.bcx.ins().iconst(types::I64, 0)),
         }
     }

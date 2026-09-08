@@ -1,6 +1,7 @@
 //! TempleOS-compatible 16-color software graphics primitives.
 
 use std::ffi::CStr;
+use std::mem::size_of;
 use std::ptr;
 use std::slice;
 use tos_abi::{CD3I32, CDC, CTask};
@@ -365,28 +366,64 @@ pub unsafe extern "C" fn tos_GrPrint(
     }
 }
 
-#[unsafe(no_mangle)]
-pub extern "C" fn tos_Sprite3(
-    _dc: *mut CDC,
-    _x: i64,
-    _y: i64,
-    _z: i64,
-    _elems: *mut u8,
-    _just_one: i64,
-) {
+fn draw_sprite_placeholder(dc: *mut CDC, mut x: i64, mut y: i64, mut z: i64, color: u32) {
+    if dc.is_null() {
+        return;
+    }
+    if let Some(ctx) = unsafe { dc.as_ref() }
+        && ctx.flags & DCF_TRANSFORMATION != 0
+        && let Some(transform) = ctx.transform
+    {
+        transform(dc, &mut x, &mut y, &mut z);
+    }
+    let old_color = unsafe { (*dc).color };
+    unsafe { (*dc).color = color };
+    for offset in -3..=3 {
+        unsafe {
+            plot(dc, x + offset, y, z);
+            plot(dc, x, y + offset, z);
+        }
+    }
+    unsafe { (*dc).color = old_color };
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn tos_Sprite3B(_dc: *mut CDC, _x: i64, _y: i64, _z: i64, _elems: *mut u8) {}
+pub extern "C" fn tos_Sprite3(
+    dc: *mut CDC,
+    x: i64,
+    y: i64,
+    z: i64,
+    elems: *mut u8,
+    _just_one: i64,
+) {
+    if !elems.is_null() {
+        draw_sprite_placeholder(dc, x, y, z, tos_abi::YELLOW);
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn tos_Sprite3B(dc: *mut CDC, x: i64, y: i64, z: i64, elems: *mut u8) {
+    if !elems.is_null() {
+        draw_sprite_placeholder(dc, x, y, z, tos_abi::LTGRAY);
+    }
+}
+
+fn owned_sprite_handle(source: *mut u8) -> *mut u8 {
+    let result = unsafe { tos_runtime::tos_CAlloc(size_of::<usize>() as i64, ptr::null_mut()) };
+    if !result.is_null() {
+        unsafe { result.cast::<usize>().write(source as usize) };
+    }
+    result
+}
 
 #[unsafe(no_mangle)]
 pub extern "C" fn tos_SpriteInterpolate(t: f64, a: *mut u8, b: *mut u8) -> *mut u8 {
-    if t < 0.5 { a } else { b }
+    owned_sprite_handle(if t < 0.5 { a } else { b })
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn tos_SpriteTransform(elems: *mut u8, _r: *mut i64) -> *mut u8 {
-    elems
+    owned_sprite_handle(elems)
 }
 
 #[cfg(test)]
@@ -427,5 +464,19 @@ mod tests {
             assert_eq!(*(*dc).body.add(2 * 8 + 2), 10);
             assert_eq!(*(*dc).body, 0);
         }
+    }
+
+    #[test]
+    fn unresolved_sprite_handles_render_and_clone_safely() {
+        let dc = tos_DCNew(8, 8, ptr::null_mut(), 0);
+        let opaque = 2_usize as *mut u8;
+        tos_Sprite3(dc, 4, 4, 0, opaque, 0);
+        unsafe {
+            assert_eq!(*(*dc).body.add(4 * 8 + 4), tos_abi::YELLOW as u8);
+        }
+
+        let interpolated = tos_SpriteInterpolate(0.25, opaque, 3_usize as *mut u8);
+        assert!(unsafe { tos_runtime::tos_MSize(interpolated) } >= size_of::<usize>() as i64);
+        unsafe { tos_runtime::tos_Free(interpolated) };
     }
 }
