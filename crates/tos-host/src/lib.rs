@@ -1,9 +1,12 @@
 //! Host display and input boundary for TempleOS programs.
 
+use minifb::{Key, KeyRepeat, Window, WindowOptions};
+use std::cell::RefCell;
+use std::collections::VecDeque;
 use std::ptr;
 use std::slice;
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use tos_abi::CDC;
 
 pub const DEFAULT_WIDTH: u32 = 640;
@@ -11,6 +14,17 @@ pub const DEFAULT_HEIGHT: u32 = 480;
 
 static SCREEN: OnceLock<usize> = OnceLock::new();
 static FRAMES_PRESENTED: AtomicUsize = AtomicUsize::new(0);
+static INTERACTIVE: AtomicBool = AtomicBool::new(false);
+
+thread_local! {
+    static WINDOW: RefCell<Option<HostWindow>> = const { RefCell::new(None) };
+    static KEYS: RefCell<VecDeque<(i64, i64)>> = const { RefCell::new(VecDeque::new()) };
+}
+
+struct HostWindow {
+    window: Window,
+    pixels: Vec<u32>,
+}
 
 pub fn jit_symbols() -> Vec<(&'static str, *const u8)> {
     vec![
@@ -21,6 +35,12 @@ pub fn jit_symbols() -> Vec<(&'static str, *const u8)> {
 
 pub fn reset() {
     FRAMES_PRESENTED.store(0, Ordering::Release);
+    WINDOW.with(|window| *window.borrow_mut() = None);
+    KEYS.with(|keys| keys.borrow_mut().clear());
+}
+
+pub fn set_interactive(interactive: bool) {
+    INTERACTIVE.store(interactive, Ordering::Release);
 }
 
 fn screen() -> *mut CDC {
@@ -61,17 +81,114 @@ pub fn framebuffer_rgb() -> Vec<u8> {
     rgb
 }
 
+fn push_key(key: Key) {
+    let mapped = match key {
+        Key::Escape => Some((0x1b, 0)),
+        Key::Enter => Some((b'\n' as i64, 0)),
+        Key::Space => Some((b' ' as i64, 0)),
+        Key::Up => Some((0, 0x48)),
+        Key::Down => Some((0, 0x50)),
+        Key::Left => Some((0, 0x4b)),
+        Key::Right => Some((0, 0x4d)),
+        _ => None,
+    };
+    if let Some(key) = mapped {
+        KEYS.with(|keys| keys.borrow_mut().push_back(key));
+    }
+}
+
+fn present_window() {
+    WINDOW.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        if slot.is_none() {
+            match Window::new(
+                "Sanctum - TempleOS",
+                DEFAULT_WIDTH as usize,
+                DEFAULT_HEIGHT as usize,
+                WindowOptions::default(),
+            ) {
+                Ok(window) => {
+                    *slot = Some(HostWindow {
+                        window,
+                        pixels: vec![0; DEFAULT_WIDTH as usize * DEFAULT_HEIGHT as usize],
+                    });
+                }
+                Err(error) => {
+                    eprintln!("unable to create Sanctum window: {error}");
+                    KEYS.with(|keys| keys.borrow_mut().push_back((0x1b, 0)));
+                    return;
+                }
+            }
+        }
+
+        let host = slot.as_mut().expect("window was initialized");
+        let dc = screen();
+        if let Some(dc) = unsafe { dc.as_ref() }
+            && !dc.body.is_null()
+        {
+            let indexed = unsafe {
+                slice::from_raw_parts(
+                    dc.body,
+                    (dc.width as usize).saturating_mul(dc.height as usize),
+                )
+            };
+            for (dst, &color) in host.pixels.iter_mut().zip(indexed) {
+                let [r, g, b] = tos_gr::palette_rgb(color);
+                *dst = (u32::from(r) << 16) | (u32::from(g) << 8) | u32::from(b);
+            }
+        }
+        if let Err(error) = host.window.update_with_buffer(
+            &host.pixels,
+            DEFAULT_WIDTH as usize,
+            DEFAULT_HEIGHT as usize,
+        ) {
+            eprintln!("unable to update Sanctum window: {error}");
+            KEYS.with(|keys| keys.borrow_mut().push_back((0x1b, 0)));
+            return;
+        }
+        if !host.window.is_open() {
+            KEYS.with(|keys| keys.borrow_mut().push_back((0x1b, 0)));
+        }
+        for key in host.window.get_keys_pressed(KeyRepeat::Yes) {
+            push_key(key);
+        }
+    });
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn tos_Refresh() {
+    tos_runtime::background_checkpoint();
     let task = tos_runtime::tos_Fs();
     if let Some(draw) = unsafe { task.as_ref() }.and_then(|task| task.draw_it) {
         draw(task, screen());
         FRAMES_PRESENTED.fetch_add(1, Ordering::AcqRel);
+        if INTERACTIVE.load(Ordering::Acquire) {
+            present_window();
+        }
+    } else if INTERACTIVE.load(Ordering::Acquire) {
+        // Background animation tasks use Refresh as their cooperative yield.
+        std::thread::sleep(std::time::Duration::from_millis(16));
     }
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn tos_ScanKey(ch: *mut i64, scan_code: *mut i64, _echo: i64) -> i64 {
+    if INTERACTIVE.load(Ordering::Acquire) {
+        let key = KEYS.with(|keys| keys.borrow_mut().pop_front());
+        let Some((key_ch, key_scan)) = key else {
+            return 0;
+        };
+        if key_ch == 0x1b {
+            tos_runtime::cancel_background_tasks();
+        }
+        if !ch.is_null() {
+            unsafe { *ch = key_ch };
+        }
+        if !scan_code.is_null() {
+            unsafe { *scan_code = key_scan };
+        }
+        return 1;
+    }
     // Let the HolyC loop produce and present one frame before the headless
     // host sends Escape. Interactive hosts replace this with their key queue.
     if frames_presented() == 0 {
@@ -96,6 +213,16 @@ mod tests {
         assert_eq!(
             framebuffer_rgb().len(),
             DEFAULT_WIDTH as usize * DEFAULT_HEIGHT as usize * 3
+        );
+    }
+
+    #[test]
+    fn maps_arrow_keys_to_templeos_scan_codes() {
+        KEYS.with(|keys| keys.borrow_mut().clear());
+        push_key(Key::Up);
+        assert_eq!(
+            KEYS.with(|keys| keys.borrow_mut().pop_front()),
+            Some((0, 0x48))
         );
     }
 }

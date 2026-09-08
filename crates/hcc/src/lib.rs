@@ -69,6 +69,8 @@ pub fn compile_file(path: &Path, opts: &CompileOptions) -> Result<JitProgram, Hc
 }
 
 pub fn run_source(path: &str, src: &str) -> Result<(), HccError> {
+    tos_host::set_interactive(false);
+    tos_runtime::set_background_tasks_enabled(false);
     tos_host::reset();
     let mut prog = compile_source(path, src)?;
     prog.run()?;
@@ -76,10 +78,25 @@ pub fn run_source(path: &str, src: &str) -> Result<(), HccError> {
 }
 
 pub fn run_file(path: &Path, opts: &CompileOptions) -> Result<(), HccError> {
+    tos_host::set_interactive(false);
+    tos_runtime::set_background_tasks_enabled(false);
     tos_host::reset();
     let mut prog = compile_file(path, opts)?;
     prog.run()?;
     Ok(())
+}
+
+pub fn run_file_interactive(path: &Path, opts: &CompileOptions) -> Result<(), HccError> {
+    tos_host::set_interactive(true);
+    tos_runtime::set_background_tasks_enabled(true);
+    tos_host::reset();
+    let mut prog = compile_file(path, opts)?;
+    let result = prog.run();
+    tos_runtime::cancel_background_tasks();
+    // Background HolyC tasks are parked during shutdown. Keep their JIT code
+    // mapped until the CLI process exits rather than invalidating their PCs.
+    std::mem::forget(prog);
+    result.map_err(HccError::from)
 }
 
 #[cfg(test)]

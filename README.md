@@ -28,12 +28,13 @@ line/polygon rasterization, blits, and the sprite-facing ABI.
 
 `TempleOS/Demo/Games/Talons.HC` now compiles end-to-end and passes a JIT smoke
 run through terrain initialization, its real `DrawIt` callback, a non-empty
-640×480 rendered frame, and cleanup. Without `--run`, `hcc` performs a
-compile-only validation.
+640×480 rendered frame, and cleanup. `--run` opens that framebuffer in a native
+window, enables background HolyC tasks, and feeds Escape, Enter, and arrow keys
+through `ScanKey`; without `--run`, `hcc` performs compile-only validation.
 
-**Next:** decode DolDoc sprite-bin payloads, present the 16-color framebuffer in
-a host window, feed live keyboard input, and schedule animation/music tasks so
-Talons is interactively playable rather than a deterministic smoke run.
+**Next:** decode DolDoc sprite-bin payloads, finish sprite rasterization, and add
+audio synthesis. Talons currently has an interactive graphics preview, but its
+missing embedded sprites keep it short of the intended game presentation.
 
 TempleOS HolyC stays source-compatible (no `F32`/`auto`). Keep a local
 `TempleOS/` tree as the language/API spec if you have one; it is gitignored and

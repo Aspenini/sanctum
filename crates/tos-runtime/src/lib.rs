@@ -12,7 +12,13 @@ use std::cell::RefCell;
 use std::ffi::CStr;
 use std::io::{self, Write};
 use std::slice;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use tos_abi::CQue;
+
+static BACKGROUND_TASKS_ENABLED: AtomicBool = AtomicBool::new(false);
+static BACKGROUND_TASKS_CANCELLED: AtomicBool = AtomicBool::new(false);
+static BACKGROUND_TASKS_STARTED: AtomicUsize = AtomicUsize::new(0);
+static BACKGROUND_TASKS_QUIESCED: AtomicUsize = AtomicUsize::new(0);
 
 thread_local! {
     static CAPTURE: RefCell<Option<Vec<u8>>> = const { RefCell::new(None) };
@@ -21,6 +27,33 @@ thread_local! {
 /// Capture Print output for tests instead of writing stdout.
 pub fn capture_begin() {
     CAPTURE.with(|c| *c.borrow_mut() = Some(Vec::new()));
+}
+
+pub fn set_background_tasks_enabled(enabled: bool) {
+    BACKGROUND_TASKS_CANCELLED.store(false, Ordering::Release);
+    BACKGROUND_TASKS_STARTED.store(0, Ordering::Release);
+    BACKGROUND_TASKS_QUIESCED.store(0, Ordering::Release);
+    BACKGROUND_TASKS_ENABLED.store(enabled, Ordering::Release);
+}
+
+pub fn background_checkpoint() {
+    if task::is_background() && BACKGROUND_TASKS_CANCELLED.load(Ordering::Acquire) {
+        BACKGROUND_TASKS_QUIESCED.fetch_add(1, Ordering::AcqRel);
+        loop {
+            std::thread::park();
+        }
+    }
+}
+
+pub fn cancel_background_tasks() {
+    BACKGROUND_TASKS_CANCELLED.store(true, Ordering::Release);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
+    while BACKGROUND_TASKS_QUIESCED.load(Ordering::Acquire)
+        < BACKGROUND_TASKS_STARTED.load(Ordering::Acquire)
+        && std::time::Instant::now() < deadline
+    {
+        std::thread::yield_now();
+    }
 }
 
 pub fn capture_take() -> Option<Vec<u8>> {
@@ -148,11 +181,19 @@ pub unsafe extern "C" fn tos_Spawn(
     let spawned = task::spawn(parent);
     // CPU-addressed jobs are TempleOS data-parallel work units. Running them
     // inline gives the single-core host correct completion semantics.
-    // Untargeted tasks are long-lived UI/music loops and remain dormant until
-    // the cooperative scheduler lands.
     if target_cpu >= 0 && !fp_start_addr.is_null() {
         let entry: extern "C" fn(*mut u8) = unsafe { std::mem::transmute(fp_start_addr) };
         entry(data);
+    } else if BACKGROUND_TASKS_ENABLED.load(Ordering::Acquire) && !fp_start_addr.is_null() {
+        let entry = fp_start_addr as usize;
+        let data = data as usize;
+        let spawned_addr = spawned as usize;
+        BACKGROUND_TASKS_STARTED.fetch_add(1, Ordering::AcqRel);
+        std::thread::spawn(move || {
+            task::enter_background(spawned_addr as *mut tos_abi::CTask);
+            let entry: extern "C" fn(*mut u8) = unsafe { std::mem::transmute(entry) };
+            entry(data as *mut u8);
+        });
     }
     spawned
 }
@@ -167,7 +208,11 @@ pub extern "C" fn tos_Beep(_ona: i64, _busy: i64) {}
 pub extern "C" fn tos_Snd(_ona: i64) {}
 
 #[unsafe(no_mangle)]
-pub extern "C" fn tos_Play(_song: *const u8, _words: *const u8) {}
+pub extern "C" fn tos_Play(_song: *const u8, _words: *const u8) {
+    // Keep a silent music task paced until audio synthesis is implemented.
+    background_checkpoint();
+    std::thread::sleep(std::time::Duration::from_millis(100));
+}
 
 #[unsafe(no_mangle)]
 pub extern "C" fn tos_MusicSettingsRst() {}
@@ -457,6 +502,7 @@ pub extern "C" fn tos_Wrap(a: f64, base: f64) -> f64 {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn tos_Sleep(ms: i64) {
+    background_checkpoint();
     if ms > 0 {
         std::thread::sleep(std::time::Duration::from_millis(ms as u64));
     }

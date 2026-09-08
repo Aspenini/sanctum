@@ -1,4 +1,4 @@
-use hcc::{CompileOptions, compile_file, run_file, run_source};
+use hcc::{CompileOptions, compile_file, run_file_interactive, run_source};
 use std::env;
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -55,7 +55,7 @@ fn main() -> ExitCode {
         run_source("<eval>", &src)
     } else if let Some(path) = file {
         if should_run {
-            run_file(&path, &opts)
+            run_file_interactive(&path, &opts)
         } else {
             compile_file(&path, &opts).map(|_| ())
         }

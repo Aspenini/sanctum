@@ -6,6 +6,7 @@ use tos_abi::{CCPU, CTask, GR_HEIGHT, GR_WIDTH};
 thread_local! {
     static FS: Cell<*mut CTask> = const { Cell::new(ptr::null_mut()) };
     static GS: Cell<*mut CCPU> = const { Cell::new(ptr::null_mut()) };
+    static BACKGROUND: Cell<bool> = const { Cell::new(false) };
 }
 
 struct HostTask(UnsafeCell<CTask>);
@@ -79,4 +80,14 @@ pub fn gs() -> *mut CCPU {
     } else {
         p
     }
+}
+
+pub fn enter_background(task: *mut CTask) {
+    boot_task();
+    FS.set(task);
+    BACKGROUND.set(true);
+}
+
+pub fn is_background() -> bool {
+    BACKGROUND.get()
 }

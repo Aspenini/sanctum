@@ -278,10 +278,30 @@ pub unsafe extern "C" fn tos_GrLine3(
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn tos_GrFillPoly3(dc: *mut CDC, n: i64, poly: *const CD3I32) -> i64 {
-    if dc.is_null() || poly.is_null() || n < 3 {
+    if dc.is_null() || poly.is_null() || !(3..=4096).contains(&n) {
         return 0;
     }
-    let points = unsafe { slice::from_raw_parts(poly, n as usize) };
+    let source = unsafe { slice::from_raw_parts(poly, n as usize) };
+    let mut transformed;
+    let points = if let Some(ctx) = unsafe { dc.as_ref() }
+        && ctx.flags & DCF_TRANSFORMATION != 0
+        && let Some(transform) = ctx.transform
+    {
+        transformed = Vec::with_capacity(source.len());
+        for point in source {
+            let (mut x, mut y, mut z) =
+                (i64::from(point.x), i64::from(point.y), i64::from(point.z));
+            transform(dc, &mut x, &mut y, &mut z);
+            transformed.push(CD3I32 {
+                x: x.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32,
+                y: y.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32,
+                z: z.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32,
+            });
+        }
+        transformed.as_slice()
+    } else {
+        source
+    };
     let min_y = points.iter().map(|p| p.y).min().unwrap_or(0);
     let max_y = points.iter().map(|p| p.y).max().unwrap_or(-1);
     let mut changed = 0;
@@ -373,6 +393,13 @@ pub extern "C" fn tos_SpriteTransform(elems: *mut u8, _r: *mut i64) -> *mut u8 {
 mod tests {
     use super::*;
 
+    extern "C" fn translate(_dc: *mut CDC, x: *mut i64, y: *mut i64, _z: *mut i64) {
+        unsafe {
+            *x += 2;
+            *y += 2;
+        }
+    }
+
     #[test]
     fn draws_line_into_16_color_bitmap() {
         let dc = tos_DCNew(8, 8, ptr::null_mut(), 0);
@@ -381,6 +408,24 @@ mod tests {
             assert_eq!(tos_GrLine3(dc, 0, 0, 0, 7, 7, 0, 1, 0), 8);
             assert_eq!(*(*dc).body, 4);
             assert_eq!(*(*dc).body.add(63), 4);
+        }
+    }
+
+    #[test]
+    fn transforms_polygon_vertices_before_rasterizing() {
+        let dc = tos_DCNew(8, 8, ptr::null_mut(), 0);
+        let triangle = [
+            CD3I32 { x: 0, y: 0, z: 0 },
+            CD3I32 { x: 2, y: 0, z: 0 },
+            CD3I32 { x: 0, y: 2, z: 0 },
+        ];
+        unsafe {
+            (*dc).color = 10;
+            (*dc).flags |= DCF_TRANSFORMATION;
+            (*dc).transform = Some(translate);
+            assert!(tos_GrFillPoly3(dc, triangle.len() as i64, triangle.as_ptr()) > 0);
+            assert_eq!(*(*dc).body.add(2 * 8 + 2), 10);
+            assert_eq!(*(*dc).body, 0);
         }
     }
 }
