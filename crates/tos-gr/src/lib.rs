@@ -6,6 +6,109 @@ use std::slice;
 use tos_abi::{CD3I32, CDC, CTask};
 
 const DCF_TRANSFORMATION: i32 = 0x100;
+const DCF_SYMMETRY: i32 = 0x200;
+const DCF_JUST_MIRROR: i32 = 0x400;
+
+// TempleOS's standard 8x8 glyphs for printable ASCII, copied from
+// Kernel/FontStd.HC. Each low-to-high byte is one scanline.
+const FONT_ASCII: [u64; 96] = [
+    0x0000000000000000,
+    0x00180018183C3C18,
+    0x0000000000363636,
+    0x006C6CFE6CFE6C6C,
+    0x00187ED07C16FC30,
+    0x0060660C18306606,
+    0x00DC66B61C36361C,
+    0x0000000000181818,
+    0x0030180C0C0C1830,
+    0x000C18303030180C,
+    0x0000187E3C7E1800,
+    0x000018187E181800,
+    0x0C18180000000000,
+    0x000000007E000000,
+    0x0018180000000000,
+    0x0000060C18306000,
+    0x003C666E7E76663C,
+    0x007E181818181C18,
+    0x007E0C183060663C,
+    0x003C66603860663C,
+    0x0030307E363C3830,
+    0x003C6660603E067E,
+    0x003C66663E060C38,
+    0x000C0C0C1830607E,
+    0x003C66663C66663C,
+    0x001C30607C66663C,
+    0x0018180018180000,
+    0x0C18180018180000,
+    0x0030180C060C1830,
+    0x0000007E007E0000,
+    0x000C18306030180C,
+    0x001800181830663C,
+    0x003C06765676663C,
+    0x006666667E66663C,
+    0x003E66663E66663E,
+    0x003C66060606663C,
+    0x001E36666666361E,
+    0x007E06063E06067E,
+    0x000606063E06067E,
+    0x003C66667606663C,
+    0x006666667E666666,
+    0x007E18181818187E,
+    0x001C36303030307C,
+    0x0066361E0E1E3666,
+    0x007E060606060606,
+    0x00C6C6D6D6FEEEC6,
+    0x006666767E6E6666,
+    0x003C66666666663C,
+    0x000606063E66663E,
+    0x006C36566666663C,
+    0x006666363E66663E,
+    0x003C66603C06663C,
+    0x001818181818187E,
+    0x003C666666666666,
+    0x00183C6666666666,
+    0x00C6EEFED6D6C6C6,
+    0x0066663C183C6666,
+    0x001818183C666666,
+    0x007E060C1830607E,
+    0x003E06060606063E,
+    0x00006030180C0600,
+    0x007C60606060607C,
+    0x000000000000663C,
+    0xFFFF000000000000,
+    0x000000000030180C,
+    0x007C667C603C0000,
+    0x003E6666663E0606,
+    0x003C6606663C0000,
+    0x007C6666667C6060,
+    0x003C067E663C0000,
+    0x000C0C0C3E0C0C38,
+    0x3C607C66667C0000,
+    0x00666666663E0606,
+    0x003C1818181C0018,
+    0x0E181818181C0018,
+    0x0066361E36660606,
+    0x003C18181818181C,
+    0x00C6D6D6FE6C0000,
+    0x00666666663E0000,
+    0x003C6666663C0000,
+    0x06063E66663E0000,
+    0xE0607C66667C0000,
+    0x000606066E360000,
+    0x003E603C067C0000,
+    0x00380C0C0C3E0C0C,
+    0x007C666666660000,
+    0x00183C6666660000,
+    0x006CFED6D6C60000,
+    0x00663C183C660000,
+    0x3C607C6666660000,
+    0x007E0C18307E0000,
+    0x003018180E181830,
+    0x0018181818181818,
+    0x000C18187018180C,
+    0x000000000062D68C,
+    0xFFFFFFFFFFFFFFFF,
+];
 
 pub fn palette_rgb(color: u8) -> [u8; 3] {
     // Standard TempleOS 16-color VGA-ish palette.
@@ -87,6 +190,12 @@ pub extern "C" fn tos_DCNew(
         transform: None,
         body,
         depth_buf: ptr::null_mut(),
+        sym_x: 0,
+        sym_y: 0,
+        sym_z: 0,
+        sym_nx: 1.0,
+        sym_ny: 0.0,
+        sym_nz: 0.0,
     }))
 }
 
@@ -109,6 +218,12 @@ pub unsafe extern "C" fn tos_DCAlias(dc: *mut CDC, _task: *mut CTask) -> *mut CD
         transform: src.transform,
         body: src.body,
         depth_buf: src.depth_buf,
+        sym_x: src.sym_x,
+        sym_y: src.sym_y,
+        sym_z: src.sym_z,
+        sym_nx: src.sym_nx,
+        sym_ny: src.sym_ny,
+        sym_nz: src.sym_nz,
     }))
 }
 
@@ -171,7 +286,30 @@ pub unsafe extern "C" fn tos_DCMat4x4Set(dc: *mut CDC, r: *mut i64) {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn tos_DCSymmetrySet(_dc: *mut CDC, _x1: i64, _y1: i64, _x2: i64, _y2: i64) -> i64 {
+pub unsafe extern "C" fn tos_DCSymmetrySet(
+    dc: *mut CDC,
+    x1: i64,
+    y1: i64,
+    x2: i64,
+    y2: i64,
+) -> i64 {
+    if dc.is_null() || (x1 == x2 && y1 == y2) {
+        return 0;
+    }
+    let nx = (y2 - y1) as f64;
+    let ny = (x1 - x2) as f64;
+    let magnitude = nx.hypot(ny);
+    if magnitude == 0.0 {
+        return 0;
+    }
+    unsafe {
+        (*dc).sym_x = x1.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32;
+        (*dc).sym_y = y1.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32;
+        (*dc).sym_z = 0;
+        (*dc).sym_nx = nx / magnitude;
+        (*dc).sym_ny = ny / magnitude;
+        (*dc).sym_nz = 0.0;
+    }
     1
 }
 
@@ -226,6 +364,100 @@ unsafe fn plot(dc: *mut CDC, x: i64, y: i64, z: i64) -> bool {
     changed
 }
 
+unsafe fn reflect(dc: *const CDC, x: &mut i64, y: &mut i64, z: &mut i64) {
+    let ctx = unsafe { &*dc };
+    let dx = (*x - i64::from(ctx.sym_x)) as f64;
+    let dy = (*y - i64::from(ctx.sym_y)) as f64;
+    let dz = (*z - i64::from(ctx.sym_z)) as f64;
+    let distance = dx * ctx.sym_nx + dy * ctx.sym_ny + dz * ctx.sym_nz;
+    *x = ((*x as f64) - 2.0 * distance * ctx.sym_nx).round() as i64;
+    *y = ((*y as f64) - 2.0 * distance * ctx.sym_ny).round() as i64;
+    *z = ((*z as f64) - 2.0 * distance * ctx.sym_nz).round() as i64;
+}
+
+unsafe fn plot_brush(dc: *mut CDC, x: i64, y: i64, z: i64) -> i64 {
+    let thick = unsafe { (*dc).thick }.clamp(1, 128) as i64;
+    if thick == 1 {
+        return unsafe { plot(dc, x, y, z) } as i64;
+    }
+    let radius = thick;
+    let half = thick / 2;
+    let mut changed = 0;
+    for dy in -half..=half {
+        for dx in -half..=half {
+            if 4 * (dx * dx + dy * dy) <= radius * radius {
+                changed += unsafe { plot(dc, x + dx, y + dy, z) } as i64;
+            }
+        }
+    }
+    changed
+}
+
+unsafe fn raster_line(
+    dc: *mut CDC,
+    mut x1: i64,
+    mut y1: i64,
+    z1: i64,
+    x2: i64,
+    y2: i64,
+    z2: i64,
+    step: i64,
+    start: i64,
+) -> i64 {
+    let dx = (x2 - x1).abs();
+    let sx = if x1 < x2 { 1 } else { -1 };
+    let dy = -(y2 - y1).abs();
+    let sy = if y1 < y2 { 1 } else { -1 };
+    let total = dx.max(-dy).max(1);
+    let mut err = dx + dy;
+    let mut changed = 0_i64;
+    let mut n = 0_i64;
+    loop {
+        if n >= start && (n - start) % step.max(1) == 0 {
+            let z = z1 + (z2 - z1) * n / total;
+            changed += unsafe { plot_brush(dc, x1, y1, z) };
+        }
+        if x1 == x2 && y1 == y2 {
+            break;
+        }
+        let twice = 2 * err;
+        if twice >= dy {
+            err += dy;
+            x1 += sx;
+        }
+        if twice <= dx {
+            err += dx;
+            y1 += sy;
+        }
+        n += 1;
+    }
+    changed
+}
+
+unsafe fn fill_polygon_pixels(dc: *mut CDC, points: &[CD3I32]) -> i64 {
+    let min_y = points.iter().map(|point| point.y).min().unwrap_or(0);
+    let max_y = points.iter().map(|point| point.y).max().unwrap_or(-1);
+    let mut changed = 0;
+    for y in min_y..=max_y {
+        let mut crossings = Vec::new();
+        for index in 0..points.len() {
+            let a = points[index];
+            let b = points[(index + 1) % points.len()];
+            if (a.y <= y && b.y > y) || (b.y <= y && a.y > y) {
+                let x = a.x as i64 + (y - a.y) as i64 * (b.x - a.x) as i64 / (b.y - a.y) as i64;
+                crossings.push(x);
+            }
+        }
+        crossings.sort_unstable();
+        for pair in crossings.chunks_exact(2) {
+            for x in pair[0]..=pair[1] {
+                changed += unsafe { plot(dc, x, y as i64, points[0].z as i64) } as i64;
+            }
+        }
+    }
+    changed
+}
+
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn tos_GrLine3(
     dc: *mut CDC,
@@ -246,34 +478,22 @@ pub unsafe extern "C" fn tos_GrLine3(
             }
         }
     }
-    let dx = (x2 - x1).abs();
-    let sx = if x1 < x2 { 1 } else { -1 };
-    let dy = -(y2 - y1).abs();
-    let sy = if y1 < y2 { 1 } else { -1 };
-    let total = dx.max(-dy).max(1);
-    let mut err = dx + dy;
     let mut changed = 0_i64;
-    let mut n = 0_i64;
-    loop {
-        if n >= start && (n - start) % step.max(1) == 0 {
-            let z = z1 + (z2 - z1) * n / total;
-            changed += unsafe { plot(dc, x1, y1, z) } as i64;
+    if let Some(ctx) = unsafe { dc.as_ref() }
+        && ctx.flags & DCF_SYMMETRY != 0
+    {
+        let (mut mx1, mut my1, mut mz1) = (x1, y1, z1);
+        let (mut mx2, mut my2, mut mz2) = (x2, y2, z2);
+        unsafe {
+            reflect(dc, &mut mx1, &mut my1, &mut mz1);
+            reflect(dc, &mut mx2, &mut my2, &mut mz2);
+            changed += raster_line(dc, mx1, my1, mz1, mx2, my2, mz2, step, start);
         }
-        if x1 == x2 && y1 == y2 {
-            break;
+        if ctx.flags & DCF_JUST_MIRROR != 0 {
+            return changed;
         }
-        let twice = 2 * err;
-        if twice >= dy {
-            err += dy;
-            x1 += sx;
-        }
-        if twice <= dx {
-            err += dx;
-            y1 += sy;
-        }
-        n += 1;
     }
-    changed
+    changed + unsafe { raster_line(dc, x1, y1, z1, x2, y2, z2, step, start) }
 }
 
 #[unsafe(no_mangle)]
@@ -302,27 +522,25 @@ pub unsafe extern "C" fn tos_GrFillPoly3(dc: *mut CDC, n: i64, poly: *const CD3I
     } else {
         source
     };
-    let min_y = points.iter().map(|p| p.y).min().unwrap_or(0);
-    let max_y = points.iter().map(|p| p.y).max().unwrap_or(-1);
     let mut changed = 0;
-    for y in min_y..=max_y {
-        let mut crossings = Vec::new();
-        for i in 0..points.len() {
-            let a = points[i];
-            let b = points[(i + 1) % points.len()];
-            if (a.y <= y && b.y > y) || (b.y <= y && a.y > y) {
-                let x = a.x as i64 + (y - a.y) as i64 * (b.x - a.x) as i64 / (b.y - a.y) as i64;
-                crossings.push(x);
-            }
+    if let Some(ctx) = unsafe { dc.as_ref() }
+        && ctx.flags & DCF_SYMMETRY != 0
+    {
+        let mut mirrored = points.to_vec();
+        for point in &mut mirrored {
+            let (mut x, mut y, mut z) =
+                (i64::from(point.x), i64::from(point.y), i64::from(point.z));
+            unsafe { reflect(dc, &mut x, &mut y, &mut z) };
+            point.x = x.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32;
+            point.y = y.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32;
+            point.z = z.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32;
         }
-        crossings.sort_unstable();
-        for pair in crossings.chunks_exact(2) {
-            for x in pair[0]..=pair[1] {
-                changed += unsafe { plot(dc, x, y as i64, points[0].z as i64) } as i64;
-            }
+        changed += unsafe { fill_polygon_pixels(dc, &mirrored) };
+        if ctx.flags & DCF_JUST_MIRROR != 0 {
+            return changed;
         }
     }
-    changed
+    changed + unsafe { fill_polygon_pixels(dc, points) }
 }
 
 #[unsafe(no_mangle)]
@@ -351,18 +569,133 @@ pub unsafe extern "C" fn tos_GrBlot(dc: *mut CDC, x: i64, y: i64, image: *mut CD
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn tos_GrPrint(
-    _dc: *mut CDC,
-    _x: i64,
-    _y: i64,
+    dc: *mut CDC,
+    x: i64,
+    y: i64,
     fmt: *const u8,
-    _argc: i64,
-    _argv: *const i64,
+    argc: i64,
+    argv: *const i64,
 ) -> i64 {
-    if fmt.is_null() {
-        0
-    } else {
-        unsafe { CStr::from_ptr(fmt.cast()) }.to_bytes().len() as i64
+    if dc.is_null() || fmt.is_null() {
+        return 0;
     }
+    let fmt = unsafe { CStr::from_ptr(fmt.cast()) }.to_bytes();
+    let args = if argv.is_null() || argc <= 0 {
+        &[][..]
+    } else {
+        unsafe { slice::from_raw_parts(argv, argc.clamp(0, 1024) as usize) }
+    };
+    let text = format_graphics_text(fmt, args);
+    let mut cursor_x = x;
+    let mut cursor_y = y;
+    let mut changed = 0;
+    for byte in text.bytes() {
+        match byte {
+            b'\n' => {
+                cursor_x = x;
+                cursor_y += tos_abi::FONT_HEIGHT;
+            }
+            b'\t' => {
+                let column = ((cursor_x - x) / tos_abi::FONT_WIDTH).max(0);
+                cursor_x = x + ((column + 8) & !7) * tos_abi::FONT_WIDTH;
+            }
+            32..=127 => {
+                let glyph = FONT_ASCII[usize::from(byte - 32)];
+                for row in 0..8 {
+                    let bits = (glyph >> (row * 8)) as u8;
+                    for column in 0..8 {
+                        if bits & (1 << column) != 0 {
+                            changed +=
+                                unsafe { plot(dc, cursor_x + column, cursor_y + row as i64, 0) }
+                                    as i64;
+                        }
+                    }
+                }
+                cursor_x += tos_abi::FONT_WIDTH;
+            }
+            _ => cursor_x += tos_abi::FONT_WIDTH,
+        }
+    }
+    changed
+}
+
+fn pad_formatted(mut value: String, width: usize) -> String {
+    if value.len() < width {
+        value.insert_str(0, &" ".repeat(width - value.len()));
+    }
+    value
+}
+
+fn format_graphics_text(fmt: &[u8], args: &[i64]) -> String {
+    let mut result = String::new();
+    let mut index = 0usize;
+    let mut arg_index = 0usize;
+    while index < fmt.len() {
+        if fmt[index] != b'%' {
+            result.push(char::from(fmt[index]));
+            index += 1;
+            continue;
+        }
+        index += 1;
+        if fmt.get(index) == Some(&b'%') {
+            result.push('%');
+            index += 1;
+            continue;
+        }
+        let mut width = 0usize;
+        while let Some(digit) = fmt.get(index).filter(|byte| byte.is_ascii_digit()) {
+            width = width.saturating_mul(10) + usize::from(*digit - b'0');
+            index += 1;
+        }
+        let precision = if fmt.get(index) == Some(&b'.') {
+            index += 1;
+            let mut value = 0usize;
+            while let Some(digit) = fmt.get(index).filter(|byte| byte.is_ascii_digit()) {
+                value = value.saturating_mul(10) + usize::from(*digit - b'0');
+                index += 1;
+            }
+            Some(value.min(32))
+        } else {
+            None
+        };
+        let Some(specifier) = fmt.get(index).copied() else {
+            result.push('%');
+            break;
+        };
+        index += 1;
+        let argument = *args.get(arg_index).unwrap_or(&0);
+        if specifier != b'%' {
+            arg_index += 1;
+        }
+        let formatted = match specifier {
+            b'd' | b'i' => argument.to_string(),
+            b'u' => (argument as u64).to_string(),
+            b'x' => format!("{:x}", argument as u64),
+            b'X' => format!("{:X}", argument as u64),
+            b'c' => char::from(argument as u8).to_string(),
+            b's' if argument != 0 => unsafe {
+                CStr::from_ptr(argument as *const i8)
+                    .to_string_lossy()
+                    .into_owned()
+            },
+            b's' => String::new(),
+            b'f' | b'g' | b'e' => {
+                let value = f64::from_bits(argument as u64);
+                match (specifier, precision) {
+                    (b'e', Some(places)) => format!("{value:.places$e}"),
+                    (b'e', None) => format!("{value:e}"),
+                    (_, Some(places)) => format!("{value:.places$}"),
+                    _ => value.to_string(),
+                }
+            }
+            other => {
+                result.push('%');
+                char::from(other).to_string()
+            }
+        };
+        result.push_str(&pad_formatted(formatted, width));
+    }
+    result
 }
 
 fn draw_sprite_placeholder(dc: *mut CDC, mut x: i64, mut y: i64, mut z: i64, color: u32) {
@@ -466,7 +799,18 @@ unsafe fn sprite_plot(dc: *mut CDC, mut x: i64, mut y: i64, mut z: i64) -> bool 
     {
         transform(dc, &mut x, &mut y, &mut z);
     }
-    unsafe { plot(dc, x, y, z) }
+    let mut changed = 0;
+    if let Some(ctx) = unsafe { dc.as_ref() }
+        && ctx.flags & DCF_SYMMETRY != 0
+    {
+        let (mut mx, mut my, mut mz) = (x, y, z);
+        unsafe { reflect(dc, &mut mx, &mut my, &mut mz) };
+        changed += unsafe { plot_brush(dc, mx, my, mz) };
+        if ctx.flags & DCF_JUST_MIRROR != 0 {
+            return changed != 0;
+        }
+    }
+    changed + unsafe { plot_brush(dc, x, y, z) } != 0
 }
 
 unsafe fn sprite_line(dc: *mut CDC, x1: i64, y1: i64, z1: i64, x2: i64, y2: i64, z2: i64) {
@@ -906,5 +1250,43 @@ mod tests {
         mesh.push(0);
         tos_Sprite3(dc, 0, 0, 0, mesh.as_mut_ptr(), 0);
         unsafe { assert_eq!(*(*dc).body.add(6 * 16 + 3), tos_abi::LTGREEN as u8) };
+    }
+
+    #[test]
+    fn renders_thick_and_mirrored_lines() {
+        let dc = tos_DCNew(20, 12, ptr::null_mut(), 0);
+        unsafe {
+            (*dc).color = tos_abi::YELLOW;
+            (*dc).thick = 3;
+            tos_GrLine3(dc, 2, 5, 0, 5, 5, 0, 1, 0);
+            assert_eq!(*(*dc).body.add(4 * 20 + 3), tos_abi::YELLOW as u8);
+
+            (*dc).thick = 1;
+            (*dc).flags |= DCF_SYMMETRY;
+            assert_eq!(tos_DCSymmetrySet(dc, 10, 0, 10, 1), 1);
+            tos_GrLine3(dc, 2, 2, 0, 5, 2, 0, 1, 0);
+            assert_eq!(*(*dc).body.add(2 * 20 + 15), tos_abi::YELLOW as u8);
+        }
+    }
+
+    #[test]
+    fn formats_and_draws_hud_text() {
+        let args = [1.5_f64.to_bits() as i64, 7];
+        assert_eq!(
+            format_graphics_text(b"Pitch:%5.1f Fish:%d", &args),
+            "Pitch:  1.5 Fish:7"
+        );
+
+        let dc = tos_DCNew(32, 16, ptr::null_mut(), 0);
+        let text = b"HUD\0";
+        unsafe {
+            (*dc).color = tos_abi::WHITE;
+            assert!(tos_GrPrint(dc, 0, 0, text.as_ptr(), 0, ptr::null()) > 0);
+            assert!(
+                slice::from_raw_parts((*dc).body, 32 * 16)
+                    .iter()
+                    .any(|pixel| *pixel == tos_abi::WHITE as u8)
+            );
+        }
     }
 }

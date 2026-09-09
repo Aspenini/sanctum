@@ -102,6 +102,14 @@ pub struct CDC {
     pub transform: Option<extern "C" fn(*mut CDC, *mut i64, *mut i64, *mut i64)>,
     pub body: *mut u8,
     pub depth_buf: *mut i32,
+    // Host-side extension used to model TempleOS `CGrSym`. Appending these
+    // fields preserves every HolyC-visible offset above.
+    pub sym_x: i32,
+    pub sym_y: i32,
+    pub sym_z: i32,
+    pub sym_nx: f64,
+    pub sym_ny: f64,
+    pub sym_nz: f64,
 }
 
 #[cfg(test)]
