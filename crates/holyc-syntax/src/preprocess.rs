@@ -38,9 +38,13 @@ fn decode_source(bytes: &[u8]) -> String {
         .collect()
 }
 
-fn read_source(path: &Path) -> Result<String, SyntaxError> {
+fn read_source(path: &Path) -> Result<(String, Vec<u8>), SyntaxError> {
     let bytes = std::fs::read(path).map_err(|e| SyntaxError::Io(format!("{path:?}: {e}")))?;
-    Ok(decode_source(&bytes))
+    let binary_tail = bytes
+        .iter()
+        .position(|byte| *byte == 0)
+        .map_or_else(Vec::new, |end| bytes[end + 1..].to_vec());
+    Ok((decode_source(&bytes), binary_tail))
 }
 
 pub struct PreprocessOpts {
@@ -72,12 +76,17 @@ impl Session {
     }
 
     pub fn add_file(&mut self, path: PathBuf, src: String) -> FileId {
+        self.add_file_with_binary(path, src, Vec::new())
+    }
+
+    fn add_file_with_binary(&mut self, path: PathBuf, src: String, binary_tail: Vec<u8>) -> FileId {
         let id = FileId(self.next_id);
         self.next_id += 1;
         self.files.push(SourceFile {
             id: FileId(id.0),
             path,
             src,
+            binary_tail,
         });
         id
     }
@@ -94,8 +103,8 @@ pub fn preprocess(
     path: &Path,
     opts: &PreprocessOpts,
 ) -> Result<Vec<Token>, SyntaxError> {
-    let src = read_source(path)?;
-    let id = session.add_file(path.to_path_buf(), src);
+    let (src, binary_tail) = read_source(path)?;
+    let id = session.add_file_with_binary(path.to_path_buf(), src, binary_tail);
     let file = session.file(id.0).unwrap();
     let src = file.src.clone();
     let path_str = path.display().to_string();
@@ -385,8 +394,10 @@ impl<'a> PpCtx<'a> {
                 path.display()
             )));
         }
-        let src = read_source(&path)?;
-        let id = self.session.add_file(path.clone(), src);
+        let (src, binary_tail) = read_source(&path)?;
+        let id = self
+            .session
+            .add_file_with_binary(path.clone(), src, binary_tail);
         let file = self.session.file(id.0).unwrap();
         let src = file.src.clone();
         let path_str = path.display().to_string();

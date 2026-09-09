@@ -53,6 +53,7 @@ pub fn compile_jit(
     ast: &Module,
     sema: &Sema,
     symbols: &[(&str, *const u8)],
+    binary_resources: &HashMap<(u32, i64), Vec<u8>>,
 ) -> Result<JitProgram, CodegenError> {
     let mut flag_builder = settings::builder();
     flag_builder
@@ -100,6 +101,14 @@ pub fn compile_jit(
     // Data for string literals.
     let mut strings: HashMap<String, DataId> = HashMap::new();
     let mut globals: HashMap<String, (DataId, Ty)> = HashMap::new();
+    let mut bins: HashMap<(u32, i64), DataId> = HashMap::new();
+    for ((file, idx), bytes) in binary_resources {
+        let id = module.declare_data(&format!("bin_{file}_{idx}"), Linkage::Local, false, false)?;
+        let mut desc = DataDescription::new();
+        desc.define(bytes.clone().into_boxed_slice());
+        module.define_data(id, &desc)?;
+        bins.insert((*file, *idx), id);
+    }
     for (index, (name, ty)) in sema.globals.iter().enumerate() {
         let id = module.declare_data(&format!("global{index}"), Linkage::Local, true, false)?;
         let mut desc = DataDescription::new();
@@ -137,6 +146,7 @@ pub fn compile_jit(
                     },
                     func_ids: &func_ids,
                     strings: &mut strings,
+                    bins: &bins,
                     vars: HashMap::new(),
                     globals: &globals,
                     module_scope: false,
@@ -179,6 +189,7 @@ pub fn compile_jit(
                 ret_ty: None,
                 func_ids: &func_ids,
                 strings: &mut strings,
+                bins: &bins,
                 vars: HashMap::new(),
                 globals: &globals,
                 module_scope: true,
@@ -280,6 +291,7 @@ struct FnCg<'a, 'b> {
     ret_ty: Option<Type>,
     func_ids: &'a HashMap<String, FuncId>,
     strings: &'a mut HashMap<String, DataId>,
+    bins: &'a HashMap<(u32, i64), DataId>,
     vars: HashMap<String, (LocalStorage, Ty)>,
     globals: &'a HashMap<String, (DataId, Ty)>,
     module_scope: bool,
@@ -1070,10 +1082,16 @@ impl FnCg<'_, '_> {
                     })?;
                 Ok(self.bcx.ins().iconst(types::I64, offset))
             }
-            // Preserve unresolved DolDoc binary references as opaque non-null
-            // handles. The graphics runtime can render a fallback until the
-            // serialized sprite stream is decoded.
-            ExprKind::InsBin(idx) => Ok(self.bcx.ins().iconst(self.ptr_ty, idx.saturating_add(1))),
+            ExprKind::InsBin(idx) => {
+                if let Some(id) = self.bins.get(&(expr.span.file, *idx)) {
+                    let global = self.module.declare_data_in_func(*id, self.bcx.func);
+                    Ok(self.bcx.ins().symbol_value(self.ptr_ty, global))
+                } else {
+                    // Keep unresolved external DolDoc references non-null so
+                    // callers can still use the visible fallback renderer.
+                    Ok(self.bcx.ins().iconst(self.ptr_ty, idx.saturating_add(1)))
+                }
+            }
             ExprKind::DollarDollar => Ok(self.bcx.ins().iconst(types::I64, 0)),
         }
     }

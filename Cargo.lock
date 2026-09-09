@@ -458,6 +458,7 @@ dependencies = [
  "holyc-sema",
  "holyc-syntax",
  "thiserror",
+ "tos-doldoc",
  "tos-gr",
  "tos-host",
  "tos-runtime",

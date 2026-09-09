@@ -1,7 +1,8 @@
 use holyc_codegen::{CodegenError, JitProgram, compile_jit};
 use holyc_parse::Parser;
 use holyc_sema::Sema;
-use holyc_syntax::{PreprocessOpts, Session, SyntaxError, lex_buffer, preprocess};
+use holyc_syntax::{PreprocessOpts, Session, SyntaxError, TokenKind, lex_buffer, preprocess};
+use std::collections::HashMap;
 use std::path::Path;
 use thiserror::Error;
 
@@ -42,7 +43,7 @@ pub fn compile_source(path: &str, src: &str) -> Result<JitProgram, HccError> {
     syms.extend(tos_gr::jit_symbols());
     syms.extend(tos_host::jit_symbols());
     let refs: Vec<(&str, *const u8)> = syms.iter().map(|(n, p)| (*n, *p)).collect();
-    Ok(compile_jit(&ast, &sema, &refs)?)
+    Ok(compile_jit(&ast, &sema, &refs, &HashMap::new())?)
 }
 
 pub fn compile_file(path: &Path, opts: &CompileOptions) -> Result<JitProgram, HccError> {
@@ -65,7 +66,27 @@ pub fn compile_file(path: &Path, opts: &CompileOptions) -> Result<JitProgram, Hc
     syms.extend(tos_gr::jit_symbols());
     syms.extend(tos_host::jit_symbols());
     let refs: Vec<(&str, *const u8)> = syms.iter().map(|(n, p)| (*n, *p)).collect();
-    Ok(compile_jit(&ast, &sema, &refs)?)
+    let mut expected_by_file: HashMap<u32, Vec<i64>> = HashMap::new();
+    for token in &tokens {
+        let idx = match token.kind {
+            TokenKind::InsBin { idx } | TokenKind::InsBinSize { idx } => idx,
+            _ => continue,
+        };
+        let indices = expected_by_file.entry(token.span.file).or_default();
+        if !indices.contains(&idx) {
+            indices.push(idx);
+        }
+    }
+    let mut binary_resources = HashMap::new();
+    for file in &session.files {
+        let Some(expected) = expected_by_file.get(&file.id.0) else {
+            continue;
+        };
+        for bin in tos_doldoc::parse_embedded_bins(&file.binary_tail, expected) {
+            binary_resources.insert((file.id.0, bin.idx), bin.bytes);
+        }
+    }
+    Ok(compile_jit(&ast, &sema, &refs, &binary_resources)?)
 }
 
 pub fn run_source(path: &str, src: &str) -> Result<(), HccError> {

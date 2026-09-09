@@ -22,4 +22,5 @@ holyc-codegen = { path = "../holyc-codegen" }
 tos-runtime = { path = "../tos-runtime" }
 tos-gr = { path = "../tos-gr" }
 tos-host = { path = "../tos-host" }
+tos-doldoc = { path = "../tos-doldoc" }
 thiserror.workspace = true

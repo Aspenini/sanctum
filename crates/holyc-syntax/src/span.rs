@@ -12,6 +12,8 @@ pub struct SourceFile {
     pub id: FileId,
     pub path: PathBuf,
     pub src: String,
+    /// Bytes following the first NUL in a TempleOS source document.
+    pub binary_tail: Vec<u8>,
 }
 
 impl SourceFile {
