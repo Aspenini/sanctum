@@ -435,8 +435,20 @@ unsafe fn raster_line(
 }
 
 unsafe fn fill_polygon_pixels(dc: *mut CDC, points: &[CD3I32]) -> i64 {
-    let min_y = points.iter().map(|point| point.y).min().unwrap_or(0);
-    let max_y = points.iter().map(|point| point.y).max().unwrap_or(-1);
+    let Some(ctx) = (unsafe { dc.as_ref() }) else {
+        return 0;
+    };
+    let (width, height) = (ctx.width, ctx.height);
+    if width <= 0 || height <= 0 {
+        return 0;
+    }
+    let min_y = points.iter().map(|point| point.y).min().unwrap_or(0).max(0);
+    let max_y = points
+        .iter()
+        .map(|point| point.y)
+        .max()
+        .unwrap_or(-1)
+        .min(height - 1);
     let mut changed = 0;
     for y in min_y..=max_y {
         let mut crossings = Vec::new();
@@ -445,13 +457,27 @@ unsafe fn fill_polygon_pixels(dc: *mut CDC, points: &[CD3I32]) -> i64 {
             let b = points[(index + 1) % points.len()];
             if (a.y <= y && b.y > y) || (b.y <= y && a.y > y) {
                 let x = a.x as i64 + (y - a.y) as i64 * (b.x - a.x) as i64 / (b.y - a.y) as i64;
-                crossings.push(x);
+                let z = i64::from(a.z)
+                    + ((i128::from(b.z) - i128::from(a.z)) * i128::from(y - a.y)
+                        / i128::from(b.y - a.y)) as i64;
+                crossings.push((x, z));
             }
         }
-        crossings.sort_unstable();
+        crossings.sort_unstable_by_key(|crossing| crossing.0);
         for pair in crossings.chunks_exact(2) {
-            for x in pair[0]..=pair[1] {
-                changed += unsafe { plot(dc, x, y as i64, points[0].z as i64) } as i64;
+            let (left_x, left_z) = pair[0];
+            let (right_x, right_z) = pair[1];
+            let first_x = left_x.max(0);
+            let last_x = right_x.min(i64::from(width - 1));
+            for x in first_x..=last_x {
+                let z = if right_x == left_x {
+                    left_z
+                } else {
+                    left_z
+                        + ((i128::from(right_z) - i128::from(left_z)) * i128::from(x - left_x)
+                            / i128::from(right_x - left_x)) as i64
+                };
+                changed += unsafe { plot(dc, x, i64::from(y), z) } as i64;
             }
         }
     }
@@ -479,8 +505,8 @@ pub unsafe extern "C" fn tos_GrLine3(
         }
     }
     let mut changed = 0_i64;
-    if let Some(ctx) = unsafe { dc.as_ref() }
-        && ctx.flags & DCF_SYMMETRY != 0
+    if let Some(flags) = unsafe { dc.as_ref() }.map(|ctx| ctx.flags)
+        && flags & DCF_SYMMETRY != 0
     {
         let (mut mx1, mut my1, mut mz1) = (x1, y1, z1);
         let (mut mx2, mut my2, mut mz2) = (x2, y2, z2);
@@ -489,7 +515,7 @@ pub unsafe extern "C" fn tos_GrLine3(
             reflect(dc, &mut mx2, &mut my2, &mut mz2);
             changed += raster_line(dc, mx1, my1, mz1, mx2, my2, mz2, step, start);
         }
-        if ctx.flags & DCF_JUST_MIRROR != 0 {
+        if flags & DCF_JUST_MIRROR != 0 {
             return changed;
         }
     }
@@ -523,8 +549,8 @@ pub unsafe extern "C" fn tos_GrFillPoly3(dc: *mut CDC, n: i64, poly: *const CD3I
         source
     };
     let mut changed = 0;
-    if let Some(ctx) = unsafe { dc.as_ref() }
-        && ctx.flags & DCF_SYMMETRY != 0
+    if let Some(flags) = unsafe { dc.as_ref() }.map(|ctx| ctx.flags)
+        && flags & DCF_SYMMETRY != 0
     {
         let mut mirrored = points.to_vec();
         for point in &mut mirrored {
@@ -536,7 +562,7 @@ pub unsafe extern "C" fn tos_GrFillPoly3(dc: *mut CDC, n: i64, poly: *const CD3I
             point.z = z.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32;
         }
         changed += unsafe { fill_polygon_pixels(dc, &mirrored) };
-        if ctx.flags & DCF_JUST_MIRROR != 0 {
+        if flags & DCF_JUST_MIRROR != 0 {
             return changed;
         }
     }
@@ -800,13 +826,13 @@ unsafe fn sprite_plot(dc: *mut CDC, mut x: i64, mut y: i64, mut z: i64) -> bool 
         transform(dc, &mut x, &mut y, &mut z);
     }
     let mut changed = 0;
-    if let Some(ctx) = unsafe { dc.as_ref() }
-        && ctx.flags & DCF_SYMMETRY != 0
+    if let Some(flags) = unsafe { dc.as_ref() }.map(|ctx| ctx.flags)
+        && flags & DCF_SYMMETRY != 0
     {
         let (mut mx, mut my, mut mz) = (x, y, z);
         unsafe { reflect(dc, &mut mx, &mut my, &mut mz) };
         changed += unsafe { plot_brush(dc, mx, my, mz) };
-        if ctx.flags & DCF_JUST_MIRROR != 0 {
+        if flags & DCF_JUST_MIRROR != 0 {
             return changed != 0;
         }
     }
@@ -1287,6 +1313,23 @@ mod tests {
                     .iter()
                     .any(|pixel| *pixel == tos_abi::WHITE as u8)
             );
+        }
+    }
+
+    #[test]
+    fn interpolates_polygon_depth_across_scanlines() {
+        let dc = tos_DCNew(8, 8, ptr::null_mut(), 0);
+        let triangle = [
+            CD3I32 { x: 0, y: 0, z: 10 },
+            CD3I32 { x: 7, y: 0, z: 70 },
+            CD3I32 { x: 0, y: 7, z: 70 },
+        ];
+        unsafe {
+            tos_DCDepthBufAlloc(dc);
+            (*dc).color = tos_abi::LTBLUE;
+            tos_GrFillPoly3(dc, 3, triangle.as_ptr());
+            let depth = *(*dc).depth_buf.add(8 + 1);
+            assert!(depth > 10 && depth < 70, "interpolated depth was {depth}");
         }
     }
 }
