@@ -591,67 +591,113 @@ pub unsafe extern "C" fn tos_MemSet(dst: *mut u8, val: i64, n: i64) -> *mut u8 {
 }
 
 fn format_tos(fmt: &str, args: &[i64]) -> String {
-    let mut out = String::new();
-    let mut chars = fmt.chars().peekable();
-    let mut ai = 0usize;
-    while let Some(ch) = chars.next() {
-        if ch != '%' {
-            out.push(ch);
+    let bytes = fmt.as_bytes();
+    let mut result = String::new();
+    let mut index = 0usize;
+    let mut arg_index = 0usize;
+    while index < bytes.len() {
+        if bytes[index] != b'%' {
+            result.push(char::from(bytes[index]));
+            index += 1;
             continue;
         }
-        match chars.next() {
-            None => out.push('%'),
-            Some('%') => out.push('%'),
-            Some('s') => {
-                let p = *args.get(ai).unwrap_or(&0);
-                ai += 1;
-                if p == 0 {
-                    out.push_str("NULL");
-                } else {
-                    let s = unsafe { CStr::from_ptr(p as *const i8) };
-                    out.push_str(&s.to_string_lossy());
+        index += 1;
+        if bytes.get(index) == Some(&b'%') {
+            result.push('%');
+            index += 1;
+            continue;
+        }
+
+        let mut left_aligned = false;
+        let mut zero_padded = false;
+        let mut force_sign = false;
+        while let Some(flag) = bytes.get(index).copied() {
+            match flag {
+                b'-' => left_aligned = true,
+                b'0' => zero_padded = true,
+                b'+' => force_sign = true,
+                b' ' | b'#' => {}
+                _ => break,
+            }
+            index += 1;
+        }
+        let mut width = 0usize;
+        while let Some(digit) = bytes.get(index).filter(|byte| byte.is_ascii_digit()) {
+            width = width.saturating_mul(10) + usize::from(*digit - b'0');
+            index += 1;
+        }
+        let precision = if bytes.get(index) == Some(&b'.') {
+            index += 1;
+            let mut places = 0usize;
+            while let Some(digit) = bytes.get(index).filter(|byte| byte.is_ascii_digit()) {
+                places = places.saturating_mul(10) + usize::from(*digit - b'0');
+                index += 1;
+            }
+            Some(places.min(32))
+        } else {
+            None
+        };
+        let Some(specifier) = bytes.get(index).copied() else {
+            result.push('%');
+            break;
+        };
+        index += 1;
+        let argument = *args.get(arg_index).unwrap_or(&0);
+        arg_index += 1;
+
+        let mut formatted = match specifier {
+            b's' if argument == 0 => "NULL".to_string(),
+            b's' => unsafe {
+                CStr::from_ptr(argument as *const i8)
+                    .to_string_lossy()
+                    .into_owned()
+            },
+            b'c' => char::from(argument as u8).to_string(),
+            b'd' | b'i' | b'n' | b'D' => argument.to_string(),
+            b'u' => (argument as u64).to_string(),
+            b'x' => format!("{:x}", argument as u64),
+            b'X' => format!("{:X}", argument as u64),
+            b'p' => format!("{:#X}", argument as u64),
+            b'f' | b'g' | b'e' | b'E' => {
+                let value = f64::from_bits(argument as u64);
+                match (specifier, precision) {
+                    (b'e', Some(places)) => format!("{value:.places$e}"),
+                    (b'E', Some(places)) => format!("{value:.places$E}"),
+                    (b'e', None) => format!("{value:e}"),
+                    (b'E', None) => format!("{value:E}"),
+                    (_, Some(places)) => format!("{value:.places$}"),
+                    _ => value.to_string(),
                 }
             }
-            Some('c') => {
-                let v = *args.get(ai).unwrap_or(&0);
-                ai += 1;
-                if let Some(c) = char::from_u32((v as u8) as u32) {
-                    out.push(c);
-                }
+            other => {
+                result.push('%');
+                char::from(other).to_string()
             }
-            Some('d' | 'i' | 'n' | 'D') => {
-                let v = *args.get(ai).unwrap_or(&0);
-                ai += 1;
-                out.push_str(&format!("{v}"));
-            }
-            Some('x') => {
-                let v = *args.get(ai).unwrap_or(&0);
-                ai += 1;
-                out.push_str(&format!("{v:x}"));
-            }
-            Some('X') => {
-                let v = *args.get(ai).unwrap_or(&0) as u64;
-                ai += 1;
-                out.push_str(&format!("{v:X}"));
-            }
-            Some('p') => {
-                let v = *args.get(ai).unwrap_or(&0) as u64;
-                ai += 1;
-                out.push_str(&format!("{v:#X}"));
-            }
-            Some('f' | 'e' | 'g') => {
-                let bits = *args.get(ai).unwrap_or(&0) as u64;
-                ai += 1;
-                let v = f64::from_bits(bits);
-                out.push_str(&format!("{v}"));
-            }
-            Some(other) => {
-                out.push('%');
-                out.push(other);
+        };
+        if force_sign
+            && !formatted.starts_with('-')
+            && matches!(specifier, b'd' | b'i' | b'f' | b'g' | b'e' | b'E')
+        {
+            formatted.insert(0, '+');
+        }
+        if formatted.len() < width {
+            let padding = if zero_padded && !left_aligned {
+                '0'
+            } else {
+                ' '
+            };
+            let padding = padding.to_string().repeat(width - formatted.len());
+            if left_aligned {
+                formatted.push_str(&padding);
+            } else if zero_padded && matches!(formatted.as_bytes().first(), Some(b'+' | b'-')) {
+                formatted.insert_str(1, &padding);
+            } else {
+                formatted.insert_str(0, &padding);
             }
         }
+        result.push_str(&formatted);
     }
-    out
+    result
 }
 
 #[cfg(test)]
@@ -667,6 +713,15 @@ mod tests {
         }
         let out = capture_take().unwrap();
         assert_eq!(out, b"Hello world\n");
+    }
+
+    #[test]
+    fn print_formats_width_precision_and_padding() {
+        let args = [1.5_f64.to_bits() as i64, 7, 0xab];
+        assert_eq!(
+            format_tos("v=%5.2f n=%04d x=%X", &args),
+            "v= 1.50 n=0007 x=AB"
+        );
     }
 
     #[test]

@@ -157,16 +157,16 @@ mod tests {
             r#"
 RegDft("Tests/Score", "F64 saved_score=4.25;\n");
 RegExe("Tests/Score");
-"%f ", saved_score;
+"%0.2f ", saved_score;
 RegWrite("Tests/Score", "F64 saved_score=%0.2f;\n", 7.5);
 saved_score=0.0;
 RegExe("Tests/Score");
-"%f\n", saved_score;
+"%0.2f\n", saved_score;
 "#,
         )
         .unwrap();
         let out = tos_runtime::capture_take().unwrap();
-        assert_eq!(out, b"4.25 7.5\n");
+        assert_eq!(out, b"4.25 7.50\n");
     }
 
     #[test]
