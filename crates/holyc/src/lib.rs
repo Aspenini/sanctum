@@ -170,6 +170,29 @@ RegExe("Tests/Score");
     }
 
     #[test]
+    fn templeos_shell_calls_accept_explicit_optional_arguments() {
+        run_source(
+            "shell_calls.HC",
+            r#"
+U0 Main()
+{
+  SettingsPush(NULL,0);
+  MenuPush("File { Exit; }");
+  AutoComplete(ON);
+  WinBorder(ON,NULL);
+  WinMax(NULL);
+  DocCursor(ON,NULL);
+  DocClear(NULL,FALSE);
+  MenuPop;
+  SettingsPop(NULL,0);
+}
+Main;
+"#,
+        )
+        .unwrap();
+    }
+
+    #[test]
     fn adjacent_strings_are_concatenated() {
         tos_runtime::capture_begin();
         run_source(

@@ -33,8 +33,9 @@ initializers, multi-declarations, chained compares, TempleOS precedence), packed
 `class`/`union` layout, globals and field/index access, Cranelift JIT `--run`, and
 mixed integer/`F64` arithmetic, indirect callbacks, switch/loop control flow,
 fixed-point matrix/vector math, task records and deterministic single-core
-`Spawn`, and core runtime primitives (`Print`, heaps, queues, bits, time/random,
-`Fs`/`Gs`). The compatibility host implements `Snd`, `Beep`, and `Play`,
+`Spawn`, app settings and menu stacks, and core runtime primitives (`Print`,
+heaps, queues, bits, time/random, `Fs`/`Gs`). The compatibility host implements
+`Snd`, `Beep`, and `Play`,
 including TempleOS music-string timing, persistent settings, ties, accidentals,
 live `CMusicGlbls` controls, and Windows square-wave tone output. `RegDft`,
 `RegExe`, and single-value `RegWrite` persist simple scalar settings for

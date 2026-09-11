@@ -342,27 +342,47 @@ impl Sema {
             ],
             false,
         );
-        for name in [
-            "Refresh",
-            "MenuPop",
-            "WinMax",
-            "DocClear",
-            "PutExcept",
-            "Exit",
-            "SettingsPop",
-        ] {
+        for name in ["Refresh", "MenuPop", "PutExcept", "Exit"] {
             s.add_builtin(name, Ty::U0, vec![], false);
         }
-        s.add_builtin("SettingsPush", Ty::Ptr(Box::new(Ty::U8)), vec![], false);
+        s.add_builtin(
+            "SettingsPush",
+            Ty::Ptr(Box::new(Ty::U8)),
+            vec![("task", task_ptr.clone()), ("flags", Ty::I64)],
+            false,
+        );
+        s.add_builtin(
+            "SettingsPop",
+            Ty::U0,
+            vec![("task", task_ptr.clone()), ("flags", Ty::I64)],
+            false,
+        );
         s.add_builtin(
             "MenuPush",
             Ty::Ptr(Box::new(Ty::U8)),
             vec![("menu", Ty::Ptr(Box::new(Ty::U8)))],
             false,
         );
-        for name in ["AutoComplete", "WinBorder", "DocCursor"] {
-            s.add_builtin(name, Ty::I64, vec![], false);
-        }
+        s.add_builtin("AutoComplete", Ty::I64, vec![("enabled", Ty::I64)], false);
+        s.add_builtin(
+            "WinBorder",
+            Ty::I64,
+            vec![("enabled", Ty::I64), ("task", task_ptr.clone())],
+            false,
+        );
+        s.add_builtin("WinMax", Ty::U0, vec![("task", task_ptr.clone())], false);
+        s.add_builtin(
+            "DocCursor",
+            Ty::I64,
+            vec![("show", Ty::I64), ("doc", Ty::Ptr(Box::new(Ty::U8)))],
+            false,
+        );
+        s.add_builtin(
+            "DocClear",
+            Ty::U0,
+            vec![("doc", Ty::Ptr(Box::new(Ty::U8))), ("clear_holds", Ty::I64)],
+            false,
+        );
         s.add_builtin(
             "ScanKey",
             Ty::I64,

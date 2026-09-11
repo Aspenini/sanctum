@@ -5,8 +5,15 @@ mod heap;
 mod math;
 mod que;
 mod rand;
+mod shell;
 mod task;
 mod time;
+
+pub use shell::current_menu_source;
+use shell::{
+    tos_AutoComplete, tos_DocClear, tos_DocCursor, tos_MenuPop, tos_MenuPush, tos_SettingsPop,
+    tos_SettingsPush, tos_WinBorder, tos_WinMax,
+};
 
 use std::cell::RefCell;
 use std::ffi::CStr;
@@ -30,6 +37,7 @@ pub fn capture_begin() {
 }
 
 pub fn set_background_tasks_enabled(enabled: bool) {
+    shell::reset();
     BACKGROUND_TASKS_CANCELLED.store(false, Ordering::Release);
     BACKGROUND_TASKS_STARTED.store(0, Ordering::Release);
     BACKGROUND_TASKS_QUIESCED.store(0, Ordering::Release);
@@ -196,43 +204,6 @@ pub unsafe extern "C" fn tos_Spawn(
     }
     spawned
 }
-
-#[unsafe(no_mangle)]
-pub extern "C" fn tos_SettingsPush() -> *mut u8 {
-    std::ptr::null_mut()
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn tos_SettingsPop() {}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn tos_MenuPush(_menu: *const u8) -> *mut u8 {
-    std::ptr::null_mut()
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn tos_MenuPop() {}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn tos_AutoComplete() -> i64 {
-    0
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn tos_WinBorder() -> i64 {
-    0
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn tos_WinMax() {}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn tos_DocCursor() -> i64 {
-    0
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn tos_DocClear() {}
 
 #[unsafe(no_mangle)]
 pub extern "C" fn tos_PutExcept() {}
