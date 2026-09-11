@@ -38,6 +38,9 @@ pub fn set_background_tasks_enabled(enabled: bool) {
 
 pub fn background_checkpoint() {
     if task::is_background() && BACKGROUND_TASKS_CANCELLED.load(Ordering::Acquire) {
+        if let Some(callback) = task::finish_background() {
+            callback();
+        }
         BACKGROUND_TASKS_QUIESCED.fetch_add(1, Ordering::AcqRel);
         loop {
             std::thread::park();
@@ -185,6 +188,10 @@ pub unsafe extern "C" fn tos_Spawn(
             task::enter_background(spawned_addr as *mut tos_abi::CTask);
             let entry: extern "C" fn(*mut u8) = unsafe { std::mem::transmute(entry) };
             entry(data as *mut u8);
+            if let Some(callback) = task::finish_background() {
+                callback();
+            }
+            BACKGROUND_TASKS_QUIESCED.fetch_add(1, Ordering::AcqRel);
         });
     }
     spawned
@@ -703,6 +710,25 @@ fn format_tos(fmt: &str, args: &[i64]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    static BACKGROUND_READY: AtomicBool = AtomicBool::new(false);
+    static END_CALLBACKS: AtomicUsize = AtomicUsize::new(0);
+
+    extern "C" fn background_end_callback() {
+        END_CALLBACKS.fetch_add(1, Ordering::Relaxed);
+        // A task callback may use ordinary runtime services. This must not
+        // recursively enter the cancellation checkpoint.
+        tos_Sleep(0);
+    }
+
+    extern "C" fn cancellable_background_task(_data: *mut u8) {
+        unsafe { (*tos_Fs()).task_end_cb = Some(background_end_callback) };
+        BACKGROUND_READY.store(true, Ordering::Release);
+        loop {
+            tos_Sleep(0);
+        }
+    }
 
     #[test]
     fn print_plain() {
@@ -730,5 +756,32 @@ mod tests {
         assert!(!matrix.is_null());
         assert!(unsafe { tos_MSize(matrix.cast()) } >= (16 * size_of::<i64>()) as i64);
         unsafe { tos_Free(matrix.cast()) };
+    }
+
+    #[test]
+    fn cancellation_runs_background_task_end_callback_once() {
+        BACKGROUND_READY.store(false, Ordering::Relaxed);
+        END_CALLBACKS.store(0, Ordering::Relaxed);
+        set_background_tasks_enabled(true);
+        unsafe {
+            tos_Spawn(
+                cancellable_background_task as *const u8,
+                std::ptr::null_mut(),
+                std::ptr::null(),
+                -1,
+                std::ptr::null_mut(),
+                0,
+                0,
+            );
+        }
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        while !BACKGROUND_READY.load(Ordering::Acquire) && std::time::Instant::now() < deadline {
+            std::thread::yield_now();
+        }
+        assert!(BACKGROUND_READY.load(Ordering::Acquire));
+
+        cancel_background_tasks();
+        assert_eq!(END_CALLBACKS.load(Ordering::Relaxed), 1);
+        set_background_tasks_enabled(false);
     }
 }

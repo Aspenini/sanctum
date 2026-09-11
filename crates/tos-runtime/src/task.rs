@@ -91,3 +91,44 @@ pub fn enter_background(task: *mut CTask) {
 pub fn is_background() -> bool {
     BACKGROUND.get()
 }
+
+/// Leave background-task mode and take the task's termination callback.
+///
+/// Clearing the callback before invoking it gives TempleOS task callbacks
+/// one-shot semantics. Clearing `BACKGROUND` also lets a callback call
+/// `Sleep` without recursively entering the cancellation checkpoint.
+pub fn finish_background() -> Option<extern "C" fn()> {
+    if !BACKGROUND.replace(false) {
+        return None;
+    }
+    let task = fs();
+    unsafe { (*task).task_end_cb.take() }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static CALLBACKS: AtomicUsize = AtomicUsize::new(0);
+
+    extern "C" fn count_callback() {
+        CALLBACKS.fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[test]
+    fn background_end_callback_is_taken_once() {
+        CALLBACKS.store(0, Ordering::Relaxed);
+        let task = spawn(ptr::null_mut());
+        unsafe { (*task).task_end_cb = Some(count_callback) };
+        enter_background(task);
+
+        finish_background().unwrap()();
+        assert!(finish_background().is_none());
+        assert_eq!(CALLBACKS.load(Ordering::Relaxed), 1);
+
+        unsafe { drop(Box::from_raw(task)) };
+        FS.set(ptr::null_mut());
+        boot_task();
+    }
+}
