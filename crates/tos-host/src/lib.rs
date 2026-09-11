@@ -1,5 +1,7 @@
 //! Host display and input boundary for TempleOS programs.
 
+mod audio;
+
 use minifb::{Key, KeyRepeat, Window, WindowOptions};
 use std::cell::RefCell;
 use std::collections::VecDeque;
@@ -30,13 +32,27 @@ pub fn jit_symbols() -> Vec<(&'static str, *const u8)> {
     vec![
         ("tos_Refresh", tos_Refresh as *const u8),
         ("tos_ScanKey", tos_ScanKey as *const u8),
+        ("tos_SndTaskEndCB", audio::tos_SndTaskEndCB as *const u8),
+        ("tos_Beep", audio::tos_Beep as *const u8),
+        ("tos_Snd", audio::tos_Snd as *const u8),
+        ("tos_Play", audio::tos_Play as *const u8),
+        (
+            "tos_MusicSettingsRst",
+            audio::tos_MusicSettingsRst as *const u8,
+        ),
     ]
 }
 
 pub fn reset() {
+    audio::reset();
     FRAMES_PRESENTED.store(0, Ordering::Release);
     WINDOW.with(|window| *window.borrow_mut() = None);
     key_queue().lock().expect("key queue poisoned").clear();
+}
+
+/// Stop host resources that can outlive a cancelled HolyC task.
+pub fn shutdown() {
+    audio::stop();
 }
 
 pub fn set_interactive(interactive: bool) {
@@ -188,6 +204,11 @@ pub extern "C" fn tos_Refresh() {
 }
 
 #[unsafe(no_mangle)]
+/// Poll the shared host key queue using TempleOS `ScanKey` conventions.
+///
+/// # Safety
+///
+/// Non-null output pointers must be valid and writable for one `i64`.
 pub unsafe extern "C" fn tos_ScanKey(ch: *mut i64, scan_code: *mut i64, _echo: i64) -> i64 {
     if INTERACTIVE.load(Ordering::Acquire) {
         let key = key_queue().lock().expect("key queue poisoned").pop_front();

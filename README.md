@@ -34,10 +34,12 @@ initializers, multi-declarations, chained compares, TempleOS precedence), packed
 mixed integer/`F64` arithmetic, indirect callbacks, switch/loop control flow,
 fixed-point matrix/vector math, task records and deterministic single-core
 `Spawn`, and core runtime primitives (`Print`, heaps, queues, bits, time/random,
-`Fs`/`Gs`). The compatibility graphics subsystem provides indexed-color device
-contexts, depth buffers, line/polygon rasterization, blits, bitmap and 3D mesh
-sprites, interpolation, symmetry, TempleOS mesh lighting, probability
-dithering, and HUD text.
+`Fs`/`Gs`). The compatibility host implements `Snd`, `Beep`, and `Play`,
+including TempleOS music-string timing, persistent settings, ties, accidentals,
+and Windows square-wave tone output. The graphics subsystem provides
+indexed-color device contexts, depth buffers, line/polygon rasterization,
+blits, bitmap and 3D mesh sprites, interpolation, symmetry, TempleOS mesh
+lighting, probability dithering, and HUD text.
 
 `TempleOS/Demo/Games/Talons.HC` now compiles end-to-end and passes a JIT smoke
 run through terrain initialization, its real `DrawIt` callback, a non-empty
@@ -48,9 +50,9 @@ mode, so the checked-in ASCII Talons source retains structurally valid meshes.
 tasks, and feeds Escape, Enter, Space, and arrow keys through `ScanKey`; without
 `--run`, `holyc` performs compile-only validation.
 
-**Next:** add audio synthesis and broaden TempleOS API coverage beyond the
-subset exercised by Talons. The game is at the basic playable milestone; sound
-and closer behavioral/visual parity remain.
+**Next:** broaden TempleOS API coverage beyond the subset exercised by Talons,
+add a portable audio backend, and improve behavioral/visual parity. The game is
+at the basic playable milestone with sound on Windows.
 
 TempleOS HolyC stays source-compatible (no `F32`/`auto`). Keep a local
 `TempleOS/` tree as the language/API spec if you have one; it is gitignored and

@@ -101,11 +101,6 @@ pub fn jit_symbols() -> Vec<(&'static str, *const u8)> {
         ("tos_Gs", tos_Gs as *const u8),
         ("tos_mp_cnt", tos_mp_cnt as *const u8),
         ("tos_Spawn", tos_Spawn as *const u8),
-        ("tos_SndTaskEndCB", tos_SndTaskEndCB as *const u8),
-        ("tos_Beep", tos_Beep as *const u8),
-        ("tos_Snd", tos_Snd as *const u8),
-        ("tos_Play", tos_Play as *const u8),
-        ("tos_MusicSettingsRst", tos_MusicSettingsRst as *const u8),
         ("tos_RegDft", tos_RegDft as *const u8),
         ("tos_RegExe", tos_RegExe as *const u8),
         ("tos_RegWrite", tos_RegWrite as *const u8),
@@ -197,25 +192,6 @@ pub unsafe extern "C" fn tos_Spawn(
     }
     spawned
 }
-
-#[unsafe(no_mangle)]
-pub extern "C" fn tos_SndTaskEndCB() {}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn tos_Beep(_ona: i64, _busy: i64) {}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn tos_Snd(_ona: i64) {}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn tos_Play(_song: *const u8, _words: *const u8) {
-    // Keep a silent music task paced until audio synthesis is implemented.
-    background_checkpoint();
-    std::thread::sleep(std::time::Duration::from_millis(100));
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn tos_MusicSettingsRst() {}
 
 #[unsafe(no_mangle)]
 pub extern "C" fn tos_RegDft(_path: *const u8, _defaults: *const u8) {}
