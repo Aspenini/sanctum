@@ -5,8 +5,8 @@ use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::ptr;
 use std::slice;
-use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Mutex, OnceLock};
 use tos_abi::CDC;
 
 pub const DEFAULT_WIDTH: u32 = 640;
@@ -15,10 +15,10 @@ pub const DEFAULT_HEIGHT: u32 = 480;
 static SCREEN: OnceLock<usize> = OnceLock::new();
 static FRAMES_PRESENTED: AtomicUsize = AtomicUsize::new(0);
 static INTERACTIVE: AtomicBool = AtomicBool::new(false);
+static KEYS: OnceLock<Mutex<VecDeque<(i64, i64)>>> = OnceLock::new();
 
 thread_local! {
     static WINDOW: RefCell<Option<HostWindow>> = const { RefCell::new(None) };
-    static KEYS: RefCell<VecDeque<(i64, i64)>> = const { RefCell::new(VecDeque::new()) };
 }
 
 struct HostWindow {
@@ -36,7 +36,7 @@ pub fn jit_symbols() -> Vec<(&'static str, *const u8)> {
 pub fn reset() {
     FRAMES_PRESENTED.store(0, Ordering::Release);
     WINDOW.with(|window| *window.borrow_mut() = None);
-    KEYS.with(|keys| keys.borrow_mut().clear());
+    key_queue().lock().expect("key queue poisoned").clear();
 }
 
 pub fn set_interactive(interactive: bool) {
@@ -52,6 +52,10 @@ fn screen() -> *mut CDC {
             0,
         ) as usize
     }) as *mut CDC
+}
+
+fn key_queue() -> &'static Mutex<VecDeque<(i64, i64)>> {
+    KEYS.get_or_init(|| Mutex::new(VecDeque::new()))
 }
 
 pub fn frames_presented() -> usize {
@@ -93,7 +97,10 @@ fn push_key(key: Key) {
         _ => None,
     };
     if let Some(key) = mapped {
-        KEYS.with(|keys| keys.borrow_mut().push_back(key));
+        key_queue()
+            .lock()
+            .expect("key queue poisoned")
+            .push_back(key);
     }
 }
 
@@ -115,7 +122,10 @@ fn present_window() {
                 }
                 Err(error) => {
                     eprintln!("unable to create Sanctum window: {error}");
-                    KEYS.with(|keys| keys.borrow_mut().push_back((0x1b, 0)));
+                    key_queue()
+                        .lock()
+                        .expect("key queue poisoned")
+                        .push_back((0x1b, 0));
                     return;
                 }
             }
@@ -143,11 +153,17 @@ fn present_window() {
             DEFAULT_HEIGHT as usize,
         ) {
             eprintln!("unable to update Sanctum window: {error}");
-            KEYS.with(|keys| keys.borrow_mut().push_back((0x1b, 0)));
+            key_queue()
+                .lock()
+                .expect("key queue poisoned")
+                .push_back((0x1b, 0));
             return;
         }
         if !host.window.is_open() {
-            KEYS.with(|keys| keys.borrow_mut().push_back((0x1b, 0)));
+            key_queue()
+                .lock()
+                .expect("key queue poisoned")
+                .push_back((0x1b, 0));
         }
         for key in host.window.get_keys_pressed(KeyRepeat::Yes) {
             push_key(key);
@@ -174,7 +190,7 @@ pub extern "C" fn tos_Refresh() {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn tos_ScanKey(ch: *mut i64, scan_code: *mut i64, _echo: i64) -> i64 {
     if INTERACTIVE.load(Ordering::Acquire) {
-        let key = KEYS.with(|keys| keys.borrow_mut().pop_front());
+        let key = key_queue().lock().expect("key queue poisoned").pop_front();
         let Some((key_ch, key_scan)) = key else {
             return 0;
         };
@@ -217,12 +233,13 @@ mod tests {
     }
 
     #[test]
-    fn maps_arrow_keys_to_templeos_scan_codes() {
-        KEYS.with(|keys| keys.borrow_mut().clear());
-        push_key(Key::Up);
-        assert_eq!(
-            KEYS.with(|keys| keys.borrow_mut().pop_front()),
-            Some((0, 0x48))
-        );
+    fn shares_window_keys_with_the_game_thread() {
+        key_queue().lock().unwrap().clear();
+        std::thread::spawn(|| push_key(Key::Up)).join().unwrap();
+        set_interactive(true);
+        let (mut ch, mut scan) = (-1, -1);
+        unsafe { assert_eq!(tos_ScanKey(&mut ch, &mut scan, 0), 1) };
+        assert_eq!((ch, scan), (0, 0x48));
+        set_interactive(false);
     }
 }

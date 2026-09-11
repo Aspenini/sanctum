@@ -14,7 +14,7 @@ use cranelift_module::{
 };
 use holyc_ast::*;
 use holyc_sema::{FunctionInfo, Sema, resolve_ty};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::mem;
 use thiserror::Error;
 
@@ -35,6 +35,7 @@ impl From<cranelift_module::ModuleError> for CodegenError {
 pub struct JitProgram {
     module: JITModule,
     main_id: FuncId,
+    function_ids: HashMap<String, FuncId>,
 }
 
 impl JitProgram {
@@ -42,6 +43,17 @@ impl JitProgram {
         self.module
             .finalize_definitions()
             .map_err(|e| CodegenError::Cranelift(e.to_string()))?;
+        if std::env::var_os("SANCTUM_JIT_MAP").is_some() {
+            let mut functions = self
+                .function_ids
+                .iter()
+                .map(|(name, id)| (self.module.get_finalized_function(*id) as usize, name))
+                .collect::<Vec<_>>();
+            functions.sort_unstable_by_key(|(address, _)| *address);
+            for (address, name) in functions {
+                eprintln!("JIT {address:#018x} {name}");
+            }
+        }
         let code = self.module.get_finalized_function(self.main_id);
         let f: extern "C" fn() = unsafe { mem::transmute(code) };
         f();
@@ -55,6 +67,27 @@ pub fn compile_jit(
     symbols: &[(&str, *const u8)],
     binary_resources: &HashMap<(u32, i64), Vec<u8>>,
 ) -> Result<JitProgram, CodegenError> {
+    fn collect_global_order(
+        stmt: &Stmt,
+        globals: &HashMap<String, Ty>,
+        ordered: &mut HashSet<String>,
+        order: &mut Vec<String>,
+    ) {
+        match stmt {
+            Stmt::Decl(variable) => {
+                if globals.contains_key(&variable.name) && ordered.insert(variable.name.clone()) {
+                    order.push(variable.name.clone());
+                }
+            }
+            Stmt::Block { stmts, .. } => {
+                for stmt in stmts {
+                    collect_global_order(stmt, globals, ordered, order);
+                }
+            }
+            _ => {}
+        }
+    }
+
     let mut flag_builder = settings::builder();
     flag_builder
         .set("use_colocated_libcalls", "false")
@@ -100,7 +133,64 @@ pub fn compile_jit(
 
     // Data for string literals.
     let mut strings: HashMap<String, DataId> = HashMap::new();
-    let mut globals: HashMap<String, (DataId, Ty)> = HashMap::new();
+    let mut global_order = Vec::new();
+    let mut ordered = HashSet::new();
+    for item in &ast.items {
+        if let Item::Stmt(stmt) = item {
+            collect_global_order(stmt, &sema.globals, &mut ordered, &mut global_order);
+        }
+    }
+    let mut remaining = sema
+        .globals
+        .keys()
+        .filter(|name| !ordered.contains(*name))
+        .cloned()
+        .collect::<Vec<_>>();
+    remaining.sort();
+    global_order.extend(remaining);
+
+    // TempleOS module globals share one packed allocation. Besides matching
+    // its address/adjacency semantics, this matters to old unchecked HolyC:
+    // programs sometimes read just beyond one global array into its neighbor.
+    let mut layout = Vec::new();
+    let mut global_bytes = 0usize;
+    for name in global_order {
+        let ty = sema.globals[&name].clone();
+        global_bytes = global_bytes
+            .checked_add(7)
+            .ok_or_else(|| CodegenError::Msg("global data size overflow".into()))?
+            & !7;
+        let size = usize::try_from(ty.size().max(1))
+            .map_err(|_| CodegenError::Msg(format!("global `{name}` is too large")))?;
+        layout.push((name, global_bytes, ty));
+        global_bytes = global_bytes
+            .checked_add(size)
+            .ok_or_else(|| CodegenError::Msg("global data size overflow".into()))?;
+    }
+    if global_bytes > i32::MAX as usize {
+        return Err(CodegenError::Msg("global data exceeds 2 GiB".into()));
+    }
+    let global_id = module.declare_data("module_globals", Linkage::Local, true, false)?;
+    let mut global_image = vec![0u8; global_bytes.max(1)];
+    let mut globals = HashMap::new();
+    for (name, offset, ty) in layout {
+        if name == "best_score" && matches!(ty, Ty::F64) {
+            global_image[offset..offset + 8].copy_from_slice(&9999.0_f64.to_le_bytes());
+        }
+        let offset = i32::try_from(offset)
+            .map_err(|_| CodegenError::Msg("global data exceeds 2 GiB".into()))?;
+        globals.insert(
+            name,
+            GlobalInfo {
+                id: global_id,
+                offset,
+                ty,
+            },
+        );
+    }
+    let mut global_desc = DataDescription::new();
+    global_desc.define(global_image.into_boxed_slice());
+    module.define_data(global_id, &global_desc)?;
     let mut bins: HashMap<(u32, i64), DataId> = HashMap::new();
     for ((file, idx), bytes) in binary_resources {
         let id = module.declare_data(&format!("bin_{file}_{idx}"), Linkage::Local, false, false)?;
@@ -108,17 +198,6 @@ pub fn compile_jit(
         desc.define(bytes.clone().into_boxed_slice());
         module.define_data(id, &desc)?;
         bins.insert((*file, *idx), id);
-    }
-    for (index, (name, ty)) in sema.globals.iter().enumerate() {
-        let id = module.declare_data(&format!("global{index}"), Linkage::Local, true, false)?;
-        let mut desc = DataDescription::new();
-        if name == "best_score" && matches!(ty, Ty::F64) {
-            desc.define(9999.0_f64.to_le_bytes().to_vec().into_boxed_slice());
-        } else {
-            desc.define_zeroinit(ty.size().max(1) as usize);
-        }
-        module.define_data(id, &desc)?;
-        globals.insert(name.clone(), (id, ty.clone()));
     }
 
     // Define user functions.
@@ -211,7 +290,24 @@ pub fn compile_jit(
         .map_err(|e| CodegenError::Cranelift(format!("{e:?}")))?;
     module.clear_context(&mut ctx);
 
-    Ok(JitProgram { module, main_id })
+    let function_ids = ast
+        .items
+        .iter()
+        .filter_map(|item| {
+            let Item::Fn(function) = item else {
+                return None;
+            };
+            function
+                .body
+                .as_ref()
+                .map(|_| (function.name.clone(), func_ids[&function.name]))
+        })
+        .collect();
+    Ok(JitProgram {
+        module,
+        main_id,
+        function_ids,
+    })
 }
 
 fn make_sig(module: &mut JITModule, info: &FunctionInfo, ptr_ty: Type) -> Signature {
@@ -293,10 +389,17 @@ struct FnCg<'a, 'b> {
     strings: &'a mut HashMap<String, DataId>,
     bins: &'a HashMap<(u32, i64), DataId>,
     vars: HashMap<String, (LocalStorage, Ty)>,
-    globals: &'a HashMap<String, (DataId, Ty)>,
+    globals: &'a HashMap<String, GlobalInfo>,
     module_scope: bool,
     break_targets: Vec<Block>,
     sema: &'a Sema,
+}
+
+#[derive(Clone)]
+struct GlobalInfo {
+    id: DataId,
+    offset: i32,
+    ty: Ty,
 }
 
 #[derive(Clone, Copy)]
@@ -346,7 +449,7 @@ impl FnCg<'_, '_> {
                 .vars
                 .get(n)
                 .map(|(_, t)| t.clone())
-                .or_else(|| self.globals.get(n).map(|(_, t)| t.clone()))
+                .or_else(|| self.globals.get(n).map(|global| global.ty.clone()))
                 .or_else(|| self.sema.functions.get(n).map(|f| f.ret.clone())),
             ExprKind::Field { base, name, .. } => {
                 let bt = self.expr_ty(base)?;
@@ -471,10 +574,10 @@ impl FnCg<'_, '_> {
                     };
                     return Ok((ptr, ty, 0));
                 }
-                if let Some((id, ty)) = self.globals.get(name).cloned() {
-                    let global = self.module.declare_data_in_func(id, self.bcx.func);
+                if let Some(info) = self.globals.get(name).cloned() {
+                    let global = self.module.declare_data_in_func(info.id, self.bcx.func);
                     let ptr = self.bcx.ins().symbol_value(self.ptr_ty, global);
-                    return Ok((ptr, ty, 0));
+                    return Ok((ptr, info.ty, info.offset));
                 }
                 Err(CodegenError::Msg(format!("unknown variable `{name}`")))
             }
@@ -675,13 +778,14 @@ impl FnCg<'_, '_> {
             Stmt::Decl(v) => {
                 let ty = resolve_ty(&v.ty, &self.sema.classes);
                 if self.module_scope {
-                    let (id, global_ty) = self.globals.get(&v.name).cloned().ok_or_else(|| {
+                    let info = self.globals.get(&v.name).cloned().ok_or_else(|| {
                         CodegenError::Msg(format!("global `{}` was not declared", v.name))
                     })?;
-                    let global = self.module.declare_data_in_func(id, self.bcx.func);
+                    let global = self.module.declare_data_in_func(info.id, self.bcx.func);
                     let ptr = self.bcx.ins().symbol_value(self.ptr_ty, global);
                     if let Some(init) = &v.init {
-                        self.initialize(ptr, &global_ty, init)?;
+                        let ptr = self.place_addr(ptr, info.offset);
+                        self.initialize(ptr, &info.ty, init)?;
                     }
                     return Ok(());
                 }

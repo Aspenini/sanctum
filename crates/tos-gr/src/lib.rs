@@ -8,6 +8,9 @@ use tos_abi::{CD3I32, CDC, CTask};
 const DCF_TRANSFORMATION: i32 = 0x100;
 const DCF_SYMMETRY: i32 = 0x200;
 const DCF_JUST_MIRROR: i32 = 0x400;
+const ROPF_HALF_RANGE_COLOR: u32 = 0x1000;
+const ROPF_TWO_SIDED: u32 = 0x2000;
+const ROPF_PROBABILITY_DITHER: u32 = 0x80000000;
 
 // TempleOS's standard 8x8 glyphs for printable ASCII, copied from
 // Kernel/FontStd.HC. Each low-to-high byte is one scanline.
@@ -196,6 +199,10 @@ pub extern "C" fn tos_DCNew(
         sym_nx: 1.0,
         sym_ny: 0.0,
         sym_nz: 0.0,
+        light_x: 37_837,
+        light_y: 37_837,
+        light_z: 37_837,
+        dither_probability_u16: 0,
     }))
 }
 
@@ -224,6 +231,10 @@ pub unsafe extern "C" fn tos_DCAlias(dc: *mut CDC, _task: *mut CTask) -> *mut CD
         sym_nx: src.sym_nx,
         sym_ny: src.sym_ny,
         sym_nz: src.sym_nz,
+        light_x: src.light_x,
+        light_y: src.light_y,
+        light_z: src.light_z,
+        dither_probability_u16: src.dither_probability_u16,
     }))
 }
 
@@ -358,7 +369,24 @@ unsafe fn plot(dc: *mut CDC, x: i64, y: i64, z: i64) -> bool {
         *depth = z as i32;
     }
     let pixel = unsafe { &mut *dc.body.add(index) };
-    let color = (dc.color & 0x0f) as u8;
+    let color = if dc.color & ROPF_PROBABILITY_DITHER != 0 {
+        // TempleOS samples RandU16 here. A coordinate hash gives the same
+        // probability distribution without flickering between host frames.
+        let mut hash = (x as u64).wrapping_mul(0x9e37_79b1_85eb_ca87)
+            ^ (y as u64).wrapping_mul(0xc2b2_ae3d_27d4_eb4f)
+            ^ (z as u64).wrapping_mul(0x1656_67b1_9e37_79f9);
+        hash ^= hash >> 30;
+        hash = hash.wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        hash ^= hash >> 27;
+        let sample = (hash ^ (hash >> 31)) as u16;
+        if u32::from(sample) < dc.dither_probability_u16.min(65_536) {
+            ((dc.color >> 16) & 0x0f) as u8
+        } else {
+            (dc.color & 0x0f) as u8
+        }
+    } else {
+        (dc.color & 0x0f) as u8
+    };
     let changed = *pixel != color;
     *pixel = color;
     changed
@@ -373,6 +401,74 @@ unsafe fn reflect(dc: *const CDC, x: &mut i64, y: &mut i64, z: &mut i64) {
     *x = ((*x as f64) - 2.0 * distance * ctx.sym_nx).round() as i64;
     *y = ((*y as f64) - 2.0 * distance * ctx.sym_ny).round() as i64;
     *z = ((*z as f64) - 2.0 * distance * ctx.sym_nz).round() as i64;
+}
+
+unsafe fn transformed_point(dc: *mut CDC, point: CD3I32) -> CD3I32 {
+    let (mut x, mut y, mut z) = (i64::from(point.x), i64::from(point.y), i64::from(point.z));
+    if let Some(ctx) = unsafe { dc.as_ref() }
+        && ctx.flags & DCF_TRANSFORMATION != 0
+        && let Some(transform) = ctx.transform
+    {
+        transform(dc, &mut x, &mut y, &mut z);
+    }
+    CD3I32 {
+        x: x.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32,
+        y: y.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32,
+        z: z.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32,
+    }
+}
+
+unsafe fn light_triangle(dc: *mut CDC, points: &[CD3I32; 3], mut color: u32) {
+    let Some(ctx) = (unsafe { dc.as_mut() }) else {
+        return;
+    };
+    let v1 = (
+        (i64::from(points[0].x) - i64::from(points[1].x)) as f64,
+        (i64::from(points[0].y) - i64::from(points[1].y)) as f64,
+        (i64::from(points[0].z) - i64::from(points[1].z)) as f64,
+    );
+    let v2 = (
+        (i64::from(points[2].x) - i64::from(points[1].x)) as f64,
+        (i64::from(points[2].y) - i64::from(points[1].y)) as f64,
+        (i64::from(points[2].z) - i64::from(points[1].z)) as f64,
+    );
+    let mut normal = (
+        v1.1 * v2.2 - v1.2 * v2.1,
+        v1.2 * v2.0 - v1.0 * v2.2,
+        v1.0 * v2.1 - v1.1 * v2.0,
+    );
+    let magnitude = (normal.0 * normal.0 + normal.1 * normal.1 + normal.2 * normal.2).sqrt();
+    if magnitude != 0.0 {
+        let scale = 65_536.0 / magnitude;
+        normal.0 *= scale;
+        normal.1 *= scale;
+        normal.2 *= scale;
+    }
+    let mut illumination = ((normal.0 * f64::from(ctx.light_x)
+        + normal.1 * f64::from(ctx.light_y)
+        + normal.2 * f64::from(ctx.light_z))
+        / 65_536.0) as i64;
+    if color & ROPF_TWO_SIDED != 0 {
+        color &= !ROPF_TWO_SIDED;
+        illumination = illumination.abs().saturating_mul(2);
+    } else {
+        illumination = illumination.saturating_add(65_536);
+    }
+    let mut base = color & 0x0f;
+    if color & ROPF_HALF_RANGE_COLOR != 0 {
+        illumination >>= 1;
+        if base >= 8 {
+            base -= 8;
+            illumination = illumination.saturating_add(65_536);
+        }
+    }
+    if illumination < 65_536 {
+        ctx.color = ROPF_PROBABILITY_DITHER | (base << 16);
+        ctx.dither_probability_u16 = illumination.clamp(0, 65_536) as u32;
+    } else {
+        ctx.color = ROPF_PROBABILITY_DITHER | ((base ^ 8) << 16) | base;
+        ctx.dither_probability_u16 = (illumination - 65_536).clamp(0, 65_536) as u32;
+    }
 }
 
 unsafe fn plot_brush(dc: *mut CDC, x: i64, y: i64, z: i64) -> i64 {
@@ -528,22 +624,15 @@ pub unsafe extern "C" fn tos_GrFillPoly3(dc: *mut CDC, n: i64, poly: *const CD3I
         return 0;
     }
     let source = unsafe { slice::from_raw_parts(poly, n as usize) };
-    let mut transformed;
+    let transformed;
     let points = if let Some(ctx) = unsafe { dc.as_ref() }
         && ctx.flags & DCF_TRANSFORMATION != 0
-        && let Some(transform) = ctx.transform
+        && ctx.transform.is_some()
     {
-        transformed = Vec::with_capacity(source.len());
-        for point in source {
-            let (mut x, mut y, mut z) =
-                (i64::from(point.x), i64::from(point.y), i64::from(point.z));
-            transform(dc, &mut x, &mut y, &mut z);
-            transformed.push(CD3I32 {
-                x: x.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32,
-                y: y.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32,
-                z: z.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32,
-            });
-        }
+        transformed = source
+            .iter()
+            .map(|point| unsafe { transformed_point(dc, *point) })
+            .collect::<Vec<_>>();
         transformed.as_slice()
     } else {
         source
@@ -895,8 +984,31 @@ unsafe fn draw_mesh(dc: *mut CDC, x: i64, y: i64, z: i64, elem: *const u8, shift
                 (z + shift.2).clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32,
             );
         }
-        unsafe { (*dc).color = color as u32 };
-        unsafe { tos_GrFillPoly3(dc, 3, points.as_ptr()) };
+        let transformed = points.map(|point| unsafe { transformed_point(dc, point) });
+        let flags = unsafe { (*dc).flags };
+        if flags & DCF_SYMMETRY != 0 {
+            let mut mirrored = transformed;
+            for point in &mut mirrored {
+                let (mut mx, mut my, mut mz) =
+                    (i64::from(point.x), i64::from(point.y), i64::from(point.z));
+                unsafe { reflect(dc, &mut mx, &mut my, &mut mz) };
+                point.x = mx.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32;
+                point.y = my.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32;
+                point.z = mz.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32;
+            }
+            let mirrored_winding = [mirrored[0], mirrored[2], mirrored[1]];
+            unsafe {
+                light_triangle(dc, &mirrored_winding, color as u32);
+                fill_polygon_pixels(dc, &mirrored_winding);
+            }
+            if flags & DCF_JUST_MIRROR != 0 {
+                continue;
+            }
+        }
+        unsafe {
+            light_triangle(dc, &transformed, color as u32);
+            fill_polygon_pixels(dc, &transformed);
+        }
     }
 }
 
@@ -1276,6 +1388,32 @@ mod tests {
         mesh.push(0);
         tos_Sprite3(dc, 0, 0, 0, mesh.as_mut_ptr(), 0);
         unsafe { assert_eq!(*(*dc).body.add(6 * 16 + 3), tos_abi::LTGREEN as u8) };
+    }
+
+    #[test]
+    fn lights_mesh_colors_with_probability_dithering() {
+        let dc = tos_DCNew(32, 32, ptr::null_mut(), 0);
+        let triangle = [
+            CD3I32 { x: 2, y: 2, z: 0 },
+            CD3I32 { x: 28, y: 2, z: 0 },
+            CD3I32 { x: 2, y: 28, z: 0 },
+        ];
+        unsafe {
+            light_triangle(
+                dc,
+                &triangle,
+                ROPF_TWO_SIDED | ROPF_HALF_RANGE_COLOR | tos_abi::LTGREEN,
+            );
+            assert_eq!(
+                (*dc).color,
+                ROPF_PROBABILITY_DITHER | (tos_abi::LTGREEN << 16) | tos_abi::GREEN
+            );
+            assert!((1..65_536).contains(&(*dc).dither_probability_u16));
+            fill_polygon_pixels(dc, &triangle);
+            let pixels = slice::from_raw_parts((*dc).body, 32 * 32);
+            assert!(pixels.contains(&(tos_abi::GREEN as u8)));
+            assert!(pixels.contains(&(tos_abi::LTGREEN as u8)));
+        }
     }
 
     #[test]

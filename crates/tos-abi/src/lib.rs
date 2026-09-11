@@ -110,6 +110,11 @@ pub struct CDC {
     pub sym_nx: f64,
     pub sym_ny: f64,
     pub sym_nz: f64,
+    // More host-only state used by TempleOS's default mesh lighting callback.
+    pub light_x: i32,
+    pub light_y: i32,
+    pub light_z: i32,
+    pub dither_probability_u16: u32,
 }
 
 #[cfg(test)]

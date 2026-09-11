@@ -24,17 +24,21 @@ mixed integer/`F64` arithmetic, indirect callbacks, switch/loop control flow,
 fixed-point matrix/vector math, task records and deterministic single-core
 `Spawn`, and core runtime primitives (`Print`, heaps, queues, bits, time/random,
 `Fs`/`Gs`). `tos-gr` now provides indexed-color device contexts, depth buffers,
-line/polygon rasterization, blits, and the sprite-facing ABI.
+line/polygon rasterization, blits, bitmap and 3D mesh sprites, interpolation,
+symmetry, TempleOS mesh lighting, probability dithering, and HUD text.
 
 `TempleOS/Demo/Games/Talons.HC` now compiles end-to-end and passes a JIT smoke
 run through terrain initialization, its real `DrawIt` callback, a non-empty
-640×480 rendered frame, and cleanup. `--run` opens that framebuffer in a native
-window, enables background HolyC tasks, and feeds Escape, Enter, and arrow keys
-through `ScanKey`; without `--run`, `hcc` performs compile-only validation.
+640×480 rendered frame with its embedded aircraft and terrain art, and cleanup.
+The DolDoc loader also repairs `0x05` bytes stripped by TempleOS's text-export
+mode, so the checked-in ASCII Talons source retains structurally valid meshes.
+`--run` opens the framebuffer in a native window, enables background HolyC
+tasks, and feeds Escape, Enter, Space, and arrow keys through `ScanKey`; without
+`--run`, `hcc` performs compile-only validation.
 
-**Next:** decode DolDoc sprite-bin payloads, finish sprite rasterization, and add
-audio synthesis. Talons currently has an interactive graphics preview, but its
-missing embedded sprites keep it short of the intended game presentation.
+**Next:** add audio synthesis and broaden TempleOS API coverage beyond the
+subset exercised by Talons. The game is at the basic playable milestone; sound
+and closer behavioral/visual parity remain.
 
 TempleOS HolyC stays source-compatible (no `F32`/`auto`). Keep a local
 `TempleOS/` tree as the language/API spec if you have one; it is gitignored and

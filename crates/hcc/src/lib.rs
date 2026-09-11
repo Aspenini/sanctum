@@ -338,6 +338,13 @@ Main;
             tos_host::DEFAULT_WIDTH as usize * tos_host::DEFAULT_HEIGHT as usize * 3
         );
         assert!(framebuffer.chunks_exact(3).any(|pixel| pixel != [0, 0, 0]));
+        let colors = framebuffer
+            .chunks_exact(3)
+            .collect::<std::collections::HashSet<_>>();
+        assert!(
+            colors.len() >= 5,
+            "expected terrain, HUD, and sprite colors; got {colors:?}"
+        );
     }
 
     #[test]
@@ -585,6 +592,21 @@ Main;
         .unwrap();
         let out = tos_runtime::capture_take().unwrap();
         assert_eq!(out, b"6 22 3 9\n");
+    }
+
+    #[test]
+    fn module_globals_are_contiguous_in_source_order() {
+        tos_runtime::capture_begin();
+        run_source(
+            "global_layout.HC",
+            r#"
+I64 first[2]={11,22};
+I64 second[2]={33,44};
+"%d %d\n",first[2],&second[0]-&first[0];
+"#,
+        )
+        .unwrap();
+        assert_eq!(tos_runtime::capture_take().unwrap(), b"33 2\n");
     }
 
     #[test]
