@@ -8,6 +8,7 @@ pub use tos_abi as abi;
 pub use tos_doldoc as doldoc;
 pub use tos_gr as graphics;
 pub use tos_host as host;
+pub use tos_host::GlobalBinding;
 pub use tos_runtime as runtime;
 
 /// Native functions that a HolyC JIT must make available by their ABI names.
@@ -26,6 +27,11 @@ pub fn prepare(interactive: bool) {
     host::set_interactive(interactive);
     runtime::set_background_tasks_enabled(interactive);
     host::reset();
+}
+
+/// Bind finalized compiled globals for TempleOS services such as `RegExe`.
+pub fn bind_globals(bindings: &[GlobalBinding<'_>]) {
+    host::bind_globals(bindings);
 }
 
 /// Quiesce background HolyC tasks before releasing compiled code.

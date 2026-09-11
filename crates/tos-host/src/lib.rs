@@ -1,6 +1,9 @@
 //! Host display and input boundary for TempleOS programs.
 
 mod audio;
+mod registry;
+
+pub use registry::GlobalBinding;
 
 use minifb::{Key, KeyRepeat, Window, WindowOptions};
 use std::cell::RefCell;
@@ -40,11 +43,15 @@ pub fn jit_symbols() -> Vec<(&'static str, *const u8)> {
             "tos_MusicSettingsRst",
             audio::tos_MusicSettingsRst as *const u8,
         ),
+        ("tos_RegDft", registry::tos_RegDft as *const u8),
+        ("tos_RegExe", registry::tos_RegExe as *const u8),
+        ("tos_RegWrite", registry::tos_RegWrite as *const u8),
     ]
 }
 
 pub fn reset() {
     audio::reset();
+    registry::reset();
     FRAMES_PRESENTED.store(0, Ordering::Release);
     WINDOW.with(|window| *window.borrow_mut() = None);
     key_queue().lock().expect("key queue poisoned").clear();
@@ -53,10 +60,16 @@ pub fn reset() {
 /// Stop host resources that can outlive a cancelled HolyC task.
 pub fn shutdown() {
     audio::stop();
+    registry::unbind();
+}
+
+pub fn bind_globals(bindings: &[GlobalBinding<'_>]) {
+    registry::bind(bindings);
 }
 
 pub fn set_interactive(interactive: bool) {
     INTERACTIVE.store(interactive, Ordering::Release);
+    registry::set_persistent(interactive);
 }
 
 fn screen() -> *mut CDC {

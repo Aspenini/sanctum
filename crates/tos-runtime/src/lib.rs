@@ -101,9 +101,6 @@ pub fn jit_symbols() -> Vec<(&'static str, *const u8)> {
         ("tos_Gs", tos_Gs as *const u8),
         ("tos_mp_cnt", tos_mp_cnt as *const u8),
         ("tos_Spawn", tos_Spawn as *const u8),
-        ("tos_RegDft", tos_RegDft as *const u8),
-        ("tos_RegExe", tos_RegExe as *const u8),
-        ("tos_RegWrite", tos_RegWrite as *const u8),
         ("tos_SettingsPush", tos_SettingsPush as *const u8),
         ("tos_SettingsPop", tos_SettingsPop as *const u8),
         ("tos_MenuPush", tos_MenuPush as *const u8),
@@ -192,15 +189,6 @@ pub unsafe extern "C" fn tos_Spawn(
     }
     spawned
 }
-
-#[unsafe(no_mangle)]
-pub extern "C" fn tos_RegDft(_path: *const u8, _defaults: *const u8) {}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn tos_RegExe(_path: *const u8) {}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn tos_RegWrite(_path: *const u8, _fmt: *const u8, _value: f64) {}
 
 #[unsafe(no_mangle)]
 pub extern "C" fn tos_SettingsPush() -> *mut u8 {

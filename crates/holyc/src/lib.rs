@@ -92,26 +92,45 @@ pub fn compile_file(path: &Path, opts: &CompileOptions) -> Result<JitProgram, Ho
 pub fn run_source(path: &str, src: &str) -> Result<(), HolyCError> {
     templeos_compat::prepare(false);
     let mut prog = compile_source(path, src)?;
-    prog.run()?;
-    Ok(())
+    bind_program_globals(&mut prog)?;
+    let result = prog.run();
+    templeos_compat::shutdown();
+    result.map_err(HolyCError::from)
 }
 
 pub fn run_file(path: &Path, opts: &CompileOptions) -> Result<(), HolyCError> {
     templeos_compat::prepare(false);
     let mut prog = compile_file(path, opts)?;
-    prog.run()?;
-    Ok(())
+    bind_program_globals(&mut prog)?;
+    let result = prog.run();
+    templeos_compat::shutdown();
+    result.map_err(HolyCError::from)
 }
 
 pub fn run_file_interactive(path: &Path, opts: &CompileOptions) -> Result<(), HolyCError> {
     templeos_compat::prepare(true);
     let mut prog = compile_file(path, opts)?;
+    bind_program_globals(&mut prog)?;
     let result = prog.run();
     templeos_compat::shutdown();
     // Background HolyC tasks are parked during shutdown. Keep their JIT code
     // mapped until the CLI process exits rather than invalidating their PCs.
     std::mem::forget(prog);
     result.map_err(HolyCError::from)
+}
+
+fn bind_program_globals(program: &mut JitProgram) -> Result<(), HolyCError> {
+    let globals = program.global_bindings()?;
+    let bindings = globals
+        .iter()
+        .map(|global| templeos_compat::GlobalBinding {
+            name: &global.name,
+            address: global.address,
+            size: global.size,
+        })
+        .collect::<Vec<_>>();
+    templeos_compat::bind_globals(&bindings);
+    Ok(())
 }
 
 #[cfg(test)]
@@ -128,6 +147,26 @@ mod tests {
         .unwrap();
         let out = tos_runtime::capture_take().unwrap();
         assert_eq!(out, b"Hello world\n");
+    }
+
+    #[test]
+    fn registry_source_updates_bound_jit_globals() {
+        tos_runtime::capture_begin();
+        run_source(
+            "registry.HC",
+            r#"
+RegDft("Tests/Score", "F64 saved_score=4.25;\n");
+RegExe("Tests/Score");
+"%f ", saved_score;
+RegWrite("Tests/Score", "F64 saved_score=%0.2f;\n", 7.5);
+saved_score=0.0;
+RegExe("Tests/Score");
+"%f\n", saved_score;
+"#,
+        )
+        .unwrap();
+        let out = tos_runtime::capture_take().unwrap();
+        assert_eq!(out, b"4.25 7.5\n");
     }
 
     #[test]

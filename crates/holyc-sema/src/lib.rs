@@ -319,7 +319,7 @@ impl Sema {
         s.add_builtin("MusicSettingsRst", Ty::U0, vec![], false);
         s.add_builtin(
             "RegDft",
-            Ty::U0,
+            Ty::I64,
             vec![
                 ("path", Ty::Ptr(Box::new(Ty::U8))),
                 ("defaults", Ty::Ptr(Box::new(Ty::U8))),
@@ -328,13 +328,13 @@ impl Sema {
         );
         s.add_builtin(
             "RegExe",
-            Ty::U0,
+            Ty::I64,
             vec![("path", Ty::Ptr(Box::new(Ty::U8)))],
             false,
         );
         s.add_builtin(
             "RegWrite",
-            Ty::U0,
+            Ty::I64,
             vec![
                 ("path", Ty::Ptr(Box::new(Ty::U8))),
                 ("fmt", Ty::Ptr(Box::new(Ty::U8))),
@@ -733,9 +733,6 @@ impl Sema {
                 size: 111,
             },
         );
-        // Talons declares this persisted setting through RegDft source text.
-        // Model it as a normal JIT global until the host registry is persistent.
-        s.globals.insert("best_score".into(), Ty::F64);
         if let Some(f) = s.functions.get_mut("Fs") {
             f.ret = Ty::Ptr(Box::new(Ty::Class {
                 name: "CTask".into(),
@@ -795,6 +792,19 @@ impl Sema {
                     self.classes.insert(c.name.clone(), info);
                 }
                 Item::Stmt(stmt) => collect_globals(stmt, &self.classes, &mut self.globals),
+            }
+        }
+        for item in &module.items {
+            match item {
+                Item::Stmt(stmt) => collect_registry_globals(stmt, &mut self.globals),
+                Item::Fn(function) => {
+                    if let Some(body) = &function.body {
+                        for stmt in body {
+                            collect_registry_globals(stmt, &mut self.globals);
+                        }
+                    }
+                }
+                Item::Class(_) => {}
             }
         }
         for item in &mut module.items {
@@ -1048,6 +1058,60 @@ fn collect_globals(
             }
         }
         _ => {}
+    }
+}
+
+fn collect_registry_globals(stmt: &Stmt, out: &mut HashMap<String, Ty>) {
+    match stmt {
+        Stmt::Expr { expr, .. } => collect_registry_globals_expr(expr, out),
+        Stmt::Block { stmts, .. } | Stmt::Start { body: stmts, .. } => {
+            for stmt in stmts {
+                collect_registry_globals(stmt, out);
+            }
+        }
+        Stmt::If { then, else_, .. } => {
+            collect_registry_globals(then, out);
+            if let Some(else_) = else_ {
+                collect_registry_globals(else_, out);
+            }
+        }
+        Stmt::While { body, .. }
+        | Stmt::DoWhile { body, .. }
+        | Stmt::For { body, .. }
+        | Stmt::Switch { body, .. } => collect_registry_globals(body, out),
+        Stmt::Try { body, catch, .. } => {
+            collect_registry_globals(body, out);
+            collect_registry_globals(catch, out);
+        }
+        _ => {}
+    }
+}
+
+fn collect_registry_globals_expr(expr: &Expr, out: &mut HashMap<String, Ty>) {
+    let ExprKind::Call { callee, args } = &expr.kind else {
+        return;
+    };
+    if matches!(&callee.kind, ExprKind::Ident(name) if name == "RegDft")
+        && let Some(Some(Expr {
+            kind: ExprKind::Str(defaults),
+            ..
+        })) = args.get(1)
+    {
+        for statement in defaults.split(';') {
+            let declaration = statement
+                .split_once('=')
+                .map_or(statement, |(left, _)| left);
+            let mut words = declaration.split_whitespace();
+            let (Some(kind), Some(name)) = (words.next(), words.next()) else {
+                continue;
+            };
+            if let Some(ty) = Ty::from_builtin(kind)
+                && !ty.is_void()
+                && !ty.is_aggregate()
+            {
+                out.entry(name.to_string()).or_insert(ty);
+            }
+        }
     }
 }
 

@@ -36,13 +36,58 @@ pub struct JitProgram {
     module: JITModule,
     main_id: FuncId,
     function_ids: HashMap<String, FuncId>,
+    global_id: DataId,
+    globals: HashMap<String, GlobalInfo>,
+    finalized: bool,
+}
+
+/// Address and storage size of one finalized JIT global.
+pub struct JitGlobal {
+    pub name: String,
+    pub address: *mut u8,
+    pub size: usize,
 }
 
 impl JitProgram {
-    pub fn run(&mut self) -> Result<(), CodegenError> {
+    fn finalize(&mut self) -> Result<(), CodegenError> {
+        if self.finalized {
+            return Ok(());
+        }
         self.module
             .finalize_definitions()
             .map_err(|e| CodegenError::Cranelift(e.to_string()))?;
+        self.finalized = true;
+        Ok(())
+    }
+
+    /// Finalize the module and expose its packed globals to a compatibility
+    /// host before the generated entry point starts executing. Returned
+    /// addresses remain valid only while this `JitProgram` is alive.
+    pub fn global_bindings(&mut self) -> Result<Vec<JitGlobal>, CodegenError> {
+        self.finalize()?;
+        let (base, allocation_size) = self.module.get_finalized_data(self.global_id);
+        let mut bindings = Vec::with_capacity(self.globals.len());
+        for (name, global) in &self.globals {
+            let offset = usize::try_from(global.offset)
+                .map_err(|_| CodegenError::Msg("negative global offset".into()))?;
+            let size = usize::try_from(global.ty.size().max(1))
+                .map_err(|_| CodegenError::Msg(format!("global `{name}` is too large")))?;
+            if offset.saturating_add(size) > allocation_size {
+                return Err(CodegenError::Msg(format!(
+                    "global `{name}` exceeds its JIT allocation"
+                )));
+            }
+            bindings.push(JitGlobal {
+                name: name.clone(),
+                address: unsafe { base.add(offset) }.cast_mut(),
+                size,
+            });
+        }
+        Ok(bindings)
+    }
+
+    pub fn run(&mut self) -> Result<(), CodegenError> {
+        self.finalize()?;
         if std::env::var_os("SANCTUM_JIT_MAP").is_some() {
             let mut functions = self
                 .function_ids
@@ -171,12 +216,9 @@ pub fn compile_jit(
         return Err(CodegenError::Msg("global data exceeds 2 GiB".into()));
     }
     let global_id = module.declare_data("module_globals", Linkage::Local, true, false)?;
-    let mut global_image = vec![0u8; global_bytes.max(1)];
+    let global_image = vec![0u8; global_bytes.max(1)];
     let mut globals = HashMap::new();
     for (name, offset, ty) in layout {
-        if name == "best_score" && matches!(ty, Ty::F64) {
-            global_image[offset..offset + 8].copy_from_slice(&9999.0_f64.to_le_bytes());
-        }
         let offset = i32::try_from(offset)
             .map_err(|_| CodegenError::Msg("global data exceeds 2 GiB".into()))?;
         globals.insert(
@@ -307,6 +349,9 @@ pub fn compile_jit(
         module,
         main_id,
         function_ids,
+        global_id,
+        globals,
+        finalized: false,
     })
 }
 
