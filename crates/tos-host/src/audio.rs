@@ -1,14 +1,16 @@
 //! TempleOS music parsing and host tone output.
 
 use std::ffi::CStr;
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::mem::{offset_of, size_of};
+use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-const NOTE_MAP: [i64; 7] = [0, 2, 3, 5, 7, 8, 10];
+const NOTE_MAP: [u8; 7] = [0, 2, 3, 5, 7, 8, 10];
 const TONE_SLICE: Duration = Duration::from_millis(40);
 
 static CURRENT_ONA: AtomicI64 = AtomicI64::new(0);
+static MUSIC_GLOBAL: AtomicUsize = AtomicUsize::new(0);
 static TONE_WORKER: OnceLock<()> = OnceLock::new();
 static MUSIC: OnceLock<Mutex<MusicState>> = OnceLock::new();
 
@@ -20,6 +22,7 @@ struct MusicState {
     meter_bottom: i64,
     tempo: f64,
     staccato_factor: f64,
+    note_map: [u8; 7],
 }
 
 impl Default for MusicState {
@@ -31,6 +34,7 @@ impl Default for MusicState {
             meter_bottom: 4,
             tempo: 2.5,
             staccato_factor: 0.9,
+            note_map: NOTE_MAP,
         }
     }
 }
@@ -110,7 +114,7 @@ fn parse_song(song: &[u8], state: &mut MusicState) -> Vec<NoteEvent> {
 
         let note_index = i64::from(ch) - i64::from(b'A');
         let ona = if (0..7).contains(&note_index) {
-            let mut note = NOTE_MAP[note_index as usize];
+            let mut note = i64::from(state.note_map[note_index as usize]);
             let mut octave = state.octave;
             match song.get(cursor).copied() {
                 Some(b'b') => {
@@ -189,6 +193,129 @@ fn set_note(ona: i64) {
     CURRENT_ONA.store(ona.max(0), Ordering::Release);
 }
 
+fn bound_music() -> Option<*mut u8> {
+    let address = MUSIC_GLOBAL.load(Ordering::Acquire);
+    (address != 0).then_some(address as *mut u8)
+}
+
+unsafe fn read_i64(base: *mut u8, offset: usize) -> i64 {
+    unsafe { base.add(offset).cast::<i64>().read_unaligned() }
+}
+
+unsafe fn read_f64(base: *mut u8, offset: usize) -> f64 {
+    unsafe { base.add(offset).cast::<f64>().read_unaligned() }
+}
+
+unsafe fn write_i64(base: *mut u8, offset: usize, value: i64) {
+    unsafe { base.add(offset).cast::<i64>().write_unaligned(value) };
+}
+
+unsafe fn write_f64(base: *mut u8, offset: usize, value: f64) {
+    unsafe { base.add(offset).cast::<f64>().write_unaligned(value) };
+}
+
+fn sync_from_bound(state: &mut MusicState) {
+    let Some(base) = bound_music() else {
+        return;
+    };
+    unsafe { sync_from_address(state, base) };
+}
+
+unsafe fn sync_from_address(state: &mut MusicState, base: *mut u8) {
+    unsafe {
+        state.octave = read_i64(base, offset_of!(tos_abi::CMusicGlbls, octave));
+        let note_len = read_f64(base, offset_of!(tos_abi::CMusicGlbls, note_len));
+        if note_len.is_finite() && note_len > 0.0 {
+            state.note_len = note_len;
+        }
+        for (index, note) in state.note_map.iter_mut().enumerate() {
+            *note = base
+                .add(offset_of!(tos_abi::CMusicGlbls, note_map) + index)
+                .read();
+        }
+        state.meter_top = read_i64(base, offset_of!(tos_abi::CMusicGlbls, meter_top));
+        state.meter_bottom = read_i64(base, offset_of!(tos_abi::CMusicGlbls, meter_bottom));
+        let tempo = read_f64(base, offset_of!(tos_abi::CMusicGlbls, tempo));
+        if tempo.is_finite() && tempo > 0.0 {
+            state.tempo = tempo;
+        }
+        let staccato = read_f64(base, offset_of!(tos_abi::CMusicGlbls, staccato_factor));
+        if staccato.is_finite() {
+            state.staccato_factor = staccato.clamp(0.0, 1.0);
+        }
+    }
+}
+
+fn sync_to_bound(state: &MusicState, initialize: bool) {
+    let Some(base) = bound_music() else {
+        return;
+    };
+    unsafe { sync_to_address(state, base, initialize) };
+}
+
+unsafe fn sync_to_address(state: &MusicState, base: *mut u8, initialize: bool) {
+    unsafe {
+        write_i64(base, offset_of!(tos_abi::CMusicGlbls, octave), state.octave);
+        write_f64(
+            base,
+            offset_of!(tos_abi::CMusicGlbls, note_len),
+            state.note_len,
+        );
+        write_i64(
+            base,
+            offset_of!(tos_abi::CMusicGlbls, meter_top),
+            state.meter_top,
+        );
+        write_i64(
+            base,
+            offset_of!(tos_abi::CMusicGlbls, meter_bottom),
+            state.meter_bottom,
+        );
+        write_f64(base, offset_of!(tos_abi::CMusicGlbls, tempo), state.tempo);
+        write_f64(
+            base,
+            offset_of!(tos_abi::CMusicGlbls, staccato_factor),
+            state.staccato_factor,
+        );
+        write_i64(base, offset_of!(tos_abi::CMusicGlbls, play_note_num), 0);
+        if initialize {
+            for (index, note) in state.note_map.iter().copied().enumerate() {
+                base.add(offset_of!(tos_abi::CMusicGlbls, note_map) + index)
+                    .write(note);
+            }
+            write_i64(base, offset_of!(tos_abi::CMusicGlbls, mute), 0);
+        }
+    }
+}
+
+fn set_play_note_num(value: i64) {
+    if let Some(base) = bound_music() {
+        unsafe { write_i64(base, offset_of!(tos_abi::CMusicGlbls, play_note_num), value) };
+    }
+}
+
+fn is_muted() -> bool {
+    bound_music().is_some_and(|base| unsafe { is_muted_at(base) })
+}
+
+unsafe fn is_muted_at(base: *mut u8) -> bool {
+    unsafe { read_i64(base, offset_of!(tos_abi::CMusicGlbls, mute)) != 0 }
+}
+
+pub fn bind_music_global(address: *mut u8, size: usize) {
+    if address.is_null() || size < size_of::<tos_abi::CMusicGlbls>() {
+        unbind();
+        return;
+    }
+    MUSIC_GLOBAL.store(address as usize, Ordering::Release);
+    let state = *music().lock().expect("music state poisoned");
+    sync_to_bound(&state, true);
+}
+
+pub fn unbind() {
+    MUSIC_GLOBAL.store(0, Ordering::Release);
+}
+
 #[cfg(windows)]
 #[link(name = "kernel32")]
 unsafe extern "system" {
@@ -215,7 +342,9 @@ fn sleep(duration: Duration) {
 
 pub fn reset() {
     stop();
-    *music().lock().expect("music state poisoned") = MusicState::default();
+    let state = MusicState::default();
+    *music().lock().expect("music state poisoned") = state;
+    sync_to_bound(&state, false);
 }
 
 pub fn stop() {
@@ -252,12 +381,23 @@ pub unsafe extern "C" fn tos_Play(song: *const u8, _words: *const u8) {
         return;
     }
     let song = unsafe { CStr::from_ptr(song.cast()) }.to_bytes();
-    let events = parse_song(song, &mut music().lock().expect("music state poisoned"));
-    for event in events {
-        set_note(event.ona);
+    let events = {
+        let mut state = music().lock().expect("music state poisoned");
+        sync_from_bound(&mut state);
+        let events = parse_song(song, &mut state);
+        sync_to_bound(&state, false);
+        events
+    };
+    for (index, event) in events.into_iter().enumerate() {
+        if !is_muted() {
+            set_note(event.ona);
+        }
         sleep(Duration::from_secs_f64(event.on_seconds));
-        set_note(0);
+        if !is_muted() {
+            set_note(0);
+        }
         sleep(Duration::from_secs_f64(event.off_seconds));
+        set_play_note_num(index as i64 + 1);
     }
 }
 
@@ -275,6 +415,43 @@ mod tests {
         assert_eq!(ona_frequency(0), None);
         assert_eq!(ona_frequency(60), Some(440));
         assert_eq!(ona_frequency(72), Some(880));
+    }
+
+    #[test]
+    fn maps_canonical_music_settings_and_reads_mute() {
+        let mut globals = [0_u8; size_of::<tos_abi::CMusicGlbls>()];
+        let state = MusicState::default();
+        unsafe {
+            sync_to_address(&state, globals.as_mut_ptr(), true);
+            assert_eq!(
+                read_i64(
+                    globals.as_mut_ptr(),
+                    offset_of!(tos_abi::CMusicGlbls, octave)
+                ),
+                4
+            );
+            assert_eq!(
+                read_f64(
+                    globals.as_mut_ptr(),
+                    offset_of!(tos_abi::CMusicGlbls, tempo)
+                ),
+                2.5
+            );
+            write_f64(
+                globals.as_mut_ptr(),
+                offset_of!(tos_abi::CMusicGlbls, tempo),
+                5.0,
+            );
+            write_i64(
+                globals.as_mut_ptr(),
+                offset_of!(tos_abi::CMusicGlbls, mute),
+                1,
+            );
+            let mut updated = state;
+            sync_from_address(&mut updated, globals.as_mut_ptr());
+            assert_eq!(updated.tempo, 5.0);
+            assert!(is_muted_at(globals.as_mut_ptr()));
+        }
     }
 
     #[test]

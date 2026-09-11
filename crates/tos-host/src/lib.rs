@@ -50,6 +50,7 @@ pub fn jit_symbols() -> Vec<(&'static str, *const u8)> {
 }
 
 pub fn reset() {
+    audio::unbind();
     audio::reset();
     registry::reset();
     FRAMES_PRESENTED.store(0, Ordering::Release);
@@ -60,11 +61,17 @@ pub fn reset() {
 /// Stop host resources that can outlive a cancelled HolyC task.
 pub fn shutdown() {
     audio::stop();
+    audio::unbind();
     registry::unbind();
 }
 
 pub fn bind_globals(bindings: &[GlobalBinding<'_>]) {
     registry::bind(bindings);
+    if let Some(music) = bindings.iter().find(|binding| binding.name == "music") {
+        audio::bind_music_global(music.address, music.size);
+    } else {
+        audio::unbind();
+    }
 }
 
 pub fn set_interactive(interactive: bool) {

@@ -36,12 +36,12 @@ fixed-point matrix/vector math, task records and deterministic single-core
 `Spawn`, and core runtime primitives (`Print`, heaps, queues, bits, time/random,
 `Fs`/`Gs`). The compatibility host implements `Snd`, `Beep`, and `Play`,
 including TempleOS music-string timing, persistent settings, ties, accidentals,
-and Windows square-wave tone output. `RegDft`, `RegExe`, and single-value
-`RegWrite` persist simple scalar settings for interactive programs and bind
-them back into JIT globals. The graphics subsystem provides indexed-color
-device contexts, depth buffers, line/polygon rasterization, blits, bitmap and
-3D mesh sprites, interpolation, symmetry, TempleOS mesh lighting, probability
-dithering, and HUD text.
+live `CMusicGlbls` controls, and Windows square-wave tone output. `RegDft`,
+`RegExe`, and single-value `RegWrite` persist simple scalar settings for
+interactive programs and bind them back into JIT globals. The graphics
+subsystem provides indexed-color device contexts, depth buffers, line/polygon
+rasterization, blits, bitmap and 3D mesh sprites, interpolation, symmetry,
+TempleOS mesh lighting, probability dithering, and HUD text.
 
 `TempleOS/Demo/Games/Talons.HC` now compiles end-to-end and passes a JIT smoke
 run through terrain initialization, its real `DrawIt` callback, a non-empty

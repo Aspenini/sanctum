@@ -87,6 +87,26 @@ pub struct CCPU {
     pub idle_factor: f64,
 }
 
+/// Packed public music settings used by TempleOS programs. Its deliberately
+/// unaligned fields match `CMusicGlbls` rather than Rust's native layout.
+#[repr(C, packed)]
+pub struct CMusicGlbls {
+    pub cur_song: *mut u8,
+    pub cur_song_task: *mut CTask,
+    pub octave: i64,
+    pub note_len: f64,
+    pub note_map: [u8; 7],
+    pub mute: i64,
+    pub meter_top: i64,
+    pub meter_bottom: i64,
+    pub tempo: f64,
+    pub staccato_factor: f64,
+    pub play_note_num: i64,
+    pub tm_correction: f64,
+    pub last_beat: f64,
+    pub last_tm: f64,
+}
+
 /// Graphics device context. Layout will be matched to KernelA.HH in Phase 3.
 #[repr(C)]
 pub struct CDC {
@@ -124,11 +144,21 @@ pub struct CDC {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::mem::offset_of;
+    use std::mem::{offset_of, size_of};
 
     #[test]
     fn que_layout() {
         assert_eq!(offset_of!(CQue, next), 0);
         assert_eq!(offset_of!(CQue, last), 8);
+    }
+
+    #[test]
+    fn music_layout_matches_packed_holyc_class() {
+        assert_eq!(size_of::<CMusicGlbls>(), 111);
+        assert_eq!(offset_of!(CMusicGlbls, octave), 16);
+        assert_eq!(offset_of!(CMusicGlbls, note_map), 32);
+        assert_eq!(offset_of!(CMusicGlbls, mute), 39);
+        assert_eq!(offset_of!(CMusicGlbls, tempo), 63);
+        assert_eq!(offset_of!(CMusicGlbls, play_note_num), 79);
     }
 }
