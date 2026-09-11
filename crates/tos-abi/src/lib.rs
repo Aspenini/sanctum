@@ -115,6 +115,10 @@ pub struct CDC {
     pub light_y: i32,
     pub light_z: i32,
     pub dither_probability_u16: u32,
+    // Host-only ownership markers. `DCAlias` shares the source image and
+    // depth buffers, while every context owns its header and rotation matrix.
+    pub owns_body: bool,
+    pub owns_depth_buf: bool,
 }
 
 #[cfg(test)]

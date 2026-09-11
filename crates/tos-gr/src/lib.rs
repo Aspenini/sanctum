@@ -158,11 +158,7 @@ pub fn jit_symbols() -> Vec<(&'static str, *const u8)> {
 }
 
 fn identity_matrix() -> *mut i64 {
-    let mut r = Box::new([0_i64; 16]);
-    for i in [0, 5, 10, 15] {
-        r[i] = 1_i64 << 32;
-    }
-    Box::into_raw(r).cast::<i64>()
+    tos_runtime::tos_Mat4x4IdentNew()
 }
 
 #[unsafe(no_mangle)]
@@ -178,7 +174,7 @@ pub extern "C" fn tos_DCNew(
         ptr::null_mut()
     } else {
         let len = (width as usize).saturating_mul(height as usize);
-        Box::into_raw(vec![0_u8; len].into_boxed_slice()).cast::<u8>()
+        unsafe { tos_runtime::tos_CAlloc(len.min(i64::MAX as usize) as i64, ptr::null_mut()) }
     };
     Box::into_raw(Box::new(CDC {
         width,
@@ -203,6 +199,8 @@ pub extern "C" fn tos_DCNew(
         light_y: 37_837,
         light_z: 37_837,
         dither_probability_u16: 0,
+        owns_body: !body.is_null(),
+        owns_depth_buf: false,
     }))
 }
 
@@ -235,12 +233,33 @@ pub unsafe extern "C" fn tos_DCAlias(dc: *mut CDC, _task: *mut CTask) -> *mut CD
         light_y: src.light_y,
         light_z: src.light_z,
         dither_probability_u16: src.dither_probability_u16,
+        owns_body: false,
+        owns_depth_buf: false,
     }))
 }
 
-/// Device contexts intentionally live for the JIT program lifetime for now.
 #[unsafe(no_mangle)]
-pub extern "C" fn tos_DCDel(_dc: *mut CDC) {}
+/// Release a device-context header and all buffers owned by it.
+///
+/// # Safety
+///
+/// `dc` must be null or a live pointer returned by `DCNew` or `DCAlias`, and
+/// it must not be used again after this call.
+pub unsafe extern "C" fn tos_DCDel(dc: *mut CDC) {
+    if dc.is_null() {
+        return;
+    }
+    let dc = unsafe { Box::from_raw(dc) };
+    unsafe {
+        tos_runtime::tos_Free(dc.r.cast());
+        if dc.owns_body {
+            tos_runtime::tos_Free(dc.body);
+        }
+        if dc.owns_depth_buf {
+            tos_runtime::tos_Free(dc.depth_buf.cast());
+        }
+    }
+}
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn tos_DCFill(dc: *mut CDC, color: i64) {
@@ -266,8 +285,15 @@ pub unsafe extern "C" fn tos_DCDepthBufAlloc(dc: *mut CDC) -> *mut i32 {
     }
     let dc = unsafe { &mut *dc };
     let len = (dc.width as usize).saturating_mul(dc.height as usize);
-    dc.depth_buf = Box::into_raw(vec![i32::MAX; len].into_boxed_slice()).cast::<i32>();
-    dc.depth_buf
+    if dc.owns_depth_buf {
+        unsafe { tos_runtime::tos_Free(dc.depth_buf.cast()) };
+    }
+    let byte_len = len.saturating_mul(size_of::<i32>());
+    dc.depth_buf =
+        unsafe { tos_runtime::tos_MAlloc(byte_len.min(i64::MAX as usize) as i64, ptr::null_mut()) }
+            .cast();
+    dc.owns_depth_buf = !dc.depth_buf.is_null();
+    unsafe { tos_DCDepthBufRst(dc) }
 }
 
 #[unsafe(no_mangle)]
@@ -1318,6 +1344,25 @@ mod tests {
         unsafe {
             *x += 2;
             *y += 2;
+        }
+    }
+
+    #[test]
+    fn deletes_alias_without_freeing_shared_buffers() {
+        let dc = tos_DCNew(8, 8, ptr::null_mut(), 0);
+        unsafe {
+            let depth = tos_DCDepthBufAlloc(dc);
+            let alias = tos_DCAlias(dc, ptr::null_mut());
+            assert!(!(*alias).owns_body);
+            assert!(!(*alias).owns_depth_buf);
+            assert_ne!((*alias).r, (*dc).r);
+
+            tos_DCDel(alias);
+            tos_DCFill(dc, i64::from(tos_abi::LTRED));
+            assert_eq!(*(*dc).body, tos_abi::LTRED as u8);
+            assert_eq!((*dc).depth_buf, depth);
+            assert_eq!(*tos_DCDepthBufRst(dc), i32::MAX);
+            tos_DCDel(dc);
         }
     }
 
