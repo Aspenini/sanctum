@@ -1,0 +1,16 @@
+[package]
+name = "templeos-compat"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Reusable TempleOS compatibility layer for HolyC programs"
+
+[lib]
+crate-type = ["rlib", "staticlib"]
+
+[dependencies]
+tos-abi = { path = "../tos-abi" }
+tos-doldoc = { path = "../tos-doldoc" }
+tos-gr = { path = "../tos-gr" }
+tos-host = { path = "../tos-host" }
+tos-runtime = { path = "../tos-runtime" }

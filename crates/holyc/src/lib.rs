@@ -4,10 +4,14 @@ use holyc_sema::Sema;
 use holyc_syntax::{PreprocessOpts, Session, SyntaxError, TokenKind, lex_buffer, preprocess};
 use std::collections::HashMap;
 use std::path::Path;
+use templeos_compat::doldoc as tos_doldoc;
 use thiserror::Error;
 
+#[cfg(test)]
+use templeos_compat::{host as tos_host, runtime as tos_runtime};
+
 #[derive(Debug, Error)]
-pub enum HccError {
+pub enum HolyCError {
     #[error(transparent)]
     Syntax(#[from] SyntaxError),
     #[error(transparent)]
@@ -32,21 +36,19 @@ impl Default for CompileOptions {
     }
 }
 
-pub fn compile_source(path: &str, src: &str) -> Result<JitProgram, HccError> {
+pub fn compile_source(path: &str, src: &str) -> Result<JitProgram, HolyCError> {
     let mut session = Session::new();
     let tokens = lex_buffer(&mut session, path, src)?;
     let mut parser = Parser::new(&tokens, path, src);
     let mut ast = parser.parse_module()?;
     let mut sema = Sema::new(path, src);
     sema.run(&mut ast)?;
-    let mut syms = tos_runtime::jit_symbols();
-    syms.extend(tos_gr::jit_symbols());
-    syms.extend(tos_host::jit_symbols());
+    let syms = templeos_compat::jit_symbols();
     let refs: Vec<(&str, *const u8)> = syms.iter().map(|(n, p)| (*n, *p)).collect();
     Ok(compile_jit(&ast, &sema, &refs, &HashMap::new())?)
 }
 
-pub fn compile_file(path: &Path, opts: &CompileOptions) -> Result<JitProgram, HccError> {
+pub fn compile_file(path: &Path, opts: &CompileOptions) -> Result<JitProgram, HolyCError> {
     let mut session = Session::new();
     let pp = PreprocessOpts {
         include_dirs: opts.include_dirs.clone(),
@@ -62,9 +64,7 @@ pub fn compile_file(path: &Path, opts: &CompileOptions) -> Result<JitProgram, Hc
     let mut ast = parser.parse_module()?;
     let mut sema = Sema::new(&path_str, &src);
     sema.run(&mut ast)?;
-    let mut syms = tos_runtime::jit_symbols();
-    syms.extend(tos_gr::jit_symbols());
-    syms.extend(tos_host::jit_symbols());
+    let syms = templeos_compat::jit_symbols();
     let refs: Vec<(&str, *const u8)> = syms.iter().map(|(n, p)| (*n, *p)).collect();
     let mut expected_by_file: HashMap<u32, Vec<i64>> = HashMap::new();
     for token in &tokens {
@@ -89,35 +89,29 @@ pub fn compile_file(path: &Path, opts: &CompileOptions) -> Result<JitProgram, Hc
     Ok(compile_jit(&ast, &sema, &refs, &binary_resources)?)
 }
 
-pub fn run_source(path: &str, src: &str) -> Result<(), HccError> {
-    tos_host::set_interactive(false);
-    tos_runtime::set_background_tasks_enabled(false);
-    tos_host::reset();
+pub fn run_source(path: &str, src: &str) -> Result<(), HolyCError> {
+    templeos_compat::prepare(false);
     let mut prog = compile_source(path, src)?;
     prog.run()?;
     Ok(())
 }
 
-pub fn run_file(path: &Path, opts: &CompileOptions) -> Result<(), HccError> {
-    tos_host::set_interactive(false);
-    tos_runtime::set_background_tasks_enabled(false);
-    tos_host::reset();
+pub fn run_file(path: &Path, opts: &CompileOptions) -> Result<(), HolyCError> {
+    templeos_compat::prepare(false);
     let mut prog = compile_file(path, opts)?;
     prog.run()?;
     Ok(())
 }
 
-pub fn run_file_interactive(path: &Path, opts: &CompileOptions) -> Result<(), HccError> {
-    tos_host::set_interactive(true);
-    tos_runtime::set_background_tasks_enabled(true);
-    tos_host::reset();
+pub fn run_file_interactive(path: &Path, opts: &CompileOptions) -> Result<(), HolyCError> {
+    templeos_compat::prepare(true);
     let mut prog = compile_file(path, opts)?;
     let result = prog.run();
-    tos_runtime::cancel_background_tasks();
+    templeos_compat::shutdown();
     // Background HolyC tasks are parked during shutdown. Keep their JIT code
     // mapped until the CLI process exits rather than invalidating their PCs.
     std::mem::forget(prog);
-    result.map_err(HccError::from)
+    result.map_err(HolyCError::from)
 }
 
 #[cfg(test)]

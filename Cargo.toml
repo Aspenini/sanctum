@@ -6,7 +6,7 @@ members = ["crates/*"]
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
-description = "HolyC AOT compiler and TempleOS-compatible runtime"
+description = "HolyC compiler, TempleOS compatibility layer, and Sanctum graphical host"
 
 [workspace.dependencies]
 cranelift-codegen = "0.134"

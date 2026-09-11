@@ -1,0 +1,54 @@
+//! Reusable TempleOS compatibility services for JIT- and AOT-compiled HolyC.
+//!
+//! The `tos-*` crates are implementation units. This crate is their public
+//! integration boundary: compiler frontends and graphical hosts should depend
+//! on `templeos-compat`, not assemble individual subsystems themselves.
+
+pub use tos_abi as abi;
+pub use tos_doldoc as doldoc;
+pub use tos_gr as graphics;
+pub use tos_host as host;
+pub use tos_runtime as runtime;
+
+/// Native functions that a HolyC JIT must make available by their ABI names.
+///
+/// The same `#[no_mangle]` functions are retained in this crate's `staticlib`
+/// output, allowing an AOT backend to link against the compatibility layer.
+pub fn jit_symbols() -> Vec<(&'static str, *const u8)> {
+    let mut symbols = runtime::jit_symbols();
+    symbols.extend(graphics::jit_symbols());
+    symbols.extend(host::jit_symbols());
+    symbols
+}
+
+/// Prepare the compatibility runtime for one compiled program invocation.
+pub fn prepare(interactive: bool) {
+    host::set_interactive(interactive);
+    runtime::set_background_tasks_enabled(interactive);
+    host::reset();
+}
+
+/// Quiesce background HolyC tasks before releasing compiled code.
+pub fn shutdown() {
+    runtime::cancel_background_tasks();
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn exposes_the_combined_jit_abi() {
+        let symbols = super::jit_symbols();
+        let unique = symbols
+            .iter()
+            .map(|(name, _)| *name)
+            .collect::<std::collections::HashSet<_>>();
+        assert_eq!(
+            unique.len(),
+            symbols.len(),
+            "duplicate compatibility symbol"
+        );
+        for required in ["tos_Print", "tos_GrLine3", "tos_Refresh"] {
+            assert!(symbols.iter().any(|(name, _)| *name == required));
+        }
+    }
+}

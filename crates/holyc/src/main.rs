@@ -1,4 +1,4 @@
-use hcc::{CompileOptions, compile_file, run_file_interactive, run_source};
+use holyc::{CompileOptions, compile_file, run_file_interactive, run_source};
 use std::env;
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -7,7 +7,7 @@ fn main() -> ExitCode {
     let args = env::args().skip(1).collect::<Vec<_>>();
     if args.is_empty() || args.iter().any(|a| a == "-h" || a == "--help") {
         eprintln!(
-            "hcc -- HolyC AOT compiler\n\n  hcc [--run] [--cores N] [-I dir] <file.HC>\n  hcc --eval '<source>'\n"
+            "holyc -- HolyC compiler\n\n  holyc [--run] [--cores N] [-I dir] <file.HC>\n  holyc --eval '<source>'\n"
         );
         return ExitCode::SUCCESS;
     }

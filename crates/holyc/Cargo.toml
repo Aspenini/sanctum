@@ -1,16 +1,16 @@
 [package]
-name = "hcc"
+name = "holyc"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 description = "HolyC compiler CLI"
 
 [[bin]]
-name = "hcc"
+name = "holyc"
 path = "src/main.rs"
 
 [lib]
-name = "hcc"
+name = "holyc"
 path = "src/lib.rs"
 
 [dependencies]
@@ -19,8 +19,5 @@ holyc-ast = { path = "../holyc-ast" }
 holyc-parse = { path = "../holyc-parse" }
 holyc-sema = { path = "../holyc-sema" }
 holyc-codegen = { path = "../holyc-codegen" }
-tos-runtime = { path = "../tos-runtime" }
-tos-gr = { path = "../tos-gr" }
-tos-host = { path = "../tos-host" }
-tos-doldoc = { path = "../tos-doldoc" }
+templeos-compat = { path = "../templeos-compat" }
 thiserror.workspace = true
