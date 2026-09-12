@@ -20,7 +20,39 @@ pub const DEFAULT_HEIGHT: u32 = 480;
 static SCREEN: OnceLock<usize> = OnceLock::new();
 static FRAMES_PRESENTED: AtomicUsize = AtomicUsize::new(0);
 static INTERACTIVE: AtomicBool = AtomicBool::new(false);
+static HOST_MODE: AtomicUsize = AtomicUsize::new(HostMode::Headless as usize);
 static KEYS: OnceLock<Mutex<VecDeque<(i64, i64)>>> = OnceLock::new();
+static FRAME: OnceLock<Mutex<FrameSnapshot>> = OnceLock::new();
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[repr(usize)]
+pub enum HostMode {
+    #[default]
+    Headless = 0,
+    NativeWindow = 1,
+    External = 2,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FrameSnapshot {
+    pub sequence: u64,
+    pub width: u32,
+    pub height: u32,
+    pub indexed: Vec<u8>,
+    pub menu: Option<Vec<u8>>,
+}
+
+impl Default for FrameSnapshot {
+    fn default() -> Self {
+        Self {
+            sequence: 0,
+            width: DEFAULT_WIDTH,
+            height: DEFAULT_HEIGHT,
+            indexed: vec![0; DEFAULT_WIDTH as usize * DEFAULT_HEIGHT as usize],
+            menu: None,
+        }
+    }
+}
 
 thread_local! {
     static WINDOW: RefCell<Option<HostWindow>> = const { RefCell::new(None) };
@@ -56,6 +88,19 @@ pub fn reset() {
     FRAMES_PRESENTED.store(0, Ordering::Release);
     WINDOW.with(|window| *window.borrow_mut() = None);
     key_queue().lock().expect("key queue poisoned").clear();
+    *frame().lock().expect("frame snapshot poisoned") = FrameSnapshot::default();
+    let dc = screen();
+    if let Some(dc) = unsafe { dc.as_ref() }
+        && !dc.body.is_null()
+    {
+        unsafe {
+            std::ptr::write_bytes(
+                dc.body,
+                0,
+                (dc.width as usize).saturating_mul(dc.height as usize),
+            )
+        };
+    }
 }
 
 /// Stop host resources that can outlive a cancelled HolyC task.
@@ -75,8 +120,26 @@ pub fn bind_globals(bindings: &[GlobalBinding<'_>]) {
 }
 
 pub fn set_interactive(interactive: bool) {
-    INTERACTIVE.store(interactive, Ordering::Release);
+    set_host_mode(if interactive {
+        HostMode::NativeWindow
+    } else {
+        HostMode::Headless
+    });
     registry::set_persistent(interactive);
+}
+
+pub fn set_host_mode(mode: HostMode) {
+    HOST_MODE.store(mode as usize, Ordering::Release);
+    INTERACTIVE.store(mode != HostMode::Headless, Ordering::Release);
+    registry::set_persistent(mode != HostMode::Headless);
+}
+
+pub fn host_mode() -> HostMode {
+    match HOST_MODE.load(Ordering::Acquire) {
+        1 => HostMode::NativeWindow,
+        2 => HostMode::External,
+        _ => HostMode::Headless,
+    }
 }
 
 fn screen() -> *mut CDC {
@@ -94,28 +157,40 @@ fn key_queue() -> &'static Mutex<VecDeque<(i64, i64)>> {
     KEYS.get_or_init(|| Mutex::new(VecDeque::new()))
 }
 
+fn frame() -> &'static Mutex<FrameSnapshot> {
+    FRAME.get_or_init(|| Mutex::new(FrameSnapshot::default()))
+}
+
 pub fn frames_presented() -> usize {
     FRAMES_PRESENTED.load(Ordering::Acquire)
 }
 
+pub fn frame_snapshot_after(sequence: u64) -> Option<FrameSnapshot> {
+    let snapshot = frame().lock().expect("frame snapshot poisoned");
+    (snapshot.sequence > sequence).then(|| snapshot.clone())
+}
+
+pub fn push_key_event(ch: i64, scan_code: i64) {
+    key_queue()
+        .lock()
+        .expect("key queue poisoned")
+        .push_back((ch, scan_code));
+}
+
+pub fn request_exit() {
+    push_key_event(0x1b, 0);
+    tos_runtime::cancel_background_tasks();
+}
+
+pub fn set_muted(muted: bool) {
+    audio::set_muted(muted);
+}
+
 /// Copy the last indexed framebuffer through the standard TempleOS palette.
 pub fn framebuffer_rgb() -> Vec<u8> {
-    let dc = screen();
-    if dc.is_null() {
-        return Vec::new();
-    }
-    let dc = unsafe { &*dc };
-    if dc.body.is_null() {
-        return Vec::new();
-    }
-    let pixels = unsafe {
-        slice::from_raw_parts(
-            dc.body,
-            (dc.width as usize).saturating_mul(dc.height as usize),
-        )
-    };
-    let mut rgb = Vec::with_capacity(pixels.len() * 3);
-    for &pixel in pixels {
+    let snapshot = frame().lock().expect("frame snapshot poisoned");
+    let mut rgb = Vec::with_capacity(snapshot.indexed.len() * 3);
+    for &pixel in &snapshot.indexed {
         rgb.extend_from_slice(&tos_gr::palette_rgb(pixel));
     }
     rgb
@@ -140,7 +215,7 @@ fn push_key(key: Key) {
     }
 }
 
-fn present_window() {
+fn present_window(snapshot: &FrameSnapshot) {
     WINDOW.with(|slot| {
         let mut slot = slot.borrow_mut();
         if slot.is_none() {
@@ -168,20 +243,9 @@ fn present_window() {
         }
 
         let host = slot.as_mut().expect("window was initialized");
-        let dc = screen();
-        if let Some(dc) = unsafe { dc.as_ref() }
-            && !dc.body.is_null()
-        {
-            let indexed = unsafe {
-                slice::from_raw_parts(
-                    dc.body,
-                    (dc.width as usize).saturating_mul(dc.height as usize),
-                )
-            };
-            for (dst, &color) in host.pixels.iter_mut().zip(indexed) {
-                let [r, g, b] = tos_gr::palette_rgb(color);
-                *dst = (u32::from(r) << 16) | (u32::from(g) << 8) | u32::from(b);
-            }
+        for (dst, &color) in host.pixels.iter_mut().zip(&snapshot.indexed) {
+            let [r, g, b] = tos_gr::palette_rgb(color);
+            *dst = (u32::from(r) << 16) | (u32::from(g) << 8) | u32::from(b);
         }
         if let Err(error) = host.window.update_with_buffer(
             &host.pixels,
@@ -212,12 +276,32 @@ pub extern "C" fn tos_Refresh() {
     tos_runtime::background_checkpoint();
     let task = tos_runtime::tos_Fs();
     if let Some(draw) = unsafe { task.as_ref() }.and_then(|task| task.draw_it) {
-        draw(task, screen());
-        FRAMES_PRESENTED.fetch_add(1, Ordering::AcqRel);
-        if INTERACTIVE.load(Ordering::Acquire) {
-            present_window();
+        let dc = screen();
+        draw(task, dc);
+        let sequence = FRAMES_PRESENTED.fetch_add(1, Ordering::AcqRel) as u64 + 1;
+        if let Some(dc) = unsafe { dc.as_ref() }
+            && !dc.body.is_null()
+        {
+            let indexed = unsafe {
+                slice::from_raw_parts(
+                    dc.body,
+                    (dc.width as usize).saturating_mul(dc.height as usize),
+                )
+            }
+            .to_vec();
+            let snapshot = FrameSnapshot {
+                sequence,
+                width: dc.width.max(0) as u32,
+                height: dc.height.max(0) as u32,
+                indexed,
+                menu: tos_runtime::current_menu_source(),
+            };
+            *frame().lock().expect("frame snapshot poisoned") = snapshot.clone();
+            if host_mode() == HostMode::NativeWindow {
+                present_window(&snapshot);
+            }
         }
-    } else if INTERACTIVE.load(Ordering::Acquire) {
+    } else if host_mode() == HostMode::NativeWindow {
         // Background animation tasks use Refresh as their cooperative yield.
         std::thread::sleep(std::time::Duration::from_millis(16));
     }

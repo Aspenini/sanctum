@@ -4,14 +4,14 @@ use std::ffi::CStr;
 use std::mem::{offset_of, size_of};
 use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
 const NOTE_MAP: [u8; 7] = [0, 2, 3, 5, 7, 8, 10];
-const TONE_SLICE: Duration = Duration::from_millis(40);
-
 static CURRENT_ONA: AtomicI64 = AtomicI64::new(0);
 static MUSIC_GLOBAL: AtomicUsize = AtomicUsize::new(0);
-static TONE_WORKER: OnceLock<()> = OnceLock::new();
+static AUDIO_OUTPUT: OnceLock<Result<AudioOutput, String>> = OnceLock::new();
 static MUSIC: OnceLock<Mutex<MusicState>> = OnceLock::new();
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -170,20 +170,9 @@ fn ona_frequency(ona: i64) -> Option<u32> {
 }
 
 fn start_tone_worker() {
-    TONE_WORKER.get_or_init(|| {
-        let _ = std::thread::Builder::new()
-            .name("sanctum-audio".into())
-            .spawn(|| {
-                loop {
-                    let ona = CURRENT_ONA.load(Ordering::Acquire);
-                    if let Some(frequency) = ona_frequency(ona) {
-                        play_tone_slice(frequency, TONE_SLICE);
-                    } else {
-                        std::thread::sleep(Duration::from_millis(10));
-                    }
-                }
-            });
-    });
+    if let Err(error) = AUDIO_OUTPUT.get_or_init(AudioOutput::new) {
+        eprintln!("Sanctum audio unavailable: {error}");
+    }
 }
 
 fn set_note(ona: i64) {
@@ -316,22 +305,73 @@ pub fn unbind() {
     MUSIC_GLOBAL.store(0, Ordering::Release);
 }
 
-#[cfg(windows)]
-#[link(name = "kernel32")]
-unsafe extern "system" {
-    #[link_name = "Beep"]
-    fn windows_beep(frequency: u32, duration_ms: u32) -> i32;
+struct AudioOutput {
+    _stream: cpal::Stream,
 }
 
-fn play_tone_slice(frequency: u32, duration: Duration) {
-    let started = Instant::now();
-    #[cfg(windows)]
-    unsafe {
-        let _ = windows_beep(frequency, duration.as_millis() as u32);
+impl AudioOutput {
+    fn new() -> Result<Self, String> {
+        let host = cpal::default_host();
+        let device = host
+            .default_output_device()
+            .ok_or("no default output device")?;
+        let supported = device
+            .default_output_config()
+            .map_err(|error| error.to_string())?;
+        let sample_format = supported.sample_format();
+        let config: cpal::StreamConfig = supported.into();
+        let channels = usize::from(config.channels);
+        let sample_rate = config.sample_rate as f64;
+        let mut phase = 0.0_f64;
+        let error_callback = |error| eprintln!("Sanctum audio stream error: {error}");
+        let stream = match sample_format {
+            cpal::SampleFormat::F32 => device.build_output_stream(
+                config.clone(),
+                move |data: &mut [f32], _| fill_audio(data, channels, sample_rate, &mut phase),
+                error_callback,
+                None,
+            ),
+            cpal::SampleFormat::I16 => device.build_output_stream(
+                config.clone(),
+                move |data: &mut [i16], _| fill_audio(data, channels, sample_rate, &mut phase),
+                error_callback,
+                None,
+            ),
+            cpal::SampleFormat::U16 => device.build_output_stream(
+                config,
+                move |data: &mut [u16], _| fill_audio(data, channels, sample_rate, &mut phase),
+                error_callback,
+                None,
+            ),
+            format => return Err(format!("unsupported output sample format {format:?}")),
+        }
+        .map_err(|error| error.to_string())?;
+        stream.play().map_err(|error| error.to_string())?;
+        Ok(Self { _stream: stream })
     }
-    let remaining = duration.saturating_sub(started.elapsed());
-    if !remaining.is_zero() {
-        std::thread::sleep(remaining);
+}
+
+fn fill_audio<T: cpal::Sample + cpal::FromSample<f32>>(
+    output: &mut [T],
+    channels: usize,
+    sample_rate: f64,
+    phase: &mut f64,
+) {
+    let frequency = ona_frequency(CURRENT_ONA.load(Ordering::Acquire)).unwrap_or(0) as f64;
+    for frame in output.chunks_mut(channels.max(1)) {
+        let value = if frequency == 0.0 {
+            0.0
+        } else if *phase < 0.5 {
+            0.18
+        } else {
+            -0.18
+        };
+        if frequency != 0.0 {
+            *phase = (*phase + frequency / sample_rate) % 1.0;
+        }
+        for sample in frame {
+            *sample = T::from_sample(value);
+        }
     }
 }
 
@@ -349,6 +389,21 @@ pub fn reset() {
 
 pub fn stop() {
     set_note(0);
+}
+
+pub fn set_muted(muted: bool) {
+    if muted {
+        set_note(0);
+    }
+    if let Some(base) = bound_music() {
+        unsafe {
+            write_i64(
+                base,
+                offset_of!(tos_abi::CMusicGlbls, mute),
+                i64::from(muted),
+            )
+        };
+    }
 }
 
 #[unsafe(no_mangle)]

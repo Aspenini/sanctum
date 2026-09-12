@@ -90,33 +90,40 @@ pub fn compile_file(path: &Path, opts: &CompileOptions) -> Result<JitProgram, Ho
 }
 
 pub fn run_source(path: &str, src: &str) -> Result<(), HolyCError> {
-    templeos_compat::prepare(false);
-    let mut prog = compile_source(path, src)?;
-    bind_program_globals(&mut prog)?;
-    let result = prog.run();
-    templeos_compat::shutdown();
-    result.map_err(HolyCError::from)
+    let prog = compile_source(path, src)?;
+    run_program(prog, templeos_compat::HostMode::Headless)
 }
 
 pub fn run_file(path: &Path, opts: &CompileOptions) -> Result<(), HolyCError> {
-    templeos_compat::prepare(false);
-    let mut prog = compile_file(path, opts)?;
-    bind_program_globals(&mut prog)?;
-    let result = prog.run();
-    templeos_compat::shutdown();
-    result.map_err(HolyCError::from)
+    let prog = compile_file(path, opts)?;
+    run_program(prog, templeos_compat::HostMode::Headless)
 }
 
 pub fn run_file_interactive(path: &Path, opts: &CompileOptions) -> Result<(), HolyCError> {
-    templeos_compat::prepare(true);
-    let mut prog = compile_file(path, opts)?;
-    bind_program_globals(&mut prog)?;
-    let result = prog.run();
+    let prog = compile_file(path, opts)?;
+    run_program(prog, templeos_compat::HostMode::NativeWindow)
+}
+
+/// Run a compiled program using the selected compatibility host.
+///
+/// Interactive JIT modules remain mapped because cooperative background tasks
+/// park inside generated code during shutdown. Sanctum isolates such runs in a
+/// child process, so all mappings are reclaimed when that process exits.
+pub fn run_program(
+    mut prog: JitProgram,
+    mode: templeos_compat::HostMode,
+) -> Result<(), HolyCError> {
+    templeos_compat::prepare_with_mode(mode);
+    if let Err(error) = bind_program_globals(&mut prog) {
+        templeos_compat::shutdown();
+        return Err(error);
+    }
+    let result = prog.run().map_err(HolyCError::from);
     templeos_compat::shutdown();
-    // Background HolyC tasks are parked during shutdown. Keep their JIT code
-    // mapped until the CLI process exits rather than invalidating their PCs.
-    std::mem::forget(prog);
-    result.map_err(HolyCError::from)
+    if mode != templeos_compat::HostMode::Headless {
+        std::mem::forget(prog);
+    }
+    result
 }
 
 fn bind_program_globals(program: &mut JitProgram) -> Result<(), HolyCError> {

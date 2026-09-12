@@ -18,3 +18,12 @@ cranelift-object = "0.134"
 target-lexicon = "0.13"
 thiserror = "2"
 minifb = "0.28"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+uuid = { version = "1", features = ["v4", "serde"] }
+directories = "6"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+eframe = { version = "0.36.2", features = ["persistence"] }
+rfd = "0.17.2"
+cpal = "0.18.2"

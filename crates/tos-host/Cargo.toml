@@ -10,3 +10,4 @@ tos-abi = { path = "../tos-abi" }
 tos-runtime = { path = "../tos-runtime" }
 tos-gr = { path = "../tos-gr" }
 minifb.workspace = true
+cpal.workspace = true

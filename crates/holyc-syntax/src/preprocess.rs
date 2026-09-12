@@ -18,7 +18,9 @@ const CP437_HIGH: &str = concat!(
     "≡±≥≤⌠⌡÷≈°∙·√ⁿ²■ ",
 );
 
-fn decode_source(bytes: &[u8]) -> String {
+/// Decode TempleOS text as UTF-8 when possible and otherwise as Code Page 437.
+/// A NUL and any following DolDoc binary payload are not part of the text.
+pub fn decode_cp437(bytes: &[u8]) -> String {
     let text = bytes
         .iter()
         .position(|byte| *byte == 0)
@@ -44,7 +46,7 @@ fn read_source(path: &Path) -> Result<(String, Vec<u8>), SyntaxError> {
         .iter()
         .position(|byte| *byte == 0)
         .map_or_else(Vec::new, |end| bytes[end + 1..].to_vec());
-    Ok((decode_source(&bytes), binary_tail))
+    Ok((decode_cp437(&bytes), binary_tail))
 }
 
 pub struct PreprocessOpts {
@@ -460,11 +462,11 @@ mod tests {
     #[test]
     fn decodes_cp437_and_ignores_appended_binary() {
         assert_eq!(CP437_HIGH.chars().count(), 128);
-        assert_eq!(decode_source(b"F64 \xE3;\0\xFF\x00"), "F64 π;");
+        assert_eq!(decode_cp437(b"F64 \xE3;\0\xFF\x00"), "F64 π;");
     }
 
     #[test]
     fn preserves_utf8_sources() {
-        assert_eq!(decode_source("F64 π;".as_bytes()), "F64 π;");
+        assert_eq!(decode_cp437("F64 π;".as_bytes()), "F64 π;");
     }
 }

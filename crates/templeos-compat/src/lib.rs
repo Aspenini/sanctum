@@ -9,6 +9,7 @@ pub use tos_doldoc as doldoc;
 pub use tos_gr as graphics;
 pub use tos_host as host;
 pub use tos_host::GlobalBinding;
+pub use tos_host::HostMode;
 pub use tos_runtime as runtime;
 
 /// Native functions that a HolyC JIT must make available by their ABI names.
@@ -24,8 +25,16 @@ pub fn jit_symbols() -> Vec<(&'static str, *const u8)> {
 
 /// Prepare the compatibility runtime for one compiled program invocation.
 pub fn prepare(interactive: bool) {
-    host::set_interactive(interactive);
-    runtime::set_background_tasks_enabled(interactive);
+    prepare_with_mode(if interactive {
+        HostMode::NativeWindow
+    } else {
+        HostMode::Headless
+    });
+}
+
+pub fn prepare_with_mode(mode: HostMode) {
+    host::set_host_mode(mode);
+    runtime::set_background_tasks_enabled(mode != HostMode::Headless);
     host::reset();
 }
 

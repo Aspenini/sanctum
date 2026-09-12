@@ -12,3 +12,7 @@
 
 # Local TempleOS tree used as language/API spec. Not part of this repo.
 /TempleOS/
+
+# Local portable-mode data created when running Sanctum from the repository.
+/SanctumData/
+/portable.mode

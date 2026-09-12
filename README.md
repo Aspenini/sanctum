@@ -1,63 +1,64 @@
 # Sanctum
 
-Sanctum is a workspace for three related layers, written in idiomatic Rust
-(edition 2024):
+Sanctum is a Rust workspace for running TempleOS HolyC programs directly on
+Windows, Linux, and macOS. It has three related layers:
 
-- **`holyc`** is the compiler and command-line tool. It owns HolyC parsing,
-  type checking, and code generation. It JIT-runs programs today; AOT output
-  belongs here as that backend is completed.
-- **`templeos-compat`** is the reusable compatibility layer. It provides Rust
-  implementations of the TempleOS ABI, kernel calls, graphics, DolDoc resource
-  handling, host input, and other libraries expected by compiled programs. It
-  can supply symbols to the JIT or be linked as a static library for AOT output.
-- **Sanctum** is the planned graphical, emulator-style launcher. Users will
-  point it at a HolyC program or game directory and Sanctum will invoke `holyc`
-  and run the result through `templeos-compat`. It is not a hardware emulator
-  and does not boot TempleOS.
+- **`holyc`** is the HolyC compiler and command-line tool. It parses, checks,
+  and JIT-compiles HolyC to native code with Cranelift. The same compiler API is
+  used by Sanctum; future AOT output belongs here as well.
+- **`templeos-compat`** is the reusable TempleOS compatibility layer. It
+  provides host implementations of the TempleOS ABI, graphics, audio, input,
+  tasks, registry calls, DolDoc resources, and other APIs used by compiled
+  programs. It is not a hardware emulator and does not boot TempleOS.
+- **`sanctum`** is the graphical library and runner. It imports HolyC files or
+  project folders, compiles them with `holyc`, and runs each program in an
+  isolated child process through `templeos-compat`.
 
-TempleOS HolyC programs already compile here and run directly on the host.
-HolyC written for Sanctum stays within TempleOS language rules and public APIs
-so the original TempleOS compiler can compile it too. The `TempleOS/` tree is
-the specification and test corpus, not the OS being booted.
+The project does not contain, download, or redistribute TempleOS. On first
+launch, Sanctum asks for a locally supplied TempleOS ISO and safely extracts it
+to application storage. The extracted tree supplies `::/` includes and other
+runtime resources.
 
+## Run Sanctum
+
+```text
+cargo run -p sanctum
 ```
+
+The desktop app provides a searchable library with favorites and recents,
+editable entrypoints and cover art, a live indexed-color canvas, TempleOS menu
+actions, keyboard input, sound controls, logs, fullscreen mode, and graceful
+Stop/Restart controls. A populated rendered frame can automatically become a
+game's 4:3 library cover.
+
+Settings, library metadata, covers, registry saves, and the extracted TempleOS
+tree normally live in the platform user-data directory. Portable mode can move
+Sanctum-owned data into `SanctumData` beside the executable when that location
+is writable. Imported HolyC projects always remain in place and are never
+copied or modified.
+
+## Run the compiler
+
+```text
 cargo run -p holyc -- --run tests/holyc/hello.HC
 ```
 
-Prints `Hello world`. HolyC is compiled to native code with Cranelift and linked
-against a Rust runtime (`Print`, heaps, …).
+Without `--run`, `holyc` performs compile-only validation. The CLI remains
+independent of the Sanctum GUI.
 
-**Now:** CP437/binary-tail source loading, lexer (DolDoc `$` skip / `$IB`),
-preprocessor (`#include` `#define` `#if`), parser (functions, control flow,
-initializers, multi-declarations, chained compares, TempleOS precedence), packed
-`class`/`union` layout, globals and field/index access, Cranelift JIT `--run`, and
-mixed integer/`F64` arithmetic, indirect callbacks, switch/loop control flow,
-fixed-point matrix/vector math, task records and deterministic single-core
-`Spawn`, app settings and menu stacks, and core runtime primitives (`Print`,
-heaps, queues, bits, time/random, `Fs`/`Gs`). The compatibility host implements
-`Snd`, `Beep`, and `Play`,
-including TempleOS music-string timing, persistent settings, ties, accidentals,
-live `CMusicGlbls` controls, and Windows square-wave tone output. `RegDft`,
-`RegExe`, and single-value `RegWrite` persist simple scalar settings for
-interactive programs and bind them back into JIT globals. The graphics
-subsystem provides indexed-color device contexts, depth buffers, line/polygon
-rasterization, blits, bitmap and 3D mesh sprites, interpolation, symmetry,
-TempleOS mesh lighting, probability dithering, and HUD text.
+The implemented language/runtime subset includes preprocessing, TempleOS
+operator precedence, packed classes and unions, globals, pointers, callbacks,
+control flow, integer and `F64` arithmetic, tasks, menus and settings, heap and
+queue primitives, indexed graphics and 3D mesh sprites, registry persistence,
+CP437 source/output handling, and CPAL square-wave audio. Missing or lost audio
+devices produce a warning and silent fallback instead of preventing launch.
 
-`TempleOS/Demo/Games/Talons.HC` now compiles end-to-end and passes a JIT smoke
-run through terrain initialization, its real `DrawIt` callback, a non-empty
-640×480 rendered frame with its embedded aircraft and terrain art, and cleanup.
-The DolDoc loader also repairs `0x05` bytes stripped by TempleOS's text-export
-mode, so the checked-in ASCII Talons source retains structurally valid meshes.
-`--run` opens the framebuffer in a native window, enables background HolyC
-tasks, and feeds Escape, Enter, Space, and arrow keys through `ScanKey`; without
-`--run`, `holyc` performs compile-only validation.
+`TempleOS/Demo/Games/Talons.HC` compiles end-to-end and has a JIT smoke test
+covering terrain initialization, its real draw callback, a non-empty 640x480
+frame, and cleanup. A smaller tracked graphical smoke program also exercises
+the complete Sanctum runner lifecycle, including frame delivery, input, clean
+exit, and repeated launches.
 
-**Next:** broaden TempleOS API coverage beyond the subset exercised by Talons,
-add a portable audio backend, and improve behavioral/visual parity. The game is
-at the basic playable milestone with sound and persistent best scores on
-Windows.
-
-TempleOS HolyC stays source-compatible (no `F32`/`auto`). Keep a local
-`TempleOS/` tree as the language/API spec if you have one; it is gitignored and
-not shipped in this repo.
+This is intentionally a growing compatibility subset, not complete TempleOS
+compatibility. Keep a local `TempleOS/` tree as a language/API reference if
+needed; that directory is ignored and is not shipped with the repository.
