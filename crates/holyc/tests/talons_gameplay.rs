@@ -56,7 +56,7 @@ fn talons_lowers_claws_and_catches_a_fish() {
     // observes the real Talons queues, places the aircraft near one fish, and
     // lets AnimateTask perform the approach and catch exactly as normal play.
     let helper = thread::spawn(move || {
-        let result = (|| -> Result<(usize, f64, i64), String> {
+        let result = (|| -> Result<(usize, f64, usize, i64), String> {
             let startup_deadline = Instant::now() + Duration::from_secs(20);
             while host::frames_presented() < 20 {
                 if Instant::now() >= startup_deadline {
@@ -116,6 +116,26 @@ fn talons_lowers_claws_and_catches_a_fish() {
                 thread::sleep(Duration::from_millis(10));
             };
 
+            let mut sequence = host::frames_presented() as u64;
+            let visible_deadline = Instant::now() + Duration::from_secs(3);
+            let yellow_pixels = loop {
+                if let Some(snapshot) = host::frame_snapshot_after(sequence) {
+                    sequence = snapshot.sequence;
+                    let lower_half = snapshot.indexed.len() / 2;
+                    let count = snapshot.indexed[lower_half..]
+                        .iter()
+                        .filter(|&&color| color & 0x0f == 14)
+                        .count();
+                    if count > 100 {
+                        break count;
+                    }
+                }
+                if Instant::now() >= visible_deadline {
+                    return Err("lowered claws did not appear in a published frame".into());
+                }
+                thread::sleep(Duration::from_millis(10));
+            };
+
             unsafe {
                 write_i64(x, (fish_x + MAP_SCALE / 2) * COORDINATE_SCALE);
                 write_i64(y, fish_y * COORDINATE_SCALE);
@@ -133,15 +153,19 @@ fn talons_lowers_claws_and_catches_a_fish() {
                 }
                 thread::sleep(Duration::from_millis(10));
             };
-            Ok((fish.len(), claw_value, remaining))
+            Ok((fish.len(), claw_value, yellow_pixels, remaining))
         })();
         host::push_key_event(0x1b, 0);
         result
     });
 
     run_program(program, HostMode::External).unwrap();
-    let (generated_fish, claw_value, remaining) = helper.join().unwrap().unwrap();
+    let (generated_fish, claw_value, yellow_pixels, remaining) = helper.join().unwrap().unwrap();
     assert!(generated_fish >= 10, "only generated {generated_fish} fish");
     assert!(claw_value > 0.02);
+    assert!(
+        yellow_pixels > 100,
+        "only rendered {yellow_pixels} yellow claw pixels"
+    );
     assert_eq!(remaining, 9);
 }

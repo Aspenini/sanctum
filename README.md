@@ -57,10 +57,10 @@ devices produce a warning and silent fallback instead of preventing launch.
 covering terrain initialization, its real draw callback, a non-empty 640x480
 frame, input, cleanup, and the actual fishing loop. The gameplay test locates a
 generated fish through Talons' own object queues, verifies that approaching it
-lowers the claws, and verifies that a catch removes it and decrements the fish
-counter. A smaller tracked graphical smoke program also exercises the complete
-Sanctum runner lifecycle, including frame delivery, input, clean exit, and
-repeated launches.
+lowers and visibly renders the claws, and verifies that a catch removes it and
+decrements the fish counter. A smaller tracked graphical smoke program also
+exercises the complete Sanctum runner lifecycle, including frame delivery,
+input, clean exit, and repeated launches.
 
 This is intentionally a growing compatibility subset, not complete TempleOS
 compatibility. Keep a local `TempleOS/` tree as a language/API reference if
