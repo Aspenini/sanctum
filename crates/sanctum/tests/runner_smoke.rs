@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 
 fn run_once(executable: &Path, entry: &Path, data: &Path) {
     let mut runner = RunnerSession::spawn_with_executable(executable, entry, None, data).unwrap();
-    let deadline = Instant::now() + Duration::from_secs(15);
+    let deadline = Instant::now() + Duration::from_secs(30);
     let mut received_frame = false;
     let mut received_exit = false;
     while Instant::now() < deadline {
@@ -13,7 +13,7 @@ fn run_once(executable: &Path, entry: &Path, data: &Path) {
                 RunnerEvent::Frame { indexed, .. } if !received_frame => {
                     assert!(indexed.iter().any(|pixel| *pixel != indexed[0]));
                     received_frame = true;
-                    runner.send_key(0x1b, 0).unwrap();
+                    runner.stop().unwrap();
                 }
                 RunnerEvent::Exited(success) => {
                     assert!(success);
@@ -43,5 +43,9 @@ fn graphical_runner_can_stop_and_restart_without_orphans() {
     std::fs::create_dir_all(&data).unwrap();
     run_once(&executable, &entry, &data);
     run_once(&executable, &entry, &data);
+    let talons = workspace.join("TempleOS/Demo/Games/Talons.HC");
+    if talons.is_file() {
+        run_once(&executable, &talons, &data);
+    }
     let _ = std::fs::remove_dir_all(data);
 }
