@@ -42,6 +42,7 @@ pub struct SanctumApp {
     frame: Option<TextureHandle>,
     frame_size: [usize; 2],
     frame_sequence: u64,
+    focus_canvas_on_frame: bool,
     menu: Option<String>,
     covers: HashMap<Uuid, TextureHandle>,
     show_settings: bool,
@@ -84,6 +85,7 @@ impl SanctumApp {
             frame: None,
             frame_size: [640, 480],
             frame_sequence: 0,
+            focus_canvas_on_frame: false,
             menu: None,
             covers: HashMap::new(),
             show_settings: false,
@@ -179,6 +181,7 @@ impl SanctumApp {
                 self.log.clear();
                 self.frame = None;
                 self.frame_sequence = 0;
+                self.focus_canvas_on_frame = true;
                 self.menu = None;
                 self.persist();
                 if let Some(runner) = &self.runner {
@@ -660,8 +663,9 @@ impl SanctumApp {
                     .inner
                 })
                 .inner;
-            if response.clicked() {
+            if response.clicked() || self.focus_canvas_on_frame {
                 response.request_focus();
+                self.focus_canvas_on_frame = false;
             }
             canvas_has_focus = response.has_focus();
         } else {
