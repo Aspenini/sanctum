@@ -394,7 +394,7 @@ Main;
                 .windows(b"Initializing...".len())
                 .any(|part| part == b"Initializing...")
         );
-        assert_eq!(tos_host::frames_presented(), 1);
+        assert_eq!(tos_host::frames_presented(), 12);
         let framebuffer = tos_host::framebuffer_rgb();
         assert_eq!(
             framebuffer.len(),
@@ -407,6 +407,14 @@ Main;
         assert!(
             colors.len() >= 5,
             "expected terrain, HUD, and sprite colors; got {colors:?}"
+        );
+        let water_pixels = framebuffer
+            .chunks_exact(3)
+            .filter(|pixel| *pixel == [0x00, 0x00, 0xAA])
+            .count();
+        assert!(
+            water_pixels > 1_000,
+            "expected a substantial rendered water/terrain polygon, got {water_pixels} blue pixels"
         );
     }
 

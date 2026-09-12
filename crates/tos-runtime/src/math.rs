@@ -14,15 +14,15 @@ unsafe fn matrix_mut<'a>(ptr: *mut i64) -> Option<&'a mut [i64; 16]> {
     unsafe { ptr.cast::<[i64; 16]>().as_mut() }
 }
 
-fn multiply(lhs: &mut [i64; 16], rhs: &[i64; 16]) {
-    let old = *lhs;
+fn premultiply(target: &mut [i64; 16], lhs: &[i64; 16]) {
+    let rhs = *target;
     for row in 0..4 {
         for col in 0..4 {
             let mut sum = 0_i128;
             for k in 0..4 {
-                sum += i128::from(old[row * 4 + k]) * i128::from(rhs[k * 4 + col]);
+                sum += i128::from(lhs[row * 4 + k]) * i128::from(rhs[k * 4 + col]);
             }
-            lhs[row * 4 + col] = (sum >> 32) as i64;
+            target[row * 4 + col] = (sum >> 32) as i64;
         }
     }
 }
@@ -50,7 +50,8 @@ pub unsafe fn mat_rotate_x(ptr: *mut i64, angle: f64) -> *mut i64 {
     rotation[9] = fixed(sin);
     rotation[10] = fixed(cos);
     rotation[15] = FIXED_ONE;
-    multiply(matrix, &rotation);
+    // TempleOS applies each new rotation before the existing transform.
+    premultiply(matrix, &rotation);
     ptr
 }
 
@@ -66,7 +67,7 @@ pub unsafe fn mat_rotate_z(ptr: *mut i64, angle: f64) -> *mut i64 {
     rotation[5] = fixed(cos);
     rotation[10] = FIXED_ONE;
     rotation[15] = FIXED_ONE;
-    multiply(matrix, &rotation);
+    premultiply(matrix, &rotation);
     ptr
 }
 
@@ -74,14 +75,12 @@ pub unsafe fn mat_translate(ptr: *mut i64, x: i64, y: i64, z: i64) -> *mut i64 {
     let Some(matrix) = (unsafe { matrix_mut(ptr) }) else {
         return ptr;
     };
-    let mut translation = [0; 16];
-    for index in 0..4 {
-        translation[index * 4 + index] = FIXED_ONE;
-    }
-    translation[3] = x.wrapping_shl(32);
-    translation[7] = y.wrapping_shl(32);
-    translation[11] = z.wrapping_shl(32);
-    multiply(matrix, &translation);
+    // `Mat4x4TranslationEqu` assigns the translation column. It does not
+    // compose a translation matrix (and therefore must not rotate it).
+    matrix[3] = x.wrapping_shl(32);
+    matrix[7] = y.wrapping_shl(32);
+    matrix[11] = z.wrapping_shl(32);
+    matrix[15] = FIXED_ONE;
     ptr
 }
 
@@ -89,13 +88,10 @@ pub unsafe fn mat_scale(ptr: *mut i64, scale: f64) -> *mut i64 {
     let Some(matrix) = (unsafe { matrix_mut(ptr) }) else {
         return ptr;
     };
-    let mut scaling = [0; 16];
-    let scale = fixed(scale);
-    scaling[0] = scale;
-    scaling[5] = scale;
-    scaling[10] = scale;
-    scaling[15] = FIXED_ONE;
-    multiply(matrix, &scaling);
+    // TempleOS scales every element, including the translation column.
+    for value in matrix {
+        *value = (*value as f64 * scale) as i64;
+    }
     ptr
 }
 
@@ -174,5 +170,46 @@ mod tests {
         assert!(x.abs() <= 1);
         assert_eq!(y, 10);
         assert_eq!(z, 0);
+    }
+
+    #[test]
+    fn rotations_are_composed_in_templeos_order() {
+        let mut matrix = [0_i64; 16];
+        unsafe {
+            mat_identity(matrix.as_mut_ptr());
+            mat_rotate_z(matrix.as_mut_ptr(), std::f64::consts::FRAC_PI_2);
+            mat_rotate_x(matrix.as_mut_ptr(), std::f64::consts::FRAC_PI_2);
+        }
+        let (mut x, mut y, mut z) = (10, 0, 0);
+        unsafe { mat_mul_xyz(matrix.as_ptr(), &mut x, &mut y, &mut z) };
+        assert!(x.abs() <= 1);
+        assert!(y.abs() <= 1);
+        assert_eq!(z, 10);
+    }
+
+    #[test]
+    fn translation_equ_is_not_rotated_by_the_existing_matrix() {
+        let mut matrix = [0_i64; 16];
+        unsafe {
+            mat_identity(matrix.as_mut_ptr());
+            mat_rotate_z(matrix.as_mut_ptr(), std::f64::consts::FRAC_PI_2);
+            mat_translate(matrix.as_mut_ptr(), 10, 20, 30);
+        }
+        let (mut x, mut y, mut z) = (0, 0, 0);
+        unsafe { mat_mul_xyz(matrix.as_ptr(), &mut x, &mut y, &mut z) };
+        assert_eq!((x, y, z), (10, 20, 30));
+    }
+
+    #[test]
+    fn scaling_includes_translation_like_templeos() {
+        let mut matrix = [0_i64; 16];
+        unsafe {
+            mat_identity(matrix.as_mut_ptr());
+            mat_translate(matrix.as_mut_ptr(), 10, 20, 30);
+            mat_scale(matrix.as_mut_ptr(), 0.5);
+        }
+        let (mut x, mut y, mut z) = (0, 0, 0);
+        unsafe { mat_mul_xyz(matrix.as_ptr(), &mut x, &mut y, &mut z) };
+        assert_eq!((x, y, z), (5, 10, 15));
     }
 }

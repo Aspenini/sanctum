@@ -16,11 +16,13 @@ use tos_abi::CDC;
 
 pub const DEFAULT_WIDTH: u32 = 640;
 pub const DEFAULT_HEIGHT: u32 = 480;
+const HEADLESS_FRAME_LIMIT: usize = 12;
 
 static SCREEN: OnceLock<usize> = OnceLock::new();
 static FRAMES_PRESENTED: AtomicUsize = AtomicUsize::new(0);
 static INTERACTIVE: AtomicBool = AtomicBool::new(false);
 static HOST_MODE: AtomicUsize = AtomicUsize::new(HostMode::Headless as usize);
+static WINMGR_GLOBAL: AtomicUsize = AtomicUsize::new(0);
 static KEYS: OnceLock<Mutex<VecDeque<(i64, i64)>>> = OnceLock::new();
 static FRAME: OnceLock<Mutex<FrameSnapshot>> = OnceLock::new();
 
@@ -85,6 +87,7 @@ pub fn reset() {
     audio::unbind();
     audio::reset();
     registry::reset();
+    WINMGR_GLOBAL.store(0, Ordering::Release);
     FRAMES_PRESENTED.store(0, Ordering::Release);
     WINDOW.with(|window| *window.borrow_mut() = None);
     key_queue().lock().expect("key queue poisoned").clear();
@@ -108,6 +111,7 @@ pub fn shutdown() {
     audio::stop();
     audio::unbind();
     registry::unbind();
+    WINMGR_GLOBAL.store(0, Ordering::Release);
 }
 
 pub fn bind_globals(bindings: &[GlobalBinding<'_>]) {
@@ -116,6 +120,23 @@ pub fn bind_globals(bindings: &[GlobalBinding<'_>]) {
         audio::bind_music_global(music.address, music.size);
     } else {
         audio::unbind();
+    }
+    WINMGR_GLOBAL.store(
+        bindings
+            .iter()
+            .find(|binding| binding.name == "winmgr" && binding.size >= size_of::<i64>())
+            .map_or(0, |binding| binding.address as usize),
+        Ordering::Release,
+    );
+}
+
+fn advance_window_update() {
+    let address = WINMGR_GLOBAL.load(Ordering::Acquire);
+    if address != 0 {
+        let updates = address as *mut i64;
+        unsafe {
+            updates.write_unaligned(updates.read_unaligned().wrapping_add(1));
+        }
     }
 }
 
@@ -274,6 +295,7 @@ fn present_window(snapshot: &FrameSnapshot) {
 #[unsafe(no_mangle)]
 pub extern "C" fn tos_Refresh() {
     tos_runtime::background_checkpoint();
+    advance_window_update();
     let task = tos_runtime::tos_Fs();
     if let Some(draw) = unsafe { task.as_ref() }.and_then(|task| task.draw_it) {
         let dc = screen();
@@ -330,9 +352,10 @@ pub unsafe extern "C" fn tos_ScanKey(ch: *mut i64, scan_code: *mut i64, _echo: i
         }
         return 1;
     }
-    // Let the HolyC loop produce and present one frame before the headless
-    // host sends Escape. Interactive hosts replace this with their key queue.
-    if frames_presented() == 0 {
+    // Give progressive renderers enough updates to publish actual geometry
+    // before the headless host sends Escape. Interactive hosts use their key
+    // queue and have no frame limit.
+    if frames_presented() < HEADLESS_FRAME_LIMIT {
         return 0;
     }
     if !ch.is_null() {
@@ -366,5 +389,18 @@ mod tests {
         unsafe { assert_eq!(tos_ScanKey(&mut ch, &mut scan, 0), 1) };
         assert_eq!((ch, scan), (0, 0x48));
         set_interactive(false);
+    }
+
+    #[test]
+    fn refresh_counter_updates_the_bound_winmgr_global() {
+        let mut updates = 41_i64;
+        bind_globals(&[GlobalBinding {
+            name: "winmgr",
+            address: (&mut updates as *mut i64).cast(),
+            size: size_of::<i64>(),
+        }]);
+        advance_window_update();
+        assert_eq!(updates, 42);
+        WINMGR_GLOBAL.store(0, Ordering::Release);
     }
 }
