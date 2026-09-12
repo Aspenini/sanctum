@@ -419,10 +419,23 @@ impl SanctumApp {
 
     fn send_input(&mut self, ctx: &egui::Context) {
         let Some(runner) = &self.runner else { return };
-        for event in ctx.input(|input| input.events.clone()) {
+        let active_modifiers = ctx.input(|input| input.modifiers);
+        let events = ctx.input(|input| input.events.clone());
+        let has_text = events
+            .iter()
+            .any(|event| matches!(event, egui::Event::Text(text) if !text.is_empty()));
+        let text_has_space = events
+            .iter()
+            .any(|event| matches!(event, egui::Event::Text(text) if text.contains(' ')));
+        for event in events {
             match event {
                 egui::Event::Text(text) => {
-                    for (ch, scan) in text_key_events(&text) {
+                    for (ch, scan) in text_key_events(
+                        &text,
+                        active_modifiers.shift,
+                        active_modifiers.ctrl,
+                        active_modifiers.alt,
+                    ) {
                         let _ = runner.send_key(ch, scan);
                     }
                 }
@@ -432,9 +445,18 @@ impl SanctumApp {
                     modifiers,
                     ..
                 } => {
-                    if let Some((ch, scan)) =
+                    let special = if key == egui::Key::Space && text_has_space {
+                        None
+                    } else {
                         map_special_key(key, modifiers.shift, modifiers.ctrl, modifiers.alt)
-                    {
+                    };
+                    if let Some((ch, scan)) = special.or_else(|| {
+                        if !has_text {
+                            map_printable_key(key, modifiers.shift, modifiers.ctrl, modifiers.alt)
+                        } else {
+                            None
+                        }
+                    }) {
                         let _ = runner.send_key(ch, scan);
                     }
                 }
@@ -894,25 +916,169 @@ impl SanctumApp {
     }
 }
 
-fn text_key_events(text: &str) -> impl Iterator<Item = (i64, i64)> + '_ {
+const SCF_SHIFT: i64 = 1 << 9;
+const SCF_CTRL: i64 = 1 << 10;
+const SCF_ALT: i64 = 1 << 11;
+
+fn scan_flags(shift: bool, ctrl: bool, alt: bool) -> i64 {
+    (if shift { SCF_SHIFT } else { 0 })
+        | (if ctrl { SCF_CTRL } else { 0 })
+        | (if alt { SCF_ALT } else { 0 })
+}
+
+fn ascii_scan_code(ch: char) -> Option<(i64, bool)> {
+    let normal = [
+        ("1234567890-=", 0x02),
+        ("qwertyuiop[]", 0x10),
+        ("asdfghjkl;'`", 0x1e),
+        ("zxcvbnm,./", 0x2c),
+    ];
+    for (row, first) in normal {
+        if let Some(index) = row.find(ch.to_ascii_lowercase()) {
+            return Some((first + index as i64, ch.is_ascii_uppercase()));
+        }
+    }
+    let shifted = [
+        ("!@#$%^&*()_+", 0x02),
+        ("{}", 0x1a),
+        (":\"~", 0x27),
+        ("|", 0x2b),
+        ("<>?", 0x33),
+    ];
+    for (row, first) in shifted {
+        if let Some(index) = row.find(ch) {
+            return Some((first + index as i64, true));
+        }
+    }
+    (ch == '\\').then_some((0x2b, false))
+}
+
+fn text_key_event(ch: char, shift: bool, ctrl: bool, alt: bool) -> Option<(i64, i64)> {
+    if !ch.is_ascii() {
+        return None;
+    }
+    let (scan, inferred_shift) = if ch == ' ' {
+        (0x39, false)
+    } else {
+        ascii_scan_code(ch)?
+    };
+    let shift = shift || inferred_shift;
+    let ch = if ctrl && ch.is_ascii_alphabetic() {
+        i64::from(ch.to_ascii_lowercase() as u8 - b'a' + 1)
+    } else if shift && ch == ' ' {
+        0x1f
+    } else {
+        ch as i64
+    };
+    Some((ch, scan | scan_flags(shift, ctrl, alt)))
+}
+
+fn text_key_events(
+    text: &str,
+    shift: bool,
+    ctrl: bool,
+    alt: bool,
+) -> impl Iterator<Item = (i64, i64)> + '_ {
     text.chars()
-        .filter(|ch| ch.is_ascii())
-        .map(|ch| (ch as i64, 0))
+        .filter_map(move |ch| text_key_event(ch, shift, ctrl, alt))
+}
+
+fn map_printable_key(key: egui::Key, shift: bool, ctrl: bool, alt: bool) -> Option<(i64, i64)> {
+    let ch = match key {
+        egui::Key::A => 'a',
+        egui::Key::B => 'b',
+        egui::Key::C => 'c',
+        egui::Key::D => 'd',
+        egui::Key::E => 'e',
+        egui::Key::F => 'f',
+        egui::Key::G => 'g',
+        egui::Key::H => 'h',
+        egui::Key::I => 'i',
+        egui::Key::J => 'j',
+        egui::Key::K => 'k',
+        egui::Key::L => 'l',
+        egui::Key::M => 'm',
+        egui::Key::N => 'n',
+        egui::Key::O => 'o',
+        egui::Key::P => 'p',
+        egui::Key::Q => 'q',
+        egui::Key::R => 'r',
+        egui::Key::S => 's',
+        egui::Key::T => 't',
+        egui::Key::U => 'u',
+        egui::Key::V => 'v',
+        egui::Key::W => 'w',
+        egui::Key::X => 'x',
+        egui::Key::Y => 'y',
+        egui::Key::Z => 'z',
+        egui::Key::Num0 => '0',
+        egui::Key::Num1 => '1',
+        egui::Key::Num2 => '2',
+        egui::Key::Num3 => '3',
+        egui::Key::Num4 => '4',
+        egui::Key::Num5 => '5',
+        egui::Key::Num6 => '6',
+        egui::Key::Num7 => '7',
+        egui::Key::Num8 => '8',
+        egui::Key::Num9 => '9',
+        egui::Key::Colon => ':',
+        egui::Key::Comma => ',',
+        egui::Key::Backslash | egui::Key::IntlBackslash => '\\',
+        egui::Key::Slash => '/',
+        egui::Key::Pipe => '|',
+        egui::Key::Questionmark => '?',
+        egui::Key::Exclamationmark => '!',
+        egui::Key::OpenBracket => '[',
+        egui::Key::CloseBracket => ']',
+        egui::Key::OpenCurlyBracket => '{',
+        egui::Key::CloseCurlyBracket => '}',
+        egui::Key::Backtick => '`',
+        egui::Key::Minus => '-',
+        egui::Key::Period => '.',
+        egui::Key::Plus => '+',
+        egui::Key::Equals => '=',
+        egui::Key::Semicolon => ';',
+        egui::Key::Quote => '\'',
+        _ => return None,
+    };
+    text_key_event(ch, shift, ctrl, alt)
 }
 
 fn map_special_key(key: egui::Key, shift: bool, ctrl: bool, alt: bool) -> Option<(i64, i64)> {
-    let flags = (if shift { 1 << 9 } else { 0 })
-        | (if ctrl { 1 << 10 } else { 0 })
-        | (if alt { 1 << 11 } else { 0 });
+    let flags = scan_flags(shift, ctrl, alt);
     match key {
-        egui::Key::Escape if shift => Some((0x1c, flags)),
-        egui::Key::Escape => Some((0x1b, flags)),
-        egui::Key::Enter => Some((b'\n' as i64, flags)),
-        egui::Key::Space => Some((b' ' as i64, flags)),
+        egui::Key::Escape if shift => Some((0x1c, 0x01 | flags)),
+        egui::Key::Escape => Some((0x1b, 0x01 | flags)),
+        egui::Key::Tab => Some((b'\t' as i64, 0x0f | flags)),
+        egui::Key::Backspace => Some((0x08, 0x0e | flags)),
+        egui::Key::Enter => Some((b'\n' as i64, 0x1c | flags)),
+        egui::Key::Space if shift => Some((0x1f, 0x39 | flags)),
+        egui::Key::Space => Some((b' ' as i64, 0x39 | flags)),
+        egui::Key::Home => Some((0, 0x47 | flags)),
         egui::Key::ArrowUp => Some((0, 0x48 | flags)),
+        egui::Key::PageUp => Some((0, 0x49 | flags)),
         egui::Key::ArrowDown => Some((0, 0x50 | flags)),
+        egui::Key::PageDown => Some((0, 0x51 | flags)),
+        egui::Key::Insert => Some((0, 0x52 | flags)),
+        egui::Key::Delete => Some((0, 0x53 | flags)),
         egui::Key::ArrowLeft => Some((0, 0x4b | flags)),
         egui::Key::ArrowRight => Some((0, 0x4d | flags)),
+        egui::Key::End => Some((0, 0x4f | flags)),
+        egui::Key::F1 => Some((0, 0x3b | flags)),
+        egui::Key::F2 => Some((0, 0x3c | flags)),
+        egui::Key::F3 => Some((0, 0x3d | flags)),
+        egui::Key::F4 => Some((0, 0x3e | flags)),
+        egui::Key::F5 => Some((0, 0x3f | flags)),
+        egui::Key::F6 => Some((0, 0x40 | flags)),
+        egui::Key::F7 => Some((0, 0x41 | flags)),
+        egui::Key::F8 => Some((0, 0x42 | flags)),
+        egui::Key::F9 => Some((0, 0x43 | flags)),
+        egui::Key::F10 => Some((0, 0x44 | flags)),
+        egui::Key::F11 => Some((0, 0x57 | flags)),
+        egui::Key::F12 => Some((0, 0x58 | flags)),
+        egui::Key::ShiftLeft | egui::Key::ShiftRight => Some((0, 0x2a | flags)),
+        egui::Key::ControlLeft | egui::Key::ControlRight => Some((0, 0x1d | flags)),
+        egui::Key::AltLeft | egui::Key::AltRight => Some((0, 0x38 | flags)),
         _ => None,
     }
 }
@@ -1098,19 +1264,19 @@ mod tests {
     fn maps_templeos_special_keys_and_modifiers() {
         assert_eq!(
             map_special_key(egui::Key::Escape, false, false, false),
-            Some((0x1b, 0))
+            Some((0x1b, 0x01))
         );
         assert_eq!(
             map_special_key(egui::Key::Escape, true, false, false),
-            Some((0x1c, 1 << 9))
+            Some((0x1c, 0x01 | SCF_SHIFT))
         );
         assert_eq!(
             map_special_key(egui::Key::Enter, false, true, false),
-            Some((b'\n' as i64, 1 << 10))
+            Some((b'\n' as i64, 0x1c | SCF_CTRL))
         );
         assert_eq!(
             map_special_key(egui::Key::Space, false, false, true),
-            Some((b' ' as i64, 1 << 11))
+            Some((b' ' as i64, 0x39 | SCF_ALT))
         );
         assert_eq!(
             map_special_key(egui::Key::ArrowUp, true, true, true),
@@ -1128,15 +1294,49 @@ mod tests {
             map_special_key(egui::Key::ArrowRight, false, false, false),
             Some((0, 0x4d))
         );
+        assert_eq!(
+            map_special_key(egui::Key::Home, false, true, false),
+            Some((0, 0x47 | SCF_CTRL))
+        );
+        assert_eq!(
+            map_special_key(egui::Key::Delete, true, false, false),
+            Some((0, 0x53 | SCF_SHIFT))
+        );
+        assert_eq!(
+            map_special_key(egui::Key::F12, false, false, true),
+            Some((0, 0x58 | SCF_ALT))
+        );
+        assert_eq!(
+            map_special_key(egui::Key::Space, true, false, false),
+            Some((0x1f, 0x39 | SCF_SHIFT))
+        );
     }
 
     #[test]
     fn maps_ascii_text_and_common_punctuation() {
-        let mapped: Vec<_> = text_key_events("HolyC!?[]{};:'\".,/\\`~ Ω").collect();
-        assert_eq!(mapped.last(), Some(&(b' ' as i64, 0)));
+        let mapped: Vec<_> =
+            text_key_events("HolyC!?[]{};:'\".,/\\`~ Ω", false, false, false).collect();
+        assert_eq!(mapped.last(), Some(&(b' ' as i64, 0x39)));
         assert_eq!(mapped.len(), 22);
-        assert!(mapped.contains(&(b'?' as i64, 0)));
-        assert!(mapped.contains(&(b'\\' as i64, 0)));
-        assert!(mapped.contains(&(b'~' as i64, 0)));
+        assert!(mapped.contains(&(b'?' as i64, 0x35 | SCF_SHIFT)));
+        assert!(mapped.contains(&(b'\\' as i64, 0x2b)));
+        assert!(mapped.contains(&(b'~' as i64, 0x29 | SCF_SHIFT)));
+        assert!(mapped.contains(&(b'H' as i64, 0x23 | SCF_SHIFT)));
+    }
+
+    #[test]
+    fn maps_printable_keys_with_modifiers() {
+        assert_eq!(
+            map_printable_key(egui::Key::C, false, true, false),
+            Some((3, 0x2e | SCF_CTRL))
+        );
+        assert_eq!(
+            map_printable_key(egui::Key::Z, false, false, true),
+            Some((b'z' as i64, 0x2c | SCF_ALT))
+        );
+        assert_eq!(
+            map_printable_key(egui::Key::Questionmark, false, false, true),
+            Some((b'?' as i64, 0x35 | SCF_SHIFT | SCF_ALT))
+        );
     }
 }

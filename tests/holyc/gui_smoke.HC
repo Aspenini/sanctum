@@ -1,3 +1,5 @@
+I64 marker_color=RED;
+
 U0 DrawIt(CTask *task, CDC *dc)
 {
   DCFill(dc,LTBLUE);
@@ -7,7 +9,7 @@ U0 DrawIt(CTask *task, CDC *dc)
   GrLine3(dc,0,361,0,639,479,0,1,0);
   dc->color=YELLOW;
   GrLine3(dc,0,479,0,639,361,0,1,0);
-  dc->color=RED;
+  dc->color=marker_color;
   GrLine3(dc,300,220,0,340,260,0,1,0);
   dc->color=WHITE;
   GrLine3(dc,340,220,0,300,260,0,1,0);
@@ -21,6 +23,8 @@ U0 Main()
   while (ch!=CH_ESC) {
     Refresh;
     ScanKey(&ch,&scan_code,FALSE);
+    if (scan_code.u8[0]==SC_CURSOR_UP)
+      marker_color=PURPLE;
     Sleep(8);
   }
   SettingsPop(NULL,0);
