@@ -257,6 +257,35 @@ Main;
     }
 
     #[test]
+    fn switch_start_end_runs_shared_porches() {
+        tos_runtime::capture_begin();
+        run_source(
+            "sub_switch.HC",
+            r#"
+U0 Main()
+{
+  I64 i,total=0;
+  for (i=0;i<4;i++)
+    switch (i) {
+      case 0: total+=1; break;
+      start:
+        total+=10;
+        case 1: total+=100;  break;
+        case 2: total+=1000; break;
+      end:
+        total+=10000;
+        break;
+    }
+  "%d\n",total;
+}
+Main;
+"#,
+        )
+        .unwrap();
+        assert_eq!(tos_runtime::capture_take().unwrap(), b"21121\n");
+    }
+
+    #[test]
     fn function_args_and_return() {
         tos_runtime::capture_begin();
         run_source(

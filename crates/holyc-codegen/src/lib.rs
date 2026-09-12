@@ -453,14 +453,43 @@ enum LocalStorage {
     Stack(StackSlot),
 }
 
-fn flatten_switch_body<'a>(stmt: &'a Stmt, out: &mut Vec<&'a Stmt>) {
+#[derive(Clone, Copy)]
+struct FlatSwitchStmt<'a> {
+    stmt: &'a Stmt,
+    group: Option<usize>,
+}
+
+#[derive(Clone, Copy, Default)]
+struct FlatSwitchGroup {
+    start: usize,
+    end: usize,
+}
+
+fn flatten_switch_body<'a>(
+    stmt: &'a Stmt,
+    out: &mut Vec<FlatSwitchStmt<'a>>,
+    groups: &mut Vec<FlatSwitchGroup>,
+    group: Option<usize>,
+) {
     match stmt {
-        Stmt::Block { stmts, .. } | Stmt::Start { body: stmts, .. } => {
+        Stmt::Block { stmts, .. } => {
             for stmt in stmts {
-                flatten_switch_body(stmt, out);
+                flatten_switch_body(stmt, out, groups, group);
             }
         }
-        stmt => out.push(stmt),
+        Stmt::Start { body, .. } => {
+            let id = groups.len();
+            groups.push(FlatSwitchGroup::default());
+            let start = out.len();
+            for stmt in body {
+                flatten_switch_body(stmt, out, groups, Some(id));
+            }
+            groups[id] = FlatSwitchGroup {
+                start,
+                end: out.len(),
+            };
+        }
+        stmt => out.push(FlatSwitchStmt { stmt, group }),
     }
 }
 
@@ -976,11 +1005,14 @@ impl FnCg<'_, '_> {
                 let switch_value = self.expr(expr)?;
                 let exit = self.bcx.create_block();
                 let mut flat = Vec::new();
-                flatten_switch_body(body, &mut flat);
+                let mut groups = Vec::new();
+                flatten_switch_body(body, &mut flat, &mut groups, None);
                 let case_positions: Vec<usize> = flat
                     .iter()
                     .enumerate()
-                    .filter_map(|(index, stmt)| matches!(stmt, Stmt::Case { .. }).then_some(index))
+                    .filter_map(|(index, stmt)| {
+                        matches!(stmt.stmt, Stmt::Case { .. }).then_some(index)
+                    })
                     .collect();
                 if case_positions.is_empty() {
                     self.bcx.ins().jump(exit, &[]);
@@ -992,14 +1024,36 @@ impl FnCg<'_, '_> {
                     .iter()
                     .map(|_| self.bcx.create_block())
                     .collect();
+                let entry_blocks: Vec<Block> = case_positions
+                    .iter()
+                    .enumerate()
+                    .map(|(index, pos)| {
+                        if flat[*pos].group.is_some() {
+                            self.bcx.create_block()
+                        } else {
+                            case_blocks[index]
+                        }
+                    })
+                    .collect();
+                let mut group_cases = vec![Vec::new(); groups.len()];
+                for (case_index, pos) in case_positions.iter().enumerate() {
+                    if let Some(group) = flat[*pos].group {
+                        group_cases[group].push(case_index);
+                    }
+                }
+                let group_tails: Vec<Option<Block>> = group_cases
+                    .iter()
+                    .map(|cases| (!cases.is_empty()).then(|| self.bcx.create_block()))
+                    .collect();
                 let default = case_positions.iter().enumerate().find_map(|(i, pos)| {
-                    matches!(flat[*pos], Stmt::Case { value: None, .. }).then_some(case_blocks[i])
+                    matches!(flat[*pos].stmt, Stmt::Case { value: None, .. })
+                        .then_some(entry_blocks[i])
                 });
 
                 for (case_index, pos) in case_positions.iter().enumerate() {
                     let Stmt::Case {
                         value, range_end, ..
-                    } = flat[*pos]
+                    } = flat[*pos].stmt
                     else {
                         unreachable!()
                     };
@@ -1024,29 +1078,94 @@ impl FnCg<'_, '_> {
                     let next_test = self.bcx.create_block();
                     self.bcx
                         .ins()
-                        .brif(condition, case_blocks[case_index], &[], next_test, &[]);
+                        .brif(condition, entry_blocks[case_index], &[], next_test, &[]);
                     self.bcx.switch_to_block(next_test);
                     self.bcx.seal_block(next_test);
                 }
                 self.bcx.ins().jump(default.unwrap_or(exit), &[]);
 
-                self.break_targets.push(exit);
+                // A HolyC `start:` group is a nested switch over the same
+                // expression. Its front porch runs before every grouped case.
+                for (case_index, pos) in case_positions.iter().enumerate() {
+                    let Some(group) = flat[*pos].group else {
+                        continue;
+                    };
+                    self.bcx.switch_to_block(entry_blocks[case_index]);
+                    self.break_targets.push(group_tails[group].unwrap());
+                    let first_case = case_positions[group_cases[group][0]];
+                    for item in &flat[groups[group].start..first_case] {
+                        self.stmt(item.stmt)?;
+                    }
+                    self.break_targets.pop();
+                    if !self.bcx.is_unreachable() {
+                        self.bcx.ins().jump(case_blocks[case_index], &[]);
+                    }
+                }
+
                 for (case_index, pos) in case_positions.iter().enumerate() {
                     self.bcx.switch_to_block(case_blocks[case_index]);
-                    let end = case_positions
-                        .get(case_index + 1)
-                        .copied()
-                        .unwrap_or(flat.len());
-                    for stmt in &flat[pos + 1..end] {
-                        self.stmt(stmt)?;
+                    let group = flat[*pos].group;
+                    let next_case = case_positions.get(case_index + 1).copied();
+                    let end = match group {
+                        Some(group) => next_case
+                            .filter(|next| flat[*next].group == Some(group))
+                            .unwrap_or(groups[group].end),
+                        None => next_case.unwrap_or(flat.len()),
+                    };
+                    self.break_targets
+                        .push(group.and_then(|group| group_tails[group]).unwrap_or(exit));
+                    for item in &flat[pos + 1..end] {
+                        self.stmt(item.stmt)?;
                     }
+                    self.break_targets.pop();
                     if !self.bcx.is_unreachable() {
-                        let next = case_blocks.get(case_index + 1).copied().unwrap_or(exit);
+                        let next = if let Some(group) = group {
+                            next_case
+                                .filter(|next| flat[*next].group == Some(group))
+                                .map(|_| case_blocks[case_index + 1])
+                                .unwrap_or(group_tails[group].unwrap())
+                        } else {
+                            case_blocks.get(case_index + 1).copied().unwrap_or(exit)
+                        };
                         self.bcx.ins().jump(next, &[]);
                     }
                 }
-                self.break_targets.pop();
-                for block in case_blocks {
+
+                // `break` inside a grouped case lands after `end:` so the
+                // shared back porch executes before leaving the outer switch.
+                for (group, tail) in group_tails.iter().enumerate() {
+                    let Some(tail) = tail else { continue };
+                    self.bcx.switch_to_block(*tail);
+                    let start = groups[group].end;
+                    let end = (start..flat.len())
+                        .find(|index| {
+                            matches!(flat[*index].stmt, Stmt::Case { .. })
+                                || flat[*index].group.is_some()
+                        })
+                        .unwrap_or(flat.len());
+                    self.break_targets.push(exit);
+                    for item in &flat[start..end] {
+                        self.stmt(item.stmt)?;
+                    }
+                    self.break_targets.pop();
+                    if !self.bcx.is_unreachable() {
+                        let next = case_positions
+                            .iter()
+                            .position(|position| *position >= end)
+                            .map(|index| entry_blocks[index])
+                            .unwrap_or(exit);
+                        self.bcx.ins().jump(next, &[]);
+                    }
+                }
+                for block in &case_blocks {
+                    self.bcx.seal_block(*block);
+                }
+                for (entry, body) in entry_blocks.iter().zip(&case_blocks) {
+                    if entry != body {
+                        self.bcx.seal_block(*entry);
+                    }
+                }
+                for block in group_tails.into_iter().flatten() {
                     self.bcx.seal_block(block);
                 }
                 self.bcx.switch_to_block(exit);
