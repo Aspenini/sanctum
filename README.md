@@ -14,10 +14,10 @@ Windows, Linux, and macOS. It has three related layers:
   project folders, compiles them with `holyc`, and runs each program in an
   isolated child process through `templeos-compat`.
 
-The project does not contain, download, or redistribute TempleOS. On first
-launch, Sanctum asks for a locally supplied TempleOS ISO and safely extracts it
-to application storage. The extracted tree supplies `::/` includes and other
-runtime resources.
+The project does not contain, download, or redistribute TempleOS. Self-contained
+HolyC programs run without an ISO. Programs that use `::/` includes or other OS
+resources need a locally supplied TempleOS ISO, which Sanctum can safely extract
+to application storage from Settings.
 
 ## Run Sanctum
 

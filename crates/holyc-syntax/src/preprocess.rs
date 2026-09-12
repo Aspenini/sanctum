@@ -423,6 +423,10 @@ fn resolve_include(from: &Path, inc: &str, opts: &PreprocessOpts) -> Result<Path
             if p.exists() {
                 return Ok(p);
             }
+        } else {
+            return Err(SyntaxError::Io(format!(
+                "TempleOS system files are required by include `{inc}`, but no system root is configured"
+            )));
         }
     }
     if let Some(parent) = from.parent() {
@@ -468,5 +472,16 @@ mod tests {
     #[test]
     fn preserves_utf8_sources() {
         assert_eq!(decode_cp437("F64 π;".as_bytes()), "F64 π;");
+    }
+
+    #[test]
+    fn explains_when_a_system_include_needs_templeos_files() {
+        let error = resolve_include(
+            Path::new("Program.HC"),
+            "::/Kernel/KernelA.HH",
+            &PreprocessOpts::default(),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("no system root is configured"));
     }
 }

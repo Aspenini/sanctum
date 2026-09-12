@@ -34,7 +34,7 @@ pub struct RunnerSession {
 }
 
 impl RunnerSession {
-    pub fn spawn(entry: &Path, templeos_root: &Path, data_root: &Path) -> io::Result<Self> {
+    pub fn spawn(entry: &Path, templeos_root: Option<&Path>, data_root: &Path) -> io::Result<Self> {
         Self::spawn_with_executable(&std::env::current_exe()?, entry, templeos_root, data_root)
     }
 
@@ -44,7 +44,7 @@ impl RunnerSession {
     pub fn spawn_with_executable(
         executable: &Path,
         entry: &Path,
-        templeos_root: &Path,
+        templeos_root: Option<&Path>,
         data_root: &Path,
     ) -> io::Result<Self> {
         let listener = TcpListener::bind(("127.0.0.1", 0))?;
@@ -57,11 +57,15 @@ impl RunnerSession {
             .arg(entry)
             .env("SANCTUM_RUNNER_ADDR", address.to_string())
             .env("SANCTUM_RUNNER_TOKEN", &token)
-            .env("SANCTUM_TEMPLEOS_ROOT", templeos_root)
             .env("SANCTUM_DATA_DIR", data_root)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        if let Some(root) = templeos_root {
+            command.env("SANCTUM_TEMPLEOS_ROOT", root);
+        } else {
+            command.env_remove("SANCTUM_TEMPLEOS_ROOT");
+        }
         #[cfg(windows)]
         {
             use std::os::windows::process::CommandExt;

@@ -155,16 +155,11 @@ impl SanctumApp {
     }
 
     fn launch(&mut self, id: Uuid) {
-        let Some(root) = self
+        let root = self
             .config
             .templeos_root
             .clone()
-            .filter(|root| root.join("Kernel/KernelA.HH").is_file())
-        else {
-            self.status = "Install or select a TempleOS ISO before running programs".into();
-            self.show_settings = true;
-            return;
-        };
+            .filter(|root| root.join("Kernel/KernelA.HH").is_file());
         let Some(item) = self.config.library.iter_mut().find(|item| item.id == id) else {
             return;
         };
@@ -175,7 +170,7 @@ impl SanctumApp {
         if let Some(mut runner) = self.runner.take() {
             runner.kill();
         }
-        match RunnerSession::spawn(&item.source_path(), &root, &self.paths.root) {
+        match RunnerSession::spawn(&item.source_path(), root.as_deref(), &self.paths.root) {
             Ok(runner) => {
                 item.last_played = Some(model::now());
                 self.running = Some(id);
@@ -446,33 +441,6 @@ impl SanctumApp {
     }
 
     fn library_ui(&mut self, ui: &mut egui::Ui) {
-        if self
-            .config
-            .templeos_root
-            .as_ref()
-            .is_none_or(|root| !root.join("Kernel/KernelA.HH").is_file())
-        {
-            egui::Frame::group(ui.style()).show(ui, |ui| {
-                ui.heading("TempleOS files are required");
-                ui.label("Choose a local TempleOS ISO. Sanctum extracts it into managed storage; it never downloads or redistributes the ISO.");
-                if ui.button("Install from ISO…").clicked()
-                    && let Some(iso) = rfd::FileDialog::new()
-                        .add_filter("TempleOS ISO", &["ISO", "iso"])
-                        .pick_file()
-                {
-                    self.install_iso(iso);
-                }
-                if let Some((done, total, path)) = &self.install_progress {
-                    ui.add(egui::ProgressBar::new(*done as f32 / (*total).max(1) as f32).text(path));
-                    if ui.button("Cancel installation").clicked()
-                        && let Some(cancelled) = &self.install_cancel
-                    {
-                        cancelled.store(true, Ordering::Release);
-                    }
-                }
-            });
-            ui.add_space(8.0);
-        }
         ui.horizontal(|ui| {
             ui.heading("SANCTUM");
             ui.add_space(12.0);
@@ -797,6 +765,16 @@ impl SanctumApp {
                             "Per-user"
                         }
                     ));
+                    if let Some(root) = self
+                        .config
+                        .templeos_root
+                        .as_ref()
+                        .filter(|root| root.join("Kernel/KernelA.HH").is_file())
+                    {
+                        ui.label(format!("TempleOS files: {}", root.display()));
+                    } else {
+                        ui.label("TempleOS files: not installed (optional for self-contained programs)");
+                    }
                     if ui.button("Import TempleOS ISO…").clicked()
                         && let Some(iso) = rfd::FileDialog::new()
                             .add_filter("TempleOS ISO", &["ISO", "iso"])

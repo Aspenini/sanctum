@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 fn run_once(executable: &Path, entry: &Path, data: &Path) {
-    let mut runner = RunnerSession::spawn_with_executable(executable, entry, data, data).unwrap();
+    let mut runner = RunnerSession::spawn_with_executable(executable, entry, None, data).unwrap();
     let deadline = Instant::now() + Duration::from_secs(15);
     let mut received_frame = false;
     let mut received_exit = false;
