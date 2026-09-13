@@ -20,77 +20,211 @@ export struct MenuItem {
     enabled: bool,
 }
 
-component ActionButton inherits Rectangle {
+component FlatButton inherits Rectangle {
     in property <string> text;
     in property <bool> primary: false;
     in property <bool> enabled: true;
-    in property <length> button-height: 38px;
+    in property <length> button-height: 36px;
     callback clicked;
-    height: button-height;
+
+    height: root.button-height;
     min-width: 72px;
-    border-radius: 9px;
-    background: !root.enabled ? #172432 : touch.pressed ? (root.primary ? #35b6c7 : #33475a) : touch.has-hover ? (root.primary ? #25a8bb : #283b4e) : (root.primary ? #168fa4 : #203244);
+    border-radius: 4px;
+    background: !root.enabled ? #242424 : touch.pressed ? #4a4a4a : touch.has-hover ? #3b3b3b : root.primary ? #e0e0e0 : #303030;
     border-width: root.primary ? 0px : 1px;
-    border-color: #385065;
+    border-color: #464646;
+
     Text {
         text: root.text;
-        color: root.enabled ? #f1f7fa : #627282;
+        color: !root.enabled ? #686868 : root.primary ? #151515 : #ededed;
         font-size: 14px;
-        font-weight: 600;
+        font-weight: 500;
         horizontal-alignment: center;
         vertical-alignment: center;
     }
+
     touch := TouchArea {
         enabled: root.enabled;
         clicked => { root.clicked(); }
     }
 }
 
-component IconButton inherits Rectangle {
-    in property <string> text;
-    in property <bool> active: false;
-    callback clicked;
-    width: 38px;
-    height: 38px;
-    border-radius: 9px;
-    background: touch.pressed ? #385064 : touch.has-hover ? #2a4053 : root.active ? #153e4b : transparent;
-    Text {
-        text: root.text;
-        color: root.active ? #67e8f9 : #c5d1da;
-        font-size: 19px;
-        horizontal-alignment: center;
-        vertical-alignment: center;
-    }
-    touch := TouchArea { clicked => { root.clicked(); } }
-}
-
-component PillButton inherits Rectangle {
+component ToolButton inherits Rectangle {
     in property <string> text;
     in property <bool> active: false;
     in property <bool> enabled: true;
     callback clicked;
-    height: 34px;
-    min-width: 72px;
-    border-radius: 17px;
-    background: !root.enabled ? transparent : root.active ? #174d59 : touch.has-hover ? #1c3040 : transparent;
-    border-width: root.active ? 1px : 0px;
-    border-color: #2e8797;
+
+    width: 38px;
+    height: 38px;
+    border-radius: 4px;
+    background: !root.enabled ? transparent : touch.pressed ? #494949 : touch.has-hover ? #383838 : root.active ? #444444 : transparent;
+
     Text {
         text: root.text;
-        color: !root.enabled ? #506170 : root.active ? #76e9f7 : #8fa2b2;
-        font-size: 13px;
-        font-weight: root.active ? 700 : 500;
+        color: root.enabled ? #eeeeee : #676767;
+        font-size: 19px;
         horizontal-alignment: center;
         vertical-alignment: center;
     }
-    touch := TouchArea { enabled: root.enabled; clicked => { root.clicked(); } }
+
+    touch := TouchArea {
+        enabled: root.enabled;
+        clicked => { root.clicked(); }
+    }
 }
 
-component SectionTitle inherits Text {
-    color: #eaf2f7;
-    font-size: 21px;
-    font-weight: 700;
+component SideButton inherits Rectangle {
+    in property <string> symbol;
+    in property <string> label;
+    in property <bool> active: false;
+    callback clicked;
+
+    height: 64px;
+    border-radius: 5px;
+    background: touch.pressed ? #555555 : touch.has-hover ? #353535 : root.active ? #d7d7d7 : transparent;
+
+    VerticalLayout {
+        padding-top: 8px;
+        padding-bottom: 6px;
+        spacing: 1px;
+        Text {
+            text: root.symbol;
+            color: root.active ? #171717 : #eeeeee;
+            font-size: 22px;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+        Text {
+            text: root.label;
+            color: root.active ? #171717 : #a8a8a8;
+            font-size: 10px;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+    }
+
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+}
+
+component SelectButton inherits Rectangle {
+    in property <string> text;
+    in property <bool> active: false;
+    callback clicked;
+
+    height: 30px;
+    min-width: 70px;
+    border-radius: 3px;
+    background: root.active ? #e0e0e0 : touch.has-hover ? #393939 : transparent;
+
+    Text {
+        text: root.text;
+        color: root.active ? #171717 : #a7a7a7;
+        font-size: 12px;
+        font-weight: root.active ? 600 : 400;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+
+    touch := TouchArea { clicked => { root.clicked(); } }
+}
+
+component PageTitle inherits Text {
+    color: #f2f2f2;
+    font-size: 25px;
+    font-weight: 500;
     vertical-alignment: center;
+}
+
+component GameTile inherits Rectangle {
+    in property <GameItem> game;
+    callback launch;
+    callback options;
+
+    border-radius: 5px;
+    clip: true;
+    background: #292929;
+    border-width: 1px;
+    border-color: root.game.missing ? #875050 : tile-touch.has-hover ? #9a9a9a : #3b3b3b;
+
+    if root.game.has-cover : Image {
+        source: root.game.cover;
+        image-fit: cover;
+        image-rendering: pixelated;
+    }
+
+    if !root.game.has-cover : Rectangle {
+        background: #303030;
+        Text {
+            text: "HC";
+            color: #a8a8a8;
+            font-size: 36px;
+            font-weight: 700;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+    }
+
+    if tile-touch.has-hover : Rectangle {
+        background: #ffffff12;
+    }
+
+    Rectangle {
+        y: parent.height - 43px;
+        height: 43px;
+        background: #101010dc;
+
+        HorizontalLayout {
+            padding-left: 12px;
+            padding-right: 10px;
+            spacing: 8px;
+            Text {
+                text: root.game.title;
+                color: #ffffff;
+                font-size: 15px;
+                font-weight: 600;
+                overflow: elide;
+                vertical-alignment: center;
+                horizontal-stretch: 1;
+            }
+            if root.game.favorite : Text {
+                text: "★";
+                color: #f0f0f0;
+                font-size: 16px;
+                font-weight: 400;
+                vertical-alignment: center;
+            }
+        }
+    }
+
+    if root.game.missing : Rectangle {
+        background: #151515aa;
+        Text {
+            text: "Entrypoint missing";
+            color: #ffb4b4;
+            font-size: 13px;
+            font-weight: 600;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+    }
+
+    tile-touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => {
+            if (!root.game.missing) {
+                root.launch();
+            }
+        }
+        pointer-event(event) => {
+            if (event.button == PointerEventButton.right && event.kind == PointerEventKind.down) {
+                root.options();
+            }
+        }
+    }
 }
 
 component GameSurface inherits Rectangle {
@@ -103,8 +237,8 @@ component GameSurface inherits Rectangle {
     property <float> available-scale: Math.min(self.width / (root.frame-width * 1px), self.height / (root.frame-height * 1px));
     property <float> draw-scale: root.fit-scaling ? root.available-scale : Math.max(1, Math.floor(root.available-scale));
     callback game-key(string, bool, bool, bool);
-    background: #02070b;
-    border-radius: 10px;
+
+    background: #000000;
     clip: true;
     forward-focus: game-focus;
 
@@ -115,23 +249,14 @@ component GameSurface inherits Rectangle {
         width: root.frame-width * 1px * root.draw-scale;
         height: root.frame-height * 1px * root.draw-scale;
     }
+
     if !root.frame-ready : VerticalLayout {
         alignment: center;
-        spacing: 12px;
-        Text {
-            text: "SANCTUM";
-            color: #31bfd1;
-            font-size: 25px;
-            font-weight: 800;
-            horizontal-alignment: center;
-        }
-        Text {
-            text: root.status;
-            color: #758998;
-            font-size: 14px;
-            horizontal-alignment: center;
-        }
+        spacing: 8px;
+        Text { text: "Sanctum"; color: #e5e5e5; font-size: 22px; horizontal-alignment: center; }
+        Text { text: root.status; color: #888888; font-size: 13px; horizontal-alignment: center; }
     }
+
     game-focus := FocusScope {
         focus-on-click: true;
         focus-on-tab-navigation: true;
@@ -144,9 +269,11 @@ component GameSurface inherits Rectangle {
 
 export component MainWindow inherits Window {
     title: "Sanctum";
-    width: 1180px;
-    height: 780px;
-    background: #07111a;
+    preferred-width: 1180px;
+    preferred-height: 780px;
+    min-width: 760px;
+    min-height: 520px;
+    background: #1b1b1b;
 
     in property <[GameItem]> games;
     in property <[ChoiceItem]> entry-choices;
@@ -177,6 +304,14 @@ export component MainWindow inherits Window {
     in property <string> storage-action;
     in property <bool> portable-available: true;
     in property <bool> fit-scaling: false;
+
+    property <length> sidebar-width: 88px;
+    property <length> content-padding: 26px;
+    property <length> tile-gap: 16px;
+    property <int> tile-columns: root.width >= 1720px ? 6 : root.width >= 1440px ? 5 : root.width >= 1120px ? 4 : root.width >= 850px ? 3 : 2;
+    property <length> tile-area-width: root.width - root.sidebar-width - root.content-padding * 2;
+    property <length> tile-width: (root.tile-area-width - (root.tile-columns - 1) * root.tile-gap) / root.tile-columns;
+    property <length> tile-height: root.tile-width * 0.75;
 
     callback add-file;
     callback add-folder;
@@ -212,196 +347,187 @@ export component MainWindow inherits Window {
     callback invoke-menu(string);
     callback game-key(string, bool, bool, bool);
 
-    VerticalLayout {
-        padding: 0px;
+    HorizontalLayout {
         spacing: 0px;
 
         Rectangle {
-            height: 64px;
-            background: #0b1925;
+            width: root.sidebar-width;
+            background: #171717;
             border-width: 0px;
-            HorizontalLayout {
-                padding-left: 22px;
-                padding-right: 18px;
-                spacing: 12px;
-                alignment: center;
-                Text { text: "✥"; color: #56ddea; font-size: 25px; vertical-alignment: center; }
-                Text { text: "SANCTUM"; color: #f0f6f9; font-size: 19px; font-weight: 800; letter-spacing: 1.4px; vertical-alignment: center; }
-                Rectangle { horizontal-stretch: 1; background: transparent; }
-                if root.running : Text { text: root.status; color: #8ea2b1; font-size: 13px; vertical-alignment: center; }
-                IconButton { text: "⚙"; clicked => { root.show-settings(); } }
-            }
-        }
 
-        if !root.running : HorizontalLayout {
-            spacing: 0px;
-            Rectangle {
-                width: 210px;
-                background: #09151f;
-                VerticalLayout {
-                    padding: 18px;
-                    spacing: 10px;
-                    Text { text: "LIBRARY"; color: #647b8d; font-size: 11px; font-weight: 700; letter-spacing: 1.5px; }
-                    PillButton { text: "All programs"; active: root.filter-index == 0; clicked => { root.set-filter(0); } }
-                    PillButton { text: "Favorites"; active: root.filter-index == 1; clicked => { root.set-filter(1); } }
-                    PillButton { text: "Recent"; active: root.filter-index == 2; clicked => { root.set-filter(2); } }
-                    Rectangle { height: 12px; background: transparent; }
-                    Text { text: "SORT"; color: #647b8d; font-size: 11px; font-weight: 700; letter-spacing: 1.5px; }
-                    PillButton { text: "Title"; active: root.sort-index == 0; clicked => { root.set-sort(0); } }
-                    PillButton { text: "Last played"; active: root.sort-index == 1; clicked => { root.set-sort(1); } }
-                    PillButton { text: "Date added"; active: root.sort-index == 2; clicked => { root.set-sort(2); } }
-                    Rectangle { vertical-stretch: 1; background: transparent; }
-                    Text { text: root.status; color: #718697; font-size: 12px; wrap: word-wrap; }
-                }
-            }
-            Rectangle {
-                background: #07111a;
-                VerticalLayout {
-                    padding: 26px;
-                    spacing: 18px;
-                    HorizontalLayout {
-                        height: 42px;
-                        spacing: 10px;
-                        SectionTitle { text: "Your programs"; horizontal-stretch: 1; }
-                        LineEdit {
-                            width: 260px;
-                            placeholder-text: "Search library";
-                            input-type: search;
-                            edited(value) => { root.search-changed(value); }
-                        }
-                        ActionButton { text: "Add .HC"; clicked => { root.add-file(); } }
-                        ActionButton { text: "Add folder"; primary: true; clicked => { root.add-folder(); } }
-                    }
-                    if root.games.length == 0 : Rectangle {
-                        vertical-stretch: 1;
-                        border-radius: 14px;
-                        background: #0b1924;
-                        border-width: 1px;
-                        border-color: #162b3b;
-                        VerticalLayout {
-                            alignment: center;
-                            spacing: 12px;
-                            Text { text: "No HolyC programs here yet"; color: #d9e7ee; font-size: 20px; horizontal-alignment: center; }
-                            Text { text: "Add a .HC file or select a project folder to begin."; color: #718697; font-size: 14px; horizontal-alignment: center; }
-                            ActionButton { text: "Add your first program"; primary: true; clicked => { root.add-file(); } }
-                        }
-                    }
-                    if root.games.length > 0 : ListView {
-                        vertical-stretch: 1;
-                        for game[index] in root.games : Rectangle {
-                            width: parent.width;
-                            height: 126px;
-                            border-radius: 13px;
-                            background: card-touch.has-hover ? #102333 : #0c1b27;
-                            border-width: 1px;
-                            border-color: game.missing ? #78434c : #193143;
-                            card-touch := TouchArea { mouse-cursor: pointer; clicked => { root.select-game(game.id); } }
-                            HorizontalLayout {
-                                padding: 12px;
-                                spacing: 16px;
-                                Rectangle {
-                                    width: 136px;
-                                    border-radius: 8px;
-                                    clip: true;
-                                    background: #102b38;
-                                    if game.has-cover : Image { source: game.cover; image-fit: cover; image-rendering: pixelated; }
-                                    if !game.has-cover : Text { text: "HOLY\nC"; color: #46cfda; font-size: 22px; font-weight: 800; horizontal-alignment: center; vertical-alignment: center; }
-                                }
-                                VerticalLayout {
-                                    padding-top: 10px;
-                                    padding-bottom: 10px;
-                                    spacing: 5px;
-                                    Text { text: game.title; color: #edf5f8; font-size: 18px; font-weight: 700; overflow: elide; }
-                                    Text { text: game.path; color: #718697; font-size: 12px; overflow: elide; }
-                                    Text { text: game.missing ? "Entrypoint missing" : "Ready to run"; color: game.missing ? #f49aa7 : #58c995; font-size: 12px; }
-                                }
-                                Rectangle { horizontal-stretch: 1; background: transparent; }
-                                IconButton { text: game.favorite ? "★" : "☆"; active: game.favorite; clicked => { root.toggle-favorite(game.id); } }
-                                ActionButton { text: "Details"; clicked => { root.select-game(game.id); } }
-                                ActionButton { text: "Run"; primary: true; enabled: !game.missing; clicked => { root.run-game(game.id); } }
-                            }
-                        }
-                    }
-                }
-            }
-        }
+            VerticalLayout {
+                padding: 8px;
+                spacing: 6px;
 
-        if root.running : VerticalLayout {
-            padding: 14px;
-            spacing: 10px;
-            Rectangle {
-                height: 48px;
-                border-radius: 11px;
-                background: #0c1b27;
-                HorizontalLayout {
-                    padding-left: 10px;
-                    padding-right: 10px;
-                    spacing: 8px;
-                    alignment: center;
-                    ActionButton { text: "Library"; clicked => { root.show-library(); } }
-                    ActionButton { text: "Stop"; clicked => { root.stop-runner(); } }
-                    ActionButton { text: "Restart"; clicked => { root.restart-runner(); } }
-                    Rectangle { width: 1px; height: 24px; background: #284052; }
-                    IconButton { text: root.muted ? "🔇" : "🔊"; active: root.muted; clicked => { root.toggle-mute(); } }
-                    ActionButton { text: root.fullscreen ? "Windowed" : "Fullscreen"; clicked => { root.toggle-fullscreen(); } }
-                    ActionButton { text: root.detached ? "Dock game" : "Pop out"; primary: root.detached; clicked => { root.toggle-detached(); } }
-                    Rectangle { horizontal-stretch: 1; background: transparent; }
-                    Text { text: root.status; color: #8ca0b0; font-size: 13px; vertical-alignment: center; }
-                    IconButton { text: "≡"; active: root.log-open; clicked => { root.toggle-log(); } }
-                }
-            }
-            if root.menu-items.length > 0 : Rectangle {
-                height: 36px;
-                background: transparent;
-                HorizontalLayout {
-                    spacing: 7px;
-                    for menu in root.menu-items : PillButton {
-                        text: menu.label;
-                        active: false;
-                        enabled: menu.enabled;
-                        clicked => { root.invoke-menu(menu.command); }
-                    }
-                    Rectangle { horizontal-stretch: 1; background: transparent; }
-                }
-            }
-            if !root.detached : GameSurface {
-                vertical-stretch: 1;
-                frame: root.game-frame;
-                frame-ready: root.frame-ready;
-                fit-scaling: root.fit-scaling;
-                frame-width: root.frame-width;
-                frame-height: root.frame-height;
-                status: root.status;
-                game-key(text, shift, control, alt) => { root.game-key(text, shift, control, alt); }
-            }
-            if root.detached : Rectangle {
-                vertical-stretch: 1;
-                border-radius: 12px;
-                background: #091721;
-                border-width: 1px;
-                border-color: #173247;
-                VerticalLayout {
-                    alignment: center;
-                    spacing: 12px;
-                    Text { text: "Game opened in a separate window"; color: #dbe8ee; font-size: 19px; horizontal-alignment: center; }
-                    Text { text: "The same runner, input, audio, and save state remain active."; color: #718697; font-size: 13px; horizontal-alignment: center; }
-                    ActionButton { text: "Dock game here"; primary: true; clicked => { root.toggle-detached(); } }
-                }
-            }
-            if root.log-open : Rectangle {
-                height: 150px;
-                border-radius: 10px;
-                background: #050c12;
-                border-width: 1px;
-                border-color: #193143;
-                ScrollView {
+                Rectangle {
+                    height: 56px;
+                    background: transparent;
                     Text {
-                        width: parent.width;
-                        text: root.program-log;
-                        color: #9fb2bf;
-                        font-family: "monospace";
-                        font-size: 12px;
-                        wrap: word-wrap;
+                        text: "S";
+                        color: #f4f4f4;
+                        font-size: 24px;
+                        font-weight: 700;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+
+                SideButton { symbol: "▦"; label: "All"; active: !root.running && !root.settings-open && root.filter-index == 0; clicked => { root.close-settings(); root.show-library(); root.set-filter(0); } }
+                SideButton { symbol: "★"; label: "Favorites"; active: !root.running && !root.settings-open && root.filter-index == 1; clicked => { root.close-settings(); root.show-library(); root.set-filter(1); } }
+                SideButton { symbol: "◷"; label: "Recent"; active: !root.running && !root.settings-open && root.filter-index == 2; clicked => { root.close-settings(); root.show-library(); root.set-filter(2); } }
+                if root.running : SideButton { symbol: "▶"; label: "Playing"; active: true; clicked => { } }
+
+                Rectangle { vertical-stretch: 1; background: transparent; }
+
+                SideButton { symbol: "+"; label: "Add"; clicked => { root.close-settings(); root.add-file(); } }
+                SideButton { symbol: "⚙"; label: "Settings"; active: root.settings-open; clicked => { root.show-settings(); } }
+            }
+        }
+
+        if !root.running : Rectangle {
+            background: #1d1d1d;
+
+            VerticalLayout {
+                padding: root.content-padding;
+                spacing: 16px;
+
+                HorizontalLayout {
+                    height: 42px;
+                    spacing: 10px;
+                    PageTitle { text: "Library"; horizontal-stretch: 1; }
+                    LineEdit {
+                        width: 250px;
+                        placeholder-text: "Search";
+                        input-type: search;
+                        edited(value) => { root.search-changed(value); }
+                    }
+                    FlatButton { text: "Add .HC"; clicked => { root.add-file(); } }
+                    FlatButton { text: "Add folder"; clicked => { root.add-folder(); } }
+                }
+
+                HorizontalLayout {
+                    height: 30px;
+                    spacing: 4px;
+                    Text { text: root.games.length + (root.games.length == 1 ? " program" : " programs"); color: #858585; font-size: 12px; vertical-alignment: center; horizontal-stretch: 1; }
+                    Text { text: "Sort"; color: #777777; font-size: 12px; vertical-alignment: center; }
+                    SelectButton { text: "Title"; active: root.sort-index == 0; clicked => { root.set-sort(0); } }
+                    SelectButton { text: "Recent"; active: root.sort-index == 1; clicked => { root.set-sort(1); } }
+                    SelectButton { text: "Added"; active: root.sort-index == 2; clicked => { root.set-sort(2); } }
+                }
+
+                if root.games.length == 0 : Rectangle {
+                    vertical-stretch: 1;
+                    background: transparent;
+                    VerticalLayout {
+                        alignment: center;
+                        spacing: 10px;
+                        Text { text: "No programs"; color: #ededed; font-size: 20px; horizontal-alignment: center; }
+                        Text { text: "Add a HolyC file or project folder to get started."; color: #888888; font-size: 13px; horizontal-alignment: center; }
+                        FlatButton { text: "Add program"; primary: true; clicked => { root.add-file(); } }
+                    }
+                }
+
+                if root.games.length > 0 : ScrollView {
+                    vertical-stretch: 1;
+                    viewport-width: self.width;
+                    viewport-height: Math.ceil(root.games.length / root.tile-columns) * (root.tile-height + root.tile-gap);
+
+                    for game[index] in root.games : GameTile {
+                        x: Math.mod(index, root.tile-columns) * (root.tile-width + root.tile-gap);
+                        y: Math.floor(index / root.tile-columns) * (root.tile-height + root.tile-gap);
+                        width: root.tile-width;
+                        height: root.tile-height;
+                        game: game;
+                        launch => { root.run-game(game.id); }
+                        options => { root.select-game(game.id); }
+                    }
+                }
+
+                Text { text: root.status; color: #777777; font-size: 11px; height: 16px; vertical-alignment: center; overflow: elide; }
+            }
+        }
+
+        if root.running : Rectangle {
+            background: #1d1d1d;
+
+            VerticalLayout {
+                padding: 10px;
+                spacing: 8px;
+
+                Rectangle {
+                    height: 44px;
+                    background: #252525;
+                    border-radius: 4px;
+
+                    HorizontalLayout {
+                        padding-left: 8px;
+                        padding-right: 8px;
+                        spacing: 7px;
+                        alignment: center;
+                        FlatButton { text: "Library"; clicked => { root.show-library(); } }
+                        FlatButton { text: "Stop"; clicked => { root.stop-runner(); } }
+                        FlatButton { text: "Restart"; clicked => { root.restart-runner(); } }
+                        ToolButton { text: root.muted ? "M" : "♪"; active: root.muted; clicked => { root.toggle-mute(); } }
+                        FlatButton { text: root.fullscreen ? "Windowed" : "Fullscreen"; clicked => { root.toggle-fullscreen(); } }
+                        FlatButton { text: root.detached ? "Dock" : "Pop out"; clicked => { root.toggle-detached(); } }
+                        Rectangle { horizontal-stretch: 1; background: transparent; }
+                        Text { text: root.status; color: #9a9a9a; font-size: 12px; vertical-alignment: center; }
+                        ToolButton { text: "≡"; active: root.log-open; clicked => { root.toggle-log(); } }
+                    }
+                }
+
+                if root.menu-items.length > 0 : Rectangle {
+                    height: 32px;
+                    background: transparent;
+                    HorizontalLayout {
+                        spacing: 5px;
+                        for menu in root.menu-items : FlatButton {
+                            text: menu.label;
+                            enabled: menu.enabled;
+                            button-height: 30px;
+                            clicked => { root.invoke-menu(menu.command); }
+                        }
+                        Rectangle { horizontal-stretch: 1; background: transparent; }
+                    }
+                }
+
+                if !root.detached : GameSurface {
+                    vertical-stretch: 1;
+                    frame: root.game-frame;
+                    frame-ready: root.frame-ready;
+                    fit-scaling: root.fit-scaling;
+                    frame-width: root.frame-width;
+                    frame-height: root.frame-height;
+                    status: root.status;
+                    game-key(text, shift, control, alt) => { root.game-key(text, shift, control, alt); }
+                }
+
+                if root.detached : Rectangle {
+                    vertical-stretch: 1;
+                    background: #222222;
+                    VerticalLayout {
+                        alignment: center;
+                        spacing: 10px;
+                        Text { text: "Game is open in a separate window"; color: #eeeeee; font-size: 18px; horizontal-alignment: center; }
+                        Text { text: "Input, audio, saves, and the runner remain connected."; color: #858585; font-size: 13px; horizontal-alignment: center; }
+                        FlatButton { text: "Dock game"; primary: true; clicked => { root.toggle-detached(); } }
+                    }
+                }
+
+                if root.log-open : Rectangle {
+                    height: 150px;
+                    background: #111111;
+                    border-width: 1px;
+                    border-color: #383838;
+                    ScrollView {
+                        Text {
+                            width: parent.width;
+                            text: root.program-log;
+                            color: #b0b0b0;
+                            font-family: "monospace";
+                            font-size: 12px;
+                            wrap: word-wrap;
+                        }
                     }
                 }
             }
@@ -413,76 +539,99 @@ export component MainWindow inherits Window {
         TouchArea { }
         Rectangle {
             width: 520px;
-            height: 390px;
+            height: 382px;
             x: (parent.width - self.width) / 2;
             y: (parent.height - self.height) / 2;
-            border-radius: 16px;
-            background: #0d1d29;
+            border-radius: 6px;
+            background: #242424;
             border-width: 1px;
-            border-color: #244156;
+            border-color: #484848;
+
             VerticalLayout {
-                padding: 24px;
-                spacing: 13px;
+                padding: 22px;
+                spacing: 12px;
                 HorizontalLayout {
-                    SectionTitle { text: "Program details"; horizontal-stretch: 1; }
-                    IconButton { text: "×"; clicked => { root.close-details(); } }
+                    PageTitle { text: "Program options"; horizontal-stretch: 1; font-size: 21px; }
+                    ToolButton { text: "×"; clicked => { root.close-details(); } }
                 }
-                Text { text: "TITLE"; color: #6f8798; font-size: 11px; font-weight: 700; }
+                Text { text: "Title"; color: #aaaaaa; font-size: 12px; }
                 LineEdit { text: root.selected-title; edited(value) => { root.save-title(value); } }
-                Text { text: "ENTRYPOINT"; color: #6f8798; font-size: 11px; font-weight: 700; }
-                Text { text: root.selected-path; color: #b8c8d2; font-size: 12px; overflow: elide; }
+                Text { text: "Entrypoint"; color: #aaaaaa; font-size: 12px; }
+                Text { text: root.selected-path; color: #d0d0d0; font-size: 12px; overflow: elide; }
                 HorizontalLayout {
                     spacing: 8px;
-                    ActionButton { text: root.selected-favorite ? "★ Favorite" : "☆ Favorite"; clicked => { root.toggle-selected-favorite(); } }
-                    ActionButton { text: "Entrypoint"; clicked => { root.choose-entrypoint(); } }
-                    ActionButton { text: "Cover"; clicked => { root.choose-cover(); } }
+                    FlatButton { text: root.selected-favorite ? "★ Favorite" : "☆ Favorite"; clicked => { root.toggle-selected-favorite(); } }
+                    FlatButton { text: "Entrypoint"; clicked => { root.choose-entrypoint(); } }
+                    FlatButton { text: "Cover image"; clicked => { root.choose-cover(); } }
                 }
                 Rectangle { vertical-stretch: 1; background: transparent; }
                 HorizontalLayout {
                     spacing: 8px;
-                    ActionButton { text: "Remove"; clicked => { root.remove-selected(); } }
+                    FlatButton { text: "Remove from library"; clicked => { root.remove-selected(); } }
                     Rectangle { horizontal-stretch: 1; background: transparent; }
-                    ActionButton { text: "Run program"; primary: true; clicked => { root.run-selected(); } }
+                    FlatButton { text: "Run"; primary: true; clicked => { root.run-selected(); } }
                 }
             }
         }
     }
 
     if root.settings-open : Rectangle {
-        background: #00000099;
+        x: root.sidebar-width;
+        width: root.width - root.sidebar-width;
+        background: #1d1d1d;
         TouchArea { }
-        Rectangle {
-            width: 600px;
-            height: 470px;
-            x: (parent.width - self.width) / 2;
-            y: (parent.height - self.height) / 2;
-            border-radius: 16px;
-            background: #0d1d29;
-            border-width: 1px;
-            border-color: #244156;
-            VerticalLayout {
-                padding: 24px;
-                spacing: 13px;
-                HorizontalLayout {
-                    SectionTitle { text: "Settings"; horizontal-stretch: 1; }
-                    IconButton { text: "×"; clicked => { root.close-settings(); } }
+
+        VerticalLayout {
+            padding: 28px;
+            spacing: 24px;
+
+            HorizontalLayout {
+                height: 40px;
+                PageTitle { text: "Settings"; horizontal-stretch: 1; }
+                ToolButton { text: "×"; clicked => { root.close-settings(); } }
+            }
+
+            ScrollView {
+                vertical-stretch: 1;
+                viewport-width: self.width;
+
+                VerticalLayout {
+                    width: 680px;
+                    spacing: 14px;
+
+                    Text { text: "Game"; color: #f0f0f0; font-size: 16px; font-weight: 600; }
+                    HorizontalLayout {
+                        height: 36px;
+                        Text { text: "Canvas scaling"; color: #dddddd; font-size: 13px; vertical-alignment: center; width: 180px; }
+                        SelectButton { text: "Integer"; active: !root.fit-scaling; clicked => { root.set-scaling(false); } }
+                        SelectButton { text: "Fit window"; active: root.fit-scaling; clicked => { root.set-scaling(true); } }
+                        Rectangle { horizontal-stretch: 1; background: transparent; }
+                    }
+
+                    Rectangle { height: 18px; background: transparent; }
+                    Text { text: "TempleOS files"; color: #f0f0f0; font-size: 16px; font-weight: 600; }
+                    Text { text: root.templeos-path; color: #999999; font-size: 12px; overflow: elide; }
+                    HorizontalLayout {
+                        FlatButton { width: 270px; text: "Choose extracted TempleOS folder"; clicked => { root.choose-templeos(); } }
+                        Rectangle { horizontal-stretch: 1; background: transparent; }
+                    }
+
+                    Rectangle { height: 18px; background: transparent; }
+                    Text { text: "Storage"; color: #f0f0f0; font-size: 16px; font-weight: 600; }
+                    Text { text: root.storage-label; color: #d0d0d0; font-size: 12px; }
+                    Text { text: root.data-path; color: #8f8f8f; font-size: 12px; overflow: elide; }
+                    HorizontalLayout {
+                        FlatButton { width: 220px; text: root.storage-action; enabled: root.portable-available; clicked => { root.request-storage-change(); } }
+                        Rectangle { horizontal-stretch: 1; background: transparent; }
+                    }
+                    if !root.portable-available : Text {
+                        text: "Portable mode is unavailable because the executable folder is not writable.";
+                        color: #d8a47d;
+                        font-size: 12px;
+                        wrap: word-wrap;
+                    }
+                    Text { text: "Imported projects always remain in their original folders."; color: #858585; font-size: 12px; }
                 }
-                Text { text: "TEMPLEOS FILES"; color: #6f8798; font-size: 11px; font-weight: 700; }
-                Text { text: root.templeos-path; color: #b8c8d2; font-size: 12px; overflow: elide; }
-                ActionButton { text: "Choose extracted TempleOS folder"; clicked => { root.choose-templeos(); } }
-                Text { text: "CANVAS SCALING"; color: #6f8798; font-size: 11px; font-weight: 700; }
-                HorizontalLayout {
-                    spacing: 8px;
-                    PillButton { text: "Sharp pixels"; active: !root.fit-scaling; clicked => { root.set-scaling(false); } }
-                    PillButton { text: "Fit window"; active: root.fit-scaling; clicked => { root.set-scaling(true); } }
-                    Rectangle { horizontal-stretch: 1; background: transparent; }
-                }
-                Text { text: "STORAGE"; color: #6f8798; font-size: 11px; font-weight: 700; }
-                Text { text: root.storage-label + "  •  " + root.data-path; color: #b8c8d2; font-size: 12px; overflow: elide; }
-                ActionButton { text: root.storage-action; enabled: root.portable-available; clicked => { root.request-storage-change(); } }
-                if !root.portable-available : Text { text: "Portable mode is unavailable because the executable folder is not writable."; color: #e6a269; font-size: 12px; wrap: word-wrap; }
-                Rectangle { vertical-stretch: 1; background: transparent; }
-                Text { text: "Imported HolyC projects always remain in their original folders."; color: #62798a; font-size: 12px; }
             }
         }
     }
@@ -495,19 +644,21 @@ export component MainWindow inherits Window {
             height: 480px;
             x: (parent.width - self.width) / 2;
             y: (parent.height - self.height) / 2;
-            border-radius: 16px;
-            background: #0d1d29;
+            border-radius: 6px;
+            background: #242424;
+            border-width: 1px;
+            border-color: #484848;
             VerticalLayout {
                 padding: 22px;
                 spacing: 12px;
                 HorizontalLayout {
-                    SectionTitle { text: "Choose an entrypoint"; horizontal-stretch: 1; }
-                    IconButton { text: "×"; clicked => { root.cancel-choices(); } }
+                    PageTitle { text: "Choose an entrypoint"; horizontal-stretch: 1; font-size: 21px; }
+                    ToolButton { text: "×"; clicked => { root.cancel-choices(); } }
                 }
-                Text { text: "Select the .HC file Sanctum should launch for this folder."; color: #7890a0; font-size: 13px; }
+                Text { text: "Select the .HC file Sanctum should launch."; color: #999999; font-size: 13px; }
                 ListView {
                     vertical-stretch: 1;
-                    for choice in root.entry-choices : ActionButton {
+                    for choice in root.entry-choices : FlatButton {
                         width: parent.width;
                         text: choice.path;
                         clicked => { root.choose-entry(choice.path); }
@@ -525,19 +676,26 @@ export component MainWindow inherits Window {
             height: 245px;
             x: (parent.width - self.width) / 2;
             y: (parent.height - self.height) / 2;
-            border-radius: 16px;
-            background: #0d1d29;
+            border-radius: 6px;
+            background: #242424;
+            border-width: 1px;
+            border-color: #484848;
             VerticalLayout {
-                padding: 24px;
-                spacing: 14px;
-                SectionTitle { text: "Move Sanctum data?"; }
-                Text { text: "Settings, covers, and compatibility save data will be staged, verified, and moved. Your imported HolyC projects and TempleOS folder stay where they are."; color: #aabdc8; font-size: 13px; wrap: word-wrap; }
+                padding: 22px;
+                spacing: 13px;
+                PageTitle { text: "Move Sanctum data?"; font-size: 21px; }
+                Text {
+                    text: "Settings, covers, and compatibility saves will be staged, verified, and moved. Imported projects and your TempleOS folder stay where they are.";
+                    color: #b6b6b6;
+                    font-size: 13px;
+                    wrap: word-wrap;
+                }
                 Rectangle { vertical-stretch: 1; background: transparent; }
                 HorizontalLayout {
                     spacing: 8px;
                     Rectangle { horizontal-stretch: 1; background: transparent; }
-                    ActionButton { text: "Cancel"; clicked => { root.cancel-storage-change(); } }
-                    ActionButton { text: "Move and restart"; primary: true; clicked => { root.confirm-storage-change(); } }
+                    FlatButton { text: "Cancel"; clicked => { root.cancel-storage-change(); } }
+                    FlatButton { text: "Move and restart"; primary: true; clicked => { root.confirm-storage-change(); } }
                 }
             }
         }
@@ -546,9 +704,12 @@ export component MainWindow inherits Window {
 
 export component GameWindow inherits Window {
     title: "Sanctum — Game";
-    width: 960px;
-    height: 720px;
-    background: #050c12;
+    preferred-width: 960px;
+    preferred-height: 720px;
+    min-width: 640px;
+    min-height: 480px;
+    background: #181818;
+
     in property <image> game-frame;
     in property <bool> frame-ready: false;
     in property <bool> fit-scaling: false;
@@ -565,24 +726,24 @@ export component GameWindow inherits Window {
     callback game-key(string, bool, bool, bool);
 
     VerticalLayout {
-        padding: 10px;
-        spacing: 9px;
+        padding: 8px;
+        spacing: 7px;
         Rectangle {
-            height: 46px;
-            border-radius: 10px;
-            background: #0c1b27;
+            height: 42px;
+            background: #252525;
+            border-radius: 4px;
             HorizontalLayout {
-                padding-left: 8px;
-                padding-right: 8px;
-                spacing: 8px;
+                padding-left: 7px;
+                padding-right: 7px;
+                spacing: 7px;
                 alignment: center;
-                ActionButton { text: "Dock"; primary: true; clicked => { root.dock(); } }
-                ActionButton { text: "Stop"; clicked => { root.stop-runner(); } }
-                ActionButton { text: "Restart"; clicked => { root.restart-runner(); } }
-                IconButton { text: root.muted ? "🔇" : "🔊"; active: root.muted; clicked => { root.toggle-mute(); } }
-                ActionButton { text: root.fullscreen ? "Windowed" : "Fullscreen"; clicked => { root.toggle-fullscreen(); } }
+                FlatButton { text: "Dock"; clicked => { root.dock(); } }
+                FlatButton { text: "Stop"; clicked => { root.stop-runner(); } }
+                FlatButton { text: "Restart"; clicked => { root.restart-runner(); } }
+                ToolButton { text: root.muted ? "M" : "♪"; active: root.muted; clicked => { root.toggle-mute(); } }
+                FlatButton { text: root.fullscreen ? "Windowed" : "Fullscreen"; clicked => { root.toggle-fullscreen(); } }
                 Rectangle { horizontal-stretch: 1; background: transparent; }
-                Text { text: root.status; color: #8ca0b0; font-size: 13px; vertical-alignment: center; }
+                Text { text: root.status; color: #999999; font-size: 12px; vertical-alignment: center; }
             }
         }
         GameSurface {
