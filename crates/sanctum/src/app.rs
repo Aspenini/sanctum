@@ -32,6 +32,19 @@ enum Sort {
     Added,
 }
 
+#[derive(Clone)]
+enum RunTarget {
+    Library(Uuid),
+    Direct(PathBuf),
+}
+
+struct EntryChoiceRequest {
+    root: PathBuf,
+    files: Vec<PathBuf>,
+    editing: Uuid,
+    launch_after: bool,
+}
+
 struct AppState {
     paths: StoragePaths,
     config: SanctumConfig,
@@ -39,10 +52,10 @@ struct AppState {
     sort: Sort,
     search: String,
     selected: Option<Uuid>,
-    entry_choices: Option<(PathBuf, Vec<PathBuf>, Option<Uuid>)>,
+    entry_choices: Option<EntryChoiceRequest>,
     runner: Option<RunnerSession>,
-    running: Option<Uuid>,
-    pending_restart: Option<Uuid>,
+    running: Option<RunTarget>,
+    pending_restart: Option<RunTarget>,
     pending_storage: Option<StorageMode>,
     status: String,
     log: String,
@@ -101,118 +114,167 @@ impl AppState {
         }
     }
 
-    fn add_source(&mut self, path: &Path) {
-        match LibraryEntry::from_source(path) {
-            Ok(entry) => {
-                if let Some(existing) = self
-                    .config
+    fn add_library_folder(&mut self, root: &Path) {
+        let candidates = match model::discover_library(root) {
+            Ok(candidates) => candidates,
+            Err(error) => {
+                self.status = format!("Unable to scan library folder: {error}");
+                return;
+            }
+        };
+        let mut added = 0usize;
+        let mut duplicates = 0usize;
+        for candidate in candidates {
+            let entry = match candidate {
+                model::DiscoveredEntry::Source(path) => LibraryEntry::from_source(&path),
+                model::DiscoveredEntry::Project(path) => LibraryEntry::from_directory(&path),
+            };
+            let Ok(entry) = entry else { continue };
+            let duplicate = if entry.entrypoint.as_os_str().is_empty() {
+                self.config
                     .library
                     .iter()
-                    .find(|item| item.source_path() == entry.source_path())
-                {
-                    self.selected = Some(existing.id);
-                    self.status = "Program is already in the library".into();
-                } else {
-                    self.selected = Some(entry.id);
-                    self.config.library.push(entry);
-                    self.persist();
-                }
-                self.library_dirty = true;
-            }
-            Err(error) => self.status = format!("Unable to add program: {error}"),
-        }
-    }
-
-    fn add_folder_entry(&mut self, root: PathBuf, relative: PathBuf) {
-        match LibraryEntry::from_project(&root, &relative) {
-            Ok(entry) => {
-                if let Some(existing) = self
-                    .config
+                    .any(|item| item.project_root == entry.project_root)
+            } else {
+                self.config
                     .library
                     .iter()
-                    .find(|item| item.source_path() == entry.source_path())
-                {
-                    self.selected = Some(existing.id);
-                    self.status = "Program is already in the library".into();
-                } else {
-                    self.selected = Some(entry.id);
-                    self.config.library.push(entry);
-                    self.persist();
-                }
-                self.library_dirty = true;
+                    .any(|item| item.source_path() == entry.source_path())
+            };
+            if duplicate {
+                duplicates += 1;
+            } else {
+                self.config.library.push(entry);
+                added += 1;
             }
-            Err(error) => self.status = format!("Unable to add program: {error}"),
         }
+        self.selected = None;
+        self.library_dirty = true;
+        if added > 0 {
+            self.persist();
+        }
+        self.status = match (added, duplicates) {
+            (0, 0) => "No HolyC programs found in that folder".into(),
+            (0, duplicates) => format!("All {duplicates} discovered programs are already added"),
+            (added, 0) => format!("Added {added} programs"),
+            (added, duplicates) => {
+                format!("Added {added} programs; skipped {duplicates} duplicates")
+            }
+        };
     }
 
-    fn scan_folder(&mut self, root: PathBuf, editing: Option<Uuid>) {
+    fn scan_project(&mut self, root: PathBuf, editing: Uuid, launch_after: bool) {
         match model::discover_holyc(&root) {
             Ok(files) if files.len() == 1 => {
-                if let Some(id) = editing {
-                    if let Some(item) = self.config.library.iter_mut().find(|item| item.id == id) {
-                        item.project_root = root;
-                        item.entrypoint = files[0].clone();
-                        self.persist();
-                        self.library_dirty = true;
+                if let Some(item) = self
+                    .config
+                    .library
+                    .iter_mut()
+                    .find(|item| item.id == editing)
+                {
+                    item.project_root = root;
+                    item.entrypoint = files[0].clone();
+                    self.persist();
+                    self.library_dirty = true;
+                    if launch_after {
+                        self.launch(editing);
                     }
-                } else {
-                    self.add_folder_entry(root, files[0].clone());
                 }
             }
-            Ok(files) if !files.is_empty() => self.entry_choices = Some((root, files, editing)),
+            Ok(files) if !files.is_empty() => {
+                self.entry_choices = Some(EntryChoiceRequest {
+                    root,
+                    files,
+                    editing,
+                    launch_after,
+                });
+            }
             Ok(_) => self.status = "No .HC files found in that folder".into(),
             Err(error) => self.status = format!("Unable to scan folder: {error}"),
         }
     }
 
     fn launch(&mut self, id: Uuid) {
+        let Some(item) = self.config.library.iter().find(|item| item.id == id) else {
+            return;
+        };
+        if item.entrypoint.as_os_str().is_empty() {
+            self.scan_project(item.project_root.clone(), id, true);
+            return;
+        }
+        let source = item.source_path();
+        if !source.is_file() {
+            self.status = "The selected entrypoint is missing".into();
+            return;
+        }
+        if self.spawn_source(&source, RunTarget::Library(id)) {
+            if let Some(item) = self.config.library.iter_mut().find(|item| item.id == id) {
+                item.last_played = Some(model::now());
+            }
+            self.library_dirty = true;
+            self.persist();
+        }
+    }
+
+    fn launch_direct(&mut self, path: &Path) {
+        let entry = match LibraryEntry::from_source(path) {
+            Ok(entry) => entry,
+            Err(error) => {
+                self.status = format!("Unable to run program: {error}");
+                return;
+            }
+        };
+        let source = entry.source_path();
+        self.spawn_source(&source, RunTarget::Direct(source.clone()));
+    }
+
+    fn spawn_source(&mut self, source: &Path, target: RunTarget) -> bool {
         let templeos_root = self
             .config
             .templeos_root
             .clone()
             .filter(|root| root.join("Kernel/KernelA.HH").is_file());
-        let Some(item) = self.config.library.iter_mut().find(|item| item.id == id) else {
-            return;
-        };
-        if !item.source_path().is_file() {
-            self.status = "The selected entrypoint is missing".into();
-            return;
-        }
         if let Some(mut runner) = self.runner.take() {
             runner.kill();
         }
-        match RunnerSession::spawn(
-            &item.source_path(),
-            templeos_root.as_deref(),
-            &self.paths.root,
-        ) {
+        match RunnerSession::spawn(source, templeos_root.as_deref(), &self.paths.root) {
             Ok(runner) => {
-                item.last_played = Some(model::now());
-                self.running = Some(id);
+                self.running = Some(target);
                 self.runner = Some(runner);
                 self.status = "Starting".into();
                 self.log.clear();
                 self.frame = None;
                 self.frame_sequence = 0;
                 self.menu = None;
-                self.library_dirty = true;
-                self.persist();
                 if let Some(runner) = &self.runner {
                     let _ = runner.set_muted(self.config.muted);
                 }
+                true
             }
-            Err(error) => self.status = format!("Unable to start runner: {error}"),
+            Err(error) => {
+                self.status = format!("Unable to start runner: {error}");
+                false
+            }
         }
     }
 
     fn restart(&mut self) {
-        let Some(id) = self.running else { return };
+        let Some(target) = self.running.clone() else {
+            return;
+        };
         if let Some(runner) = &mut self.runner {
-            self.pending_restart = Some(id);
+            self.pending_restart = Some(target);
             let _ = runner.stop();
             self.status = "Restarting".into();
         } else {
-            self.launch(id);
+            self.launch_target(target);
+        }
+    }
+
+    fn launch_target(&mut self, target: RunTarget) {
+        match target {
+            RunTarget::Library(id) => self.launch(id),
+            RunTarget::Direct(path) => self.launch_direct(&path),
         }
     }
 
@@ -281,13 +343,16 @@ impl AppState {
             self.detached = false;
             self.fullscreen = false;
         }
-        if let Some(id) = restart {
-            self.launch(id);
+        if let Some(target) = restart {
+            self.launch_target(target);
         }
     }
 
     fn capture_cover(&mut self, width: u32, height: u32, indexed: &[u8]) {
-        let Some(id) = self.running else { return };
+        let Some(RunTarget::Library(id)) = self.running.as_ref() else {
+            return;
+        };
+        let id = *id;
         let Some(item) = self.config.library.iter_mut().find(|item| item.id == id) else {
             return;
         };
@@ -474,12 +539,9 @@ fn install_main_callbacks(ui: &MainWindow, game: &GameWindow, state: &Rc<RefCell
     let weak = ui.as_weak();
     let game_weak = game.as_weak();
     let shared = state.clone();
-    ui.on_add_file(move || {
-        if let Some(path) = rfd::FileDialog::new()
-            .add_filter("HolyC", &["HC", "hc"])
-            .pick_file()
-        {
-            shared.borrow_mut().add_source(&path);
+    ui.on_add_library(move || {
+        if let Some(root) = rfd::FileDialog::new().pick_folder() {
+            shared.borrow_mut().add_library_folder(&root);
         }
         sync_from_weaks(&weak, &game_weak, &shared);
     });
@@ -487,9 +549,12 @@ fn install_main_callbacks(ui: &MainWindow, game: &GameWindow, state: &Rc<RefCell
     let weak = ui.as_weak();
     let game_weak = game.as_weak();
     let shared = state.clone();
-    ui.on_add_folder(move || {
-        if let Some(root) = rfd::FileDialog::new().pick_folder() {
-            shared.borrow_mut().scan_folder(root, None);
+    ui.on_run_file(move || {
+        if let Some(path) = rfd::FileDialog::new()
+            .add_filter("HolyC", &["HC", "hc"])
+            .pick_file()
+        {
+            shared.borrow_mut().launch_direct(&path);
         }
         sync_from_weaks(&weak, &game_weak, &shared);
     });
@@ -609,7 +674,7 @@ fn install_main_callbacks(ui: &MainWindow, game: &GameWindow, state: &Rc<RefCell
             })
         };
         if let Some((root, id)) = selection {
-            shared.borrow_mut().scan_folder(root, Some(id));
+            shared.borrow_mut().scan_project(root, id, false);
         }
         sync_from_weaks(&weak, &game_weak, &shared);
     });
@@ -636,17 +701,17 @@ fn install_main_callbacks(ui: &MainWindow, game: &GameWindow, state: &Rc<RefCell
         state,
         on_choose_entry,
         |state: &mut AppState, value: SharedString| {
-            if let Some((root, _, editing)) = state.entry_choices.take() {
+            if let Some(request) = state.entry_choices.take() {
                 let relative = PathBuf::from(value.as_str());
-                if let Some(id) = editing {
-                    if let Some(item) = state.config.library.iter_mut().find(|item| item.id == id) {
-                        item.project_root = root;
-                        item.entrypoint = relative;
-                        state.persist();
-                        state.library_dirty = true;
+                let id = request.editing;
+                if let Some(item) = state.config.library.iter_mut().find(|item| item.id == id) {
+                    item.project_root = request.root;
+                    item.entrypoint = relative;
+                    state.persist();
+                    state.library_dirty = true;
+                    if request.launch_after {
+                        state.launch(id);
                     }
-                } else {
-                    state.add_folder_entry(root, relative);
                 }
             }
         }
@@ -961,15 +1026,26 @@ fn sync_main_only(ui: &MainWindow, state: &Rc<RefCell<AppState>>) {
         .and_then(|id| state.config.library.iter().find(|item| item.id == id))
     {
         ui.set_selected_title(item.title.clone().into());
-        ui.set_selected_path(item.source_path().display().to_string().into());
+        ui.set_selected_path(
+            if item.entrypoint.as_os_str().is_empty() {
+                format!(
+                    "{} (entrypoint chosen on first run)",
+                    item.project_root.display()
+                )
+            } else {
+                item.source_path().display().to_string()
+            }
+            .into(),
+        );
         ui.set_selected_favorite(item.favorite);
     }
     ui.set_choices_open(state.entry_choices.is_some());
     let choices: Vec<ChoiceItem> = state
         .entry_choices
         .as_ref()
-        .map(|(_, files, _)| {
-            files
+        .map(|request| {
+            request
+                .files
                 .iter()
                 .map(|path| ChoiceItem {
                     path: path.display().to_string().into(),
@@ -1044,8 +1120,13 @@ fn sync_library(ui: &MainWindow, state: &Rc<RefCell<AppState>>) {
                 .cover
                 .as_ref()
                 .and_then(|path| Image::load_from_path(path).ok());
-            let source_path = item.source_path();
-            let missing = !source_path.is_file();
+            let needs_entrypoint = item.entrypoint.as_os_str().is_empty();
+            let source_path = if needs_entrypoint {
+                item.project_root.clone()
+            } else {
+                item.source_path()
+            };
+            let missing = !needs_entrypoint && !source_path.is_file();
             GameItem {
                 id: item.id.to_string().into(),
                 title: item.title.into(),
@@ -1054,6 +1135,7 @@ fn sync_library(ui: &MainWindow, state: &Rc<RefCell<AppState>>) {
                 has_cover: cover.is_some(),
                 favorite: item.favorite,
                 missing,
+                needs_entrypoint,
             }
         })
         .collect();

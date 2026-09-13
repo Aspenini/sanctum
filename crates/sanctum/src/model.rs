@@ -101,6 +101,32 @@ impl LibraryEntry {
             ..Self::default()
         })
     }
+
+    pub fn from_directory(path: &Path) -> io::Result<Self> {
+        let project_root = path.canonicalize()?;
+        if !project_root.is_dir() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "project root is not a directory",
+            ));
+        }
+        let title = project_root
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "HolyC Project".into());
+        Ok(Self {
+            project_root,
+            entrypoint: PathBuf::new(),
+            title,
+            ..Self::default()
+        })
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum DiscoveredEntry {
+    Source(PathBuf),
+    Project(PathBuf),
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -237,6 +263,41 @@ pub fn discover_holyc(folder: &Path) -> io::Result<Vec<PathBuf>> {
     Ok(found)
 }
 
+/// Discover the programs directly contained by a library directory.
+///
+/// Top-level `.HC` files are standalone programs. Each immediate child
+/// directory containing at least one `.HC` file is one multi-file project.
+pub fn discover_library(folder: &Path) -> io::Result<Vec<DiscoveredEntry>> {
+    let root = folder.canonicalize()?;
+    let mut entries = Vec::new();
+    for item in fs::read_dir(&root)? {
+        let item = item?;
+        let path = item.path();
+        let file_type = item.file_type()?;
+        if file_type.is_file()
+            && path
+                .extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("HC"))
+        {
+            entries.push(DiscoveredEntry::Source(path.canonicalize()?));
+        } else if file_type.is_dir() {
+            let name = item.file_name();
+            if !name.to_string_lossy().starts_with('.')
+                && name != "target"
+                && !discover_holyc(&path)?.is_empty()
+            {
+                entries.push(DiscoveredEntry::Project(path.canonicalize()?));
+            }
+        }
+    }
+    entries.sort_by_key(|entry| match entry {
+        DiscoveredEntry::Source(path) | DiscoveredEntry::Project(path) => {
+            path.to_string_lossy().to_ascii_lowercase()
+        }
+    });
+    Ok(entries)
+}
+
 pub fn now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -279,6 +340,33 @@ mod tests {
         let entry = LibraryEntry::from_project(&root, Path::new("Source/Main.HC")).unwrap();
         assert_eq!(entry.project_root, root.canonicalize().unwrap());
         assert_eq!(entry.entrypoint, PathBuf::from("Source/Main.HC"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn library_discovery_separates_sources_and_project_folders() {
+        let root = std::env::temp_dir().join(format!("sanctum-library-{}", Uuid::new_v4()));
+        fs::create_dir_all(root.join("Game/Source")).unwrap();
+        fs::create_dir_all(root.join("Empty")).unwrap();
+        fs::create_dir_all(root.join(".hidden")).unwrap();
+        fs::create_dir_all(root.join("target")).unwrap();
+        fs::write(root.join("Standalone.hc"), b"U0 Main() {}\n").unwrap();
+        fs::write(root.join("Game/Main.HC"), b"#include \"Source/Util.HC\"\n").unwrap();
+        fs::write(root.join("Game/Source/Util.HC"), b"U0 Util() {}\n").unwrap();
+        fs::write(root.join("Empty/readme.txt"), b"nothing here\n").unwrap();
+        fs::write(root.join(".hidden/Hidden.HC"), b"U0 Main() {}\n").unwrap();
+        fs::write(root.join("target/Generated.HC"), b"U0 Main() {}\n").unwrap();
+
+        let discovered = discover_library(&root).unwrap();
+        assert_eq!(discovered.len(), 2);
+        assert!(matches!(&discovered[0], DiscoveredEntry::Project(path) if path.ends_with("Game")));
+        assert!(
+            matches!(&discovered[1], DiscoveredEntry::Source(path) if path.ends_with("Standalone.hc"))
+        );
+
+        let project = LibraryEntry::from_directory(&root.join("Game")).unwrap();
+        assert!(project.entrypoint.as_os_str().is_empty());
+        assert_eq!(project.title, "Game");
         let _ = fs::remove_dir_all(root);
     }
 

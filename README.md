@@ -11,9 +11,11 @@ Windows, Linux, and macOS. It has three related layers:
   provides host implementations of the TempleOS ABI, graphics, audio, input,
   tasks, registry calls, DolDoc resources, and other APIs used by compiled
   programs. It is not a hardware emulator and does not boot TempleOS.
-- **`sanctum`** is the graphical library and runner. It imports HolyC files or
-  project folders, compiles them with the `holyc` compiler library, and runs
-  each program in an isolated child process through `templeos-compat`.
+- **`sanctum`** is the graphical library and runner. Point it at a containing
+  folder and it imports top-level HolyC files as standalone programs plus each
+  child folder as a multi-file project. It compiles with the `holyc` compiler
+  library and runs each program in an isolated child process through
+  `templeos-compat`.
 
 The project does not contain, download, or redistribute TempleOS. Self-contained
 HolyC programs run without an ISO. Programs that use `::/` includes or other OS
@@ -31,7 +33,9 @@ editable entrypoints and cover art, a live indexed-color canvas, TempleOS menu
 actions, keyboard input, sound controls, logs, fullscreen mode, and graceful
 Stop/Restart controls. The live game can be detached into its own window and
 re-docked without restarting its isolated runner. A populated rendered frame
-can automatically become a game's 4:3 library cover.
+can automatically become a game's 4:3 library cover. A multi-file project's
+entrypoint is selected on its first run and remembered. The sidebar Run action
+can also launch a chosen `.HC` file once without adding it to the library.
 
 Settings, library metadata, covers, and registry saves normally live in the
 platform user-data directory. Portable mode can move Sanctum-owned data into

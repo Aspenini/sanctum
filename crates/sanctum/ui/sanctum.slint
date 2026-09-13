@@ -9,6 +9,7 @@ export struct GameItem {
     has-cover: bool,
     favorite: bool,
     missing: bool,
+    needs-entrypoint: bool,
 }
 
 export struct ChoiceItem {
@@ -362,8 +363,8 @@ export component MainWindow inherits Window {
     property <length> tile-width: (root.tile-area-width - (root.tile-columns - 1) * root.tile-gap) / root.tile-columns;
     property <length> tile-height: root.tile-width * 0.75;
 
-    callback add-file;
-    callback add-folder;
+    callback add-library;
+    callback run-file;
     callback search-changed(string);
     callback set-filter(int);
     callback set-sort(int);
@@ -409,10 +410,11 @@ export component MainWindow inherits Window {
                 spacing: 6px;
 
                 SideButton { icon: IconSet.Library; label: "Library"; active: !root.running && !root.settings-open; clicked => { root.close-settings(); root.show-library(); root.set-filter(0); } }
+                SideButton { icon: IconSet.FilePlay; label: "Run"; clicked => { root.close-settings(); root.run-file(); } }
 
                 Rectangle { vertical-stretch: 1; background: transparent; }
 
-                SideButton { icon: IconSet.Plus; label: "Add"; clicked => { root.close-settings(); root.add-file(); } }
+                SideButton { icon: IconSet.Plus; label: "Add"; clicked => { root.close-settings(); root.add-library(); } }
                 SideButton { icon: IconSet.Settings; label: "Settings"; active: root.settings-open; clicked => { root.show-settings(); } }
             }
         }
@@ -434,8 +436,6 @@ export component MainWindow inherits Window {
                         input-type: search;
                         edited(value) => { root.search-changed(value); }
                     }
-                    FlatButton { text: "Add .HC"; clicked => { root.add-file(); } }
-                    FlatButton { text: "Add folder"; clicked => { root.add-folder(); } }
                 }
 
                 HorizontalLayout {
@@ -455,8 +455,8 @@ export component MainWindow inherits Window {
                         alignment: center;
                         spacing: 10px;
                         Text { text: "No programs"; color: #ededed; font-size: 20px; horizontal-alignment: center; }
-                        Text { text: "Add a HolyC file or project folder to get started."; color: #888888; font-size: 13px; horizontal-alignment: center; }
-                        FlatButton { text: "Add program"; primary: true; clicked => { root.add-file(); } }
+                        Text { text: "Choose a folder containing HolyC programs to get started."; color: #888888; font-size: 13px; horizontal-alignment: center; }
+                        FlatButton { text: "Choose library folder"; primary: true; clicked => { root.add-library(); } }
                     }
                 }
 
