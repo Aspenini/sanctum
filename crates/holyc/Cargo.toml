@@ -4,9 +4,10 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 description = "HolyC compiler CLI"
+default-run = "holycc"
 
 [[bin]]
-name = "holyc"
+name = "holycc"
 path = "src/main.rs"
 
 [lib]

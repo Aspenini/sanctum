@@ -3,7 +3,8 @@
 Sanctum is a Rust workspace for running TempleOS HolyC programs directly on
 Windows, Linux, and macOS. It has three related layers:
 
-- **`holyc`** is the HolyC compiler and command-line tool. It parses, checks,
+- **`holycc`** is the HolyC compiler command-line tool (backed by the `holyc`
+  Rust crate). It parses, checks,
   and JIT-compiles HolyC to native code with Cranelift. The same compiler API is
   used by Sanctum; future AOT output belongs here as well.
 - **`templeos-compat`** is the reusable TempleOS compatibility layer. It
@@ -11,8 +12,8 @@ Windows, Linux, and macOS. It has three related layers:
   tasks, registry calls, DolDoc resources, and other APIs used by compiled
   programs. It is not a hardware emulator and does not boot TempleOS.
 - **`sanctum`** is the graphical library and runner. It imports HolyC files or
-  project folders, compiles them with `holyc`, and runs each program in an
-  isolated child process through `templeos-compat`.
+  project folders, compiles them with the `holyc` compiler library, and runs
+  each program in an isolated child process through `templeos-compat`.
 
 The project does not contain, download, or redistribute TempleOS. Self-contained
 HolyC programs run without an ISO. Programs that use `::/` includes or other OS
@@ -25,11 +26,12 @@ does not accept, copy, download, or extract ISO images.
 cargo run -p sanctum
 ```
 
-The desktop app provides a searchable library with favorites and recents,
+The Slint desktop app provides a searchable library with favorites and recents,
 editable entrypoints and cover art, a live indexed-color canvas, TempleOS menu
 actions, keyboard input, sound controls, logs, fullscreen mode, and graceful
-Stop/Restart controls. A populated rendered frame can automatically become a
-game's 4:3 library cover.
+Stop/Restart controls. The live game can be detached into its own window and
+re-docked without restarting its isolated runner. A populated rendered frame
+can automatically become a game's 4:3 library cover.
 
 Settings, library metadata, covers, and registry saves normally live in the
 platform user-data directory. Portable mode can move Sanctum-owned data into
@@ -40,10 +42,10 @@ are never copied or modified.
 ## Run the compiler
 
 ```text
-cargo run -p holyc -- --run tests/holyc/hello.HC
+cargo run -p holyc --bin holycc -- --run tests/holyc/hello.HC
 ```
 
-Without `--run`, `holyc` performs compile-only validation. The CLI remains
+Without `--run`, `holycc` performs compile-only validation. The CLI remains
 independent of the Sanctum GUI.
 
 The implemented language/runtime subset includes preprocessing, TempleOS

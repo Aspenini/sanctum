@@ -1,13 +1,22 @@
 use crate::model::{self, LibraryEntry, SanctumConfig, ScaleMode, StorageMode, StoragePaths};
 use crate::runner::{RunnerEvent, RunnerSession};
-use eframe::egui::{self, Color32, TextureHandle, TextureOptions};
-use std::collections::HashMap;
+use slint::platform::Key;
+use slint::{
+    CloseRequestResponse, ComponentHandle, Image, ModelRc, Rgba8Pixel, SharedPixelBuffer,
+    SharedString, Timer, TimerMode, VecModel,
+};
+use std::cell::RefCell;
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
+use std::time::Duration;
 #[cfg(test)]
 use templeos_compat::host::input::{SCF_ALT, SCF_CTRL, SCF_SHIFT};
 use templeos_compat::host::input::{ascii_key_event, scan_flags};
 use uuid::Uuid;
+
+slint::include_modules!();
 
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum Filter {
@@ -23,7 +32,7 @@ enum Sort {
     Added,
 }
 
-pub struct SanctumApp {
+struct AppState {
     paths: StoragePaths,
     config: SanctumConfig,
     filter: Filter,
@@ -33,23 +42,23 @@ pub struct SanctumApp {
     entry_choices: Option<(PathBuf, Vec<PathBuf>, Option<Uuid>)>,
     runner: Option<RunnerSession>,
     running: Option<Uuid>,
-    status: String,
-    log: String,
-    frame: Option<TextureHandle>,
-    frame_size: [usize; 2],
-    frame_sequence: u64,
-    focus_canvas_on_frame: bool,
-    menu: Option<String>,
-    covers: HashMap<Uuid, TextureHandle>,
-    show_settings: bool,
-    fullscreen: bool,
     pending_restart: Option<Uuid>,
     pending_storage: Option<StorageMode>,
+    status: String,
+    log: String,
+    frame: Option<Image>,
+    frame_width: u32,
+    frame_height: u32,
+    frame_sequence: u64,
+    menu: Option<String>,
+    detached: bool,
+    fullscreen: bool,
+    log_open: bool,
+    library_dirty: bool,
 }
 
-impl SanctumApp {
-    pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        configure_style(&cc.egui_ctx);
+impl AppState {
+    fn new() -> Self {
         let paths = StoragePaths::detect().expect("Sanctum data directory is unavailable");
         let (mut config, recovery) = model::load_recovering(&paths).unwrap_or_default();
         config.storage_mode = if paths.portable {
@@ -67,21 +76,22 @@ impl SanctumApp {
             entry_choices: None,
             runner: None,
             running: None,
+            pending_restart: None,
+            pending_storage: None,
             status: recovery.map_or_else(
                 || "Ready".into(),
                 |path| format!("Recovered a corrupt library database to {}", path.display()),
             ),
             log: String::new(),
             frame: None,
-            frame_size: [640, 480],
+            frame_width: 640,
+            frame_height: 480,
             frame_sequence: 0,
-            focus_canvas_on_frame: false,
             menu: None,
-            covers: HashMap::new(),
-            show_settings: false,
+            detached: false,
             fullscreen: false,
-            pending_restart: None,
-            pending_storage: None,
+            log_open: false,
+            library_dirty: true,
         }
     }
 
@@ -107,6 +117,7 @@ impl SanctumApp {
                     self.config.library.push(entry);
                     self.persist();
                 }
+                self.library_dirty = true;
             }
             Err(error) => self.status = format!("Unable to add program: {error}"),
         }
@@ -128,23 +139,34 @@ impl SanctumApp {
                     self.config.library.push(entry);
                     self.persist();
                 }
+                self.library_dirty = true;
             }
             Err(error) => self.status = format!("Unable to add program: {error}"),
         }
     }
 
-    fn restart(&mut self, id: Uuid) {
-        if let Some(runner) = &mut self.runner {
-            self.pending_restart = Some(id);
-            let _ = runner.stop();
-            self.status = "Restarting".into();
-        } else {
-            self.launch(id);
+    fn scan_folder(&mut self, root: PathBuf, editing: Option<Uuid>) {
+        match model::discover_holyc(&root) {
+            Ok(files) if files.len() == 1 => {
+                if let Some(id) = editing {
+                    if let Some(item) = self.config.library.iter_mut().find(|item| item.id == id) {
+                        item.project_root = root;
+                        item.entrypoint = files[0].clone();
+                        self.persist();
+                        self.library_dirty = true;
+                    }
+                } else {
+                    self.add_folder_entry(root, files[0].clone());
+                }
+            }
+            Ok(files) if !files.is_empty() => self.entry_choices = Some((root, files, editing)),
+            Ok(_) => self.status = "No .HC files found in that folder".into(),
+            Err(error) => self.status = format!("Unable to scan folder: {error}"),
         }
     }
 
     fn launch(&mut self, id: Uuid) {
-        let root = self
+        let templeos_root = self
             .config
             .templeos_root
             .clone()
@@ -159,7 +181,11 @@ impl SanctumApp {
         if let Some(mut runner) = self.runner.take() {
             runner.kill();
         }
-        match RunnerSession::spawn(&item.source_path(), root.as_deref(), &self.paths.root) {
+        match RunnerSession::spawn(
+            &item.source_path(),
+            templeos_root.as_deref(),
+            &self.paths.root,
+        ) {
             Ok(runner) => {
                 item.last_played = Some(model::now());
                 self.running = Some(id);
@@ -168,8 +194,8 @@ impl SanctumApp {
                 self.log.clear();
                 self.frame = None;
                 self.frame_sequence = 0;
-                self.focus_canvas_on_frame = true;
                 self.menu = None;
+                self.library_dirty = true;
                 self.persist();
                 if let Some(runner) = &self.runner {
                     let _ = runner.set_muted(self.config.muted);
@@ -179,7 +205,26 @@ impl SanctumApp {
         }
     }
 
-    fn poll_runner(&mut self, ctx: &egui::Context) {
+    fn restart(&mut self) {
+        let Some(id) = self.running else { return };
+        if let Some(runner) = &mut self.runner {
+            self.pending_restart = Some(id);
+            let _ = runner.stop();
+            self.status = "Restarting".into();
+        } else {
+            self.launch(id);
+        }
+    }
+
+    fn stop(&mut self) {
+        self.pending_restart = None;
+        if let Some(runner) = &mut self.runner {
+            let _ = runner.stop();
+            self.status = "Stopping".into();
+        }
+    }
+
+    fn poll_runner(&mut self) {
         let mut events = Vec::new();
         if let Some(runner) = &self.runner {
             while let Some(event) = runner.try_recv() {
@@ -191,17 +236,11 @@ impl SanctumApp {
                 RunnerEvent::Status(status) => self.status = status,
                 RunnerEvent::Log(text) => self.log.push_str(&text),
                 RunnerEvent::Warning(text) => {
-                    self.log.push_str(&text);
-                    if !text.ends_with('\n') {
-                        self.log.push('\n');
-                    }
+                    append_line(&mut self.log, &text);
                     self.status = "Running with warnings".into();
                 }
                 RunnerEvent::Error(text) => {
-                    self.log.push_str(&text);
-                    if !text.ends_with('\n') {
-                        self.log.push('\n');
-                    }
+                    append_line(&mut self.log, &text);
                     self.status = "Error".into();
                 }
                 RunnerEvent::Menu(menu) => self.menu = menu,
@@ -215,47 +254,35 @@ impl SanctumApp {
                     indexed,
                 } => {
                     self.frame_sequence = sequence;
-                    self.frame_size = [width as usize, height as usize];
-                    let pixels = indexed
-                        .iter()
-                        .map(|color| {
-                            let [r, g, b] = templeos_compat::graphics::palette_rgb(*color);
-                            Color32::from_rgb(r, g, b)
-                        })
-                        .collect();
-                    let image = egui::ColorImage::new(self.frame_size, pixels);
-                    if let Some(texture) = &mut self.frame {
-                        texture.set(image, TextureOptions::NEAREST);
-                    } else {
-                        self.frame = Some(ctx.load_texture(
-                            "templeos-frame",
-                            image,
-                            TextureOptions::NEAREST,
-                        ));
-                    }
+                    self.frame_width = width;
+                    self.frame_height = height;
+                    self.frame = Some(indexed_image(width, height, &indexed));
                     self.capture_cover(width, height, &indexed);
                 }
             }
         }
         if let Some(runner) = &mut self.runner {
             match runner.update_lifecycle() {
-                Ok(true) => ctx.request_repaint_after(std::time::Duration::from_millis(16)),
-                Ok(false) => {
-                    self.runner = None;
-                    self.running = None;
-                    if let Some(id) = self.pending_restart.take() {
-                        self.launch(id);
-                    }
-                }
+                Ok(true) => {}
+                Ok(false) => self.finish_runner(),
                 Err(error) => {
                     self.status = format!("Runner error: {error}");
-                    self.runner = None;
-                    self.running = None;
-                    if let Some(id) = self.pending_restart.take() {
-                        self.launch(id);
-                    }
+                    self.finish_runner();
                 }
             }
+        }
+    }
+
+    fn finish_runner(&mut self) {
+        let restart = self.pending_restart.take();
+        self.runner = None;
+        self.running = None;
+        if restart.is_none() {
+            self.detached = false;
+            self.fullscreen = false;
+        }
+        if let Some(id) = restart {
+            self.launch(id);
         }
     }
 
@@ -264,14 +291,7 @@ impl SanctumApp {
         let Some(item) = self.config.library.iter_mut().find(|item| item.id == id) else {
             return;
         };
-        if item.cover.is_some()
-            || indexed
-                .iter()
-                .copied()
-                .collect::<std::collections::HashSet<_>>()
-                .len()
-                < 5
-        {
+        if item.cover.is_some() || indexed.iter().copied().collect::<HashSet<_>>().len() < 5 {
             return;
         }
         let path = self.paths.covers.join(format!("{id}.png"));
@@ -292,6 +312,7 @@ impl SanctumApp {
             image::imageops::resize(&cropped, 640, 480, image::imageops::FilterType::Nearest);
         if cover.save(&path).is_ok() {
             item.cover = Some(path);
+            self.library_dirty = true;
             self.persist();
         }
     }
@@ -312,503 +333,828 @@ impl SanctumApp {
             Ok(_) => {
                 if let Some(item) = self.config.library.iter_mut().find(|item| item.id == id) {
                     item.cover = Some(destination);
-                    self.covers.remove(&id);
                     self.persist();
+                    self.library_dirty = true;
                 }
             }
             Err(error) => self.status = format!("Unable to import cover: {error}"),
         }
     }
 
-    fn send_input(&mut self, ctx: &egui::Context) {
+    fn send_input(&self, text: &str, shift: bool, ctrl: bool, alt: bool) {
         let Some(runner) = &self.runner else { return };
-        let active_modifiers = ctx.input(|input| input.modifiers);
-        let events = ctx.input(|input| input.events.clone());
-        let has_text = events
-            .iter()
-            .any(|event| matches!(event, egui::Event::Text(text) if !text.is_empty()));
-        let text_has_space = events
-            .iter()
-            .any(|event| matches!(event, egui::Event::Text(text) if text.contains(' ')));
-        for event in events {
-            match event {
-                egui::Event::Text(text) => {
-                    for (ch, scan) in text_key_events(
-                        &text,
-                        active_modifiers.shift,
-                        active_modifiers.ctrl,
-                        active_modifiers.alt,
-                    ) {
-                        let _ = runner.send_key(ch, scan);
-                    }
-                }
-                egui::Event::Key {
-                    key,
-                    pressed: true,
-                    modifiers,
-                    ..
-                } => {
-                    let special = if key == egui::Key::Space && text_has_space {
-                        None
-                    } else {
-                        map_special_key(key, modifiers.shift, modifiers.ctrl, modifiers.alt)
-                    };
-                    if let Some((ch, scan)) = special.or_else(|| {
-                        if !has_text {
-                            map_printable_key(key, modifiers.shift, modifiers.ctrl, modifiers.alt)
-                        } else {
-                            None
-                        }
-                    }) {
-                        let _ = runner.send_key(ch, scan);
-                    }
-                }
-                _ => {}
-            }
+        if let Some((ch, scan)) = map_slint_special_key(text, shift, ctrl, alt) {
+            let _ = runner.send_key(ch, scan);
+            return;
+        }
+        for (ch, scan) in text_key_events(text, shift, ctrl, alt) {
+            let _ = runner.send_key(ch, scan);
         }
     }
+}
 
-    fn library_ui(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
-            ui.heading("SANCTUM");
-            ui.add_space(12.0);
-            ui.text_edit_singleline(&mut self.search);
-            if ui.button("Add .HC").clicked()
-                && let Some(path) = rfd::FileDialog::new()
-                    .add_filter("HolyC", &["HC", "hc"])
-                    .pick_file()
-            {
-                self.add_source(&path);
-            }
-            if ui.button("Add Folder").clicked()
-                && let Some(root) = rfd::FileDialog::new().pick_folder()
-            {
-                match model::discover_holyc(&root) {
-                    Ok(files) if files.len() == 1 => self.add_folder_entry(root, files[0].clone()),
-                    Ok(files) if !files.is_empty() => {
-                        self.entry_choices = Some((root, files, None))
-                    }
-                    Ok(_) => self.status = "No .HC files found in that folder".into(),
-                    Err(error) => self.status = format!("Unable to scan folder: {error}"),
-                }
-            }
-            if ui.button("Settings").clicked() {
-                self.show_settings = true;
-            }
-        });
-        ui.separator();
-        ui.horizontal(|ui| {
-            ui.selectable_value(&mut self.filter, Filter::All, "All");
-            ui.selectable_value(&mut self.filter, Filter::Favorites, "Favorites");
-            ui.selectable_value(&mut self.filter, Filter::Recent, "Recent");
-            ui.separator();
-            egui::ComboBox::from_id_salt("sort")
-                .selected_text(match self.sort {
-                    Sort::Title => "Title",
-                    Sort::Recent => "Recently played",
-                    Sort::Added => "Recently added",
-                })
-                .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut self.sort, Sort::Title, "Title");
-                    ui.selectable_value(&mut self.sort, Sort::Recent, "Recently played");
-                    ui.selectable_value(&mut self.sort, Sort::Added, "Recently added");
-                });
-        });
-        ui.add_space(8.0);
-
-        let query = self.search.to_ascii_lowercase();
-        let mut ids = self
-            .config
-            .library
-            .iter()
-            .filter(|item| {
-                (query.is_empty() || item.title.to_ascii_lowercase().contains(&query))
-                    && match self.filter {
-                        Filter::All => true,
-                        Filter::Favorites => item.favorite,
-                        Filter::Recent => item.last_played.is_some(),
-                    }
-            })
-            .map(|item| item.id)
-            .collect::<Vec<_>>();
-        ids.sort_by(|lhs, rhs| {
-            let lhs = self
-                .config
-                .library
-                .iter()
-                .find(|item| item.id == *lhs)
-                .unwrap();
-            let rhs = self
-                .config
-                .library
-                .iter()
-                .find(|item| item.id == *rhs)
-                .unwrap();
-            match self.sort {
-                Sort::Title => lhs
-                    .title
-                    .to_ascii_lowercase()
-                    .cmp(&rhs.title.to_ascii_lowercase()),
-                Sort::Recent => rhs.last_played.cmp(&lhs.last_played),
-                Sort::Added => rhs.added_at.cmp(&lhs.added_at),
-            }
-        });
-        let columns = (ui.available_width() / 230.0).floor().max(1.0) as usize;
-        egui::Grid::new("library-grid")
-            .num_columns(columns)
-            .spacing([12.0, 16.0])
-            .show(ui, |ui| {
-                for (index, id) in ids.into_iter().enumerate() {
-                    let item = self
-                        .config
-                        .library
-                        .iter()
-                        .find(|item| item.id == id)
-                        .unwrap()
-                        .clone();
-                    ui.vertical(|ui| {
-                        let response = if let Some(texture) = self.cover_texture(ui.ctx(), &item) {
-                            ui.add(
-                                egui::Button::new(egui::Image::new((
-                                    texture.id(),
-                                    egui::vec2(200.0, 150.0),
-                                )))
-                                .frame(true),
-                            )
-                        } else {
-                            ui.add_sized([200.0, 150.0], egui::Button::new("HOLY\nC"))
-                        };
-                        if response.clicked() {
-                            self.selected = Some(id);
-                        }
-                        ui.horizontal(|ui| {
-                            if ui.button(if item.favorite { "★" } else { "☆" }).clicked()
-                                && let Some(item) =
-                                    self.config.library.iter_mut().find(|item| item.id == id)
-                            {
-                                item.favorite = !item.favorite;
-                                self.persist();
-                            }
-                            if ui.button("▶").clicked() {
-                                self.launch(id);
-                            }
-                            ui.label(&item.title);
-                        });
-                        if !item.source_path().is_file() {
-                            ui.colored_label(Color32::LIGHT_RED, "Missing");
-                        }
-                    });
-                    if (index + 1) % columns == 0 {
-                        ui.end_row();
-                    }
-                }
-            });
-    }
-
-    fn cover_texture(&mut self, ctx: &egui::Context, item: &LibraryEntry) -> Option<TextureHandle> {
-        if let Some(texture) = self.covers.get(&item.id) {
-            return Some(texture.clone());
+impl Drop for AppState {
+    fn drop(&mut self) {
+        if let Some(runner) = &mut self.runner {
+            runner.kill();
         }
-        let path = item.cover.as_ref()?;
-        let image = image::open(path).ok()?.to_rgba8();
-        let size = [image.width() as usize, image.height() as usize];
-        let color = egui::ColorImage::from_rgba_unmultiplied(size, image.as_raw());
-        let texture = ctx.load_texture(format!("cover-{}", item.id), color, TextureOptions::LINEAR);
-        self.covers.insert(item.id, texture.clone());
-        Some(texture)
+        self.persist();
     }
+}
 
-    fn runner_ui(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
-            if ui.button("← Library").clicked() {
-                self.pending_restart = None;
-                if let Some(runner) = &mut self.runner {
-                    let _ = runner.stop();
+macro_rules! simple_main_callback {
+    ($ui:expr, $state:expr, $method:ident, |$s:ident: &mut AppState| $body:block) => {{
+        let ui_weak = $ui.as_weak();
+        let shared = $state.clone();
+        $ui.$method(move || {
+            {
+                let $s = &mut *shared.borrow_mut();
+                $body
+            }
+            if let Some(ui) = ui_weak.upgrade() {
+                if shared.borrow().library_dirty {
+                    sync_library(&ui, &shared);
                 }
+                sync_main_only(&ui, &shared);
             }
-            if ui.button("Stop").clicked()
-                && let Some(runner) = &mut self.runner
-            {
-                self.pending_restart = None;
-                let _ = runner.stop();
-                self.status = "Stopping".into();
-            }
-            if ui.button("Restart").clicked()
-                && let Some(id) = self.running
-            {
-                self.restart(id);
-            }
-            if ui.checkbox(&mut self.config.muted, "Mute").changed() {
-                if let Some(runner) = &self.runner {
-                    let _ = runner.set_muted(self.config.muted);
-                }
-                self.persist();
-            }
-            if ui
-                .button(if self.fullscreen {
-                    "Windowed"
-                } else {
-                    "Fullscreen"
-                })
-                .clicked()
-            {
-                self.fullscreen = !self.fullscreen;
-                ui.ctx()
-                    .send_viewport_cmd(egui::ViewportCommand::Fullscreen(self.fullscreen));
-            }
-            ui.label(&self.status);
         });
-        if let Some(menu) = self.menu.clone() {
-            menu_bar(ui, &menu, |ch, scan| {
-                if let Some(runner) = &self.runner {
-                    let _ = runner.send_key(ch, scan);
+    }};
+    ($ui:expr, $state:expr, $method:ident, |$s:ident: &mut AppState, $a:ident: $t:ty| $body:block) => {{
+        let ui_weak = $ui.as_weak();
+        let shared = $state.clone();
+        $ui.$method(move |$a: $t| {
+            {
+                let $s = &mut *shared.borrow_mut();
+                $body
+            }
+            if let Some(ui) = ui_weak.upgrade() {
+                if shared.borrow().library_dirty {
+                    sync_library(&ui, &shared);
                 }
-            });
+                sync_main_only(&ui, &shared);
+            }
+        });
+    }};
+    ($ui:expr, $state:expr, $method:ident, |$s:ident: &mut AppState, $a:ident: $ta:ty, $b:ident: $tb:ty, $c:ident: $tc:ty, $d:ident: $td:ty| $body:block) => {{
+        let ui_weak = $ui.as_weak();
+        let shared = $state.clone();
+        $ui.$method(move |$a: $ta, $b: $tb, $c: $tc, $d: $td| {
+            {
+                let $s = &mut *shared.borrow_mut();
+                $body
+            }
+            if let Some(ui) = ui_weak.upgrade() {
+                if shared.borrow().library_dirty {
+                    sync_library(&ui, &shared);
+                }
+                sync_main_only(&ui, &shared);
+            }
+        });
+    }};
+}
+
+pub fn run() -> Result<(), slint::PlatformError> {
+    let ui = MainWindow::new()?;
+    let game = GameWindow::new()?;
+    let state = Rc::new(RefCell::new(AppState::new()));
+
+    install_main_callbacks(&ui, &game, &state);
+    install_game_callbacks(&ui, &game, &state);
+    sync_all(&ui, &game, &state);
+
+    let ui_weak = ui.as_weak();
+    let game_weak = game.as_weak();
+    let timer_state = state.clone();
+    let timer = Timer::default();
+    timer.start(TimerMode::Repeated, Duration::from_millis(16), move || {
+        timer_state.borrow_mut().poll_runner();
+        if let (Some(ui), Some(game)) = (ui_weak.upgrade(), game_weak.upgrade()) {
+            sync_runtime(&ui, &game, &timer_state);
+            if timer_state.borrow().library_dirty {
+                sync_library(&ui, &timer_state);
+            }
         }
-        ui.separator();
-        let mut canvas_has_focus = false;
-        if let Some(texture) = &self.frame {
-            let available = ui.available_size();
-            let native = egui::vec2(self.frame_size[0] as f32, self.frame_size[1] as f32);
-            let ratio = (available.x / native.x).min(available.y / native.y);
-            let scale = match self.config.scale_mode {
-                ScaleMode::Integer => ratio.floor().max(1.0),
-                ScaleMode::Fit => ratio.max(0.1),
+    });
+
+    let ui_weak = ui.as_weak();
+    let game_weak = game.as_weak();
+    let game_close_state = state.clone();
+    game.window().on_close_requested(move || {
+        let fullscreen = {
+            let mut state = game_close_state.borrow_mut();
+            state.detached = false;
+            state.fullscreen
+        };
+        if let Some(ui) = ui_weak.upgrade() {
+            ui.set_detached(false);
+            ui.window().set_fullscreen(fullscreen);
+        }
+        if let Some(game) = game_weak.upgrade() {
+            game.window().set_fullscreen(false);
+        }
+        CloseRequestResponse::HideWindow
+    });
+
+    let game_weak = game.as_weak();
+    let close_state = state.clone();
+    ui.window().on_close_requested(move || {
+        if let Some(game) = game_weak.upgrade() {
+            let _ = game.hide();
+        }
+        if let Some(mut runner) = close_state.borrow_mut().runner.take() {
+            runner.kill();
+        }
+        CloseRequestResponse::HideWindow
+    });
+
+    ui.run()
+}
+
+fn install_main_callbacks(ui: &MainWindow, game: &GameWindow, state: &Rc<RefCell<AppState>>) {
+    let weak = ui.as_weak();
+    let game_weak = game.as_weak();
+    let shared = state.clone();
+    ui.on_add_file(move || {
+        if let Some(path) = rfd::FileDialog::new()
+            .add_filter("HolyC", &["HC", "hc"])
+            .pick_file()
+        {
+            shared.borrow_mut().add_source(&path);
+        }
+        sync_from_weaks(&weak, &game_weak, &shared);
+    });
+
+    let weak = ui.as_weak();
+    let game_weak = game.as_weak();
+    let shared = state.clone();
+    ui.on_add_folder(move || {
+        if let Some(root) = rfd::FileDialog::new().pick_folder() {
+            shared.borrow_mut().scan_folder(root, None);
+        }
+        sync_from_weaks(&weak, &game_weak, &shared);
+    });
+
+    simple_main_callback!(
+        ui,
+        state,
+        on_search_changed,
+        |state: &mut AppState, value: SharedString| {
+            state.search = value.to_string();
+            state.library_dirty = true;
+        }
+    );
+    simple_main_callback!(
+        ui,
+        state,
+        on_set_filter,
+        |state: &mut AppState, value: i32| {
+            state.filter = match value {
+                1 => Filter::Favorites,
+                2 => Filter::Recent,
+                _ => Filter::All,
             };
-            let size = native * scale;
-            let response = ui
-                .push_id("sanctum-canvas", |ui| {
-                    ui.vertical_centered(|ui| {
-                        ui.add(
-                            egui::Image::new((texture.id(), size))
-                                .texture_options(TextureOptions::NEAREST)
-                                .sense(egui::Sense::click()),
-                        )
-                    })
-                    .inner
-                })
-                .inner;
-            if response.clicked() || self.focus_canvas_on_frame {
-                response.request_focus();
-                self.focus_canvas_on_frame = false;
+            state.library_dirty = true;
+        }
+    );
+    simple_main_callback!(
+        ui,
+        state,
+        on_set_sort,
+        |state: &mut AppState, value: i32| {
+            state.sort = match value {
+                1 => Sort::Recent,
+                2 => Sort::Added,
+                _ => Sort::Title,
+            };
+            state.library_dirty = true;
+        }
+    );
+    simple_main_callback!(
+        ui,
+        state,
+        on_select_game,
+        |state: &mut AppState, value: SharedString| {
+            state.selected = Uuid::parse_str(value.as_str()).ok();
+        }
+    );
+    simple_main_callback!(
+        ui,
+        state,
+        on_run_game,
+        |state: &mut AppState, value: SharedString| {
+            if let Ok(id) = Uuid::parse_str(value.as_str()) {
+                state.launch(id);
             }
-            canvas_has_focus = response.has_focus();
-            if canvas_has_focus {
-                // The running program owns its navigation keys while the canvas is
-                // focused. Without this filter egui treats each arrow press as GUI
-                // focus navigation, so the first control input moves focus away
-                // from the game and the next one requires another mouse click.
-                ui.memory_mut(|memory| {
-                    memory.set_focus_lock_filter(response.id, canvas_focus_filter());
-                });
+        }
+    );
+    simple_main_callback!(
+        ui,
+        state,
+        on_toggle_favorite,
+        |state: &mut AppState, value: SharedString| {
+            if let Ok(id) = Uuid::parse_str(value.as_str())
+                && let Some(item) = state.config.library.iter_mut().find(|item| item.id == id)
+            {
+                item.favorite = !item.favorite;
+                state.persist();
+                state.library_dirty = true;
             }
-        } else {
-            ui.centered_and_justified(|ui| {
-                ui.spinner();
-            });
         }
-        if !self.log.is_empty() {
-            egui::CollapsingHeader::new("Compiler and program log").show(ui, |ui| {
-                egui::ScrollArea::vertical()
-                    .max_height(160.0)
-                    .show(ui, |ui| {
-                        ui.monospace(&self.log);
-                    });
-            });
+    );
+    simple_main_callback!(ui, state, on_close_details, |state: &mut AppState| {
+        state.selected = None;
+    });
+    simple_main_callback!(
+        ui,
+        state,
+        on_save_title,
+        |state: &mut AppState, value: SharedString| {
+            if let Some(id) = state.selected
+                && let Some(item) = state.config.library.iter_mut().find(|item| item.id == id)
+            {
+                item.title = value.to_string();
+                state.persist();
+                state.library_dirty = true;
+            }
         }
-        if canvas_has_focus {
-            self.send_input(ui.ctx());
+    );
+    simple_main_callback!(
+        ui,
+        state,
+        on_toggle_selected_favorite,
+        |state: &mut AppState| {
+            if let Some(id) = state.selected
+                && let Some(item) = state.config.library.iter_mut().find(|item| item.id == id)
+            {
+                item.favorite = !item.favorite;
+                state.persist();
+                state.library_dirty = true;
+            }
         }
+    );
+
+    let weak = ui.as_weak();
+    let game_weak = game.as_weak();
+    let shared = state.clone();
+    ui.on_choose_entrypoint(move || {
+        let selection = {
+            let state = shared.borrow();
+            state.selected.and_then(|id| {
+                state
+                    .config
+                    .library
+                    .iter()
+                    .find(|item| item.id == id)
+                    .map(|item| (item.project_root.clone(), id))
+            })
+        };
+        if let Some((root, id)) = selection {
+            shared.borrow_mut().scan_folder(root, Some(id));
+        }
+        sync_from_weaks(&weak, &game_weak, &shared);
+    });
+
+    simple_main_callback!(ui, state, on_choose_cover, |state: &mut AppState| {
+        if let Some(id) = state.selected {
+            state.import_cover(id);
+        }
+    });
+    simple_main_callback!(ui, state, on_remove_selected, |state: &mut AppState| {
+        if let Some(id) = state.selected.take() {
+            state.config.library.retain(|item| item.id != id);
+            state.persist();
+            state.library_dirty = true;
+        }
+    });
+    simple_main_callback!(ui, state, on_run_selected, |state: &mut AppState| {
+        if let Some(id) = state.selected.take() {
+            state.launch(id);
+        }
+    });
+    simple_main_callback!(
+        ui,
+        state,
+        on_choose_entry,
+        |state: &mut AppState, value: SharedString| {
+            if let Some((root, _, editing)) = state.entry_choices.take() {
+                let relative = PathBuf::from(value.as_str());
+                if let Some(id) = editing {
+                    if let Some(item) = state.config.library.iter_mut().find(|item| item.id == id) {
+                        item.project_root = root;
+                        item.entrypoint = relative;
+                        state.persist();
+                        state.library_dirty = true;
+                    }
+                } else {
+                    state.add_folder_entry(root, relative);
+                }
+            }
+        }
+    );
+    simple_main_callback!(ui, state, on_cancel_choices, |state: &mut AppState| {
+        state.entry_choices = None;
+    });
+
+    {
+        let weak = ui.as_weak();
+        ui.on_show_settings(move || {
+            if let Some(ui) = weak.upgrade() {
+                ui.set_settings_open(true);
+            }
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        ui.on_close_settings(move || {
+            if let Some(ui) = weak.upgrade() {
+                ui.set_settings_open(false);
+            }
+        });
     }
 
-    fn dialogs(&mut self, ctx: &egui::Context) {
-        if let Some((root, files, editing)) = self.entry_choices.clone() {
-            egui::Window::new("Choose HolyC entrypoint")
-                .collapsible(false)
-                .show(ctx, |ui| {
-                    for file in files {
-                        if ui.button(file.display().to_string()).clicked() {
-                            if let Some(id) = editing {
-                                if let Some(item) =
-                                    self.config.library.iter_mut().find(|item| item.id == id)
-                                {
-                                    item.project_root = root.clone();
-                                    item.entrypoint = file;
-                                    self.persist();
-                                }
-                            } else {
-                                self.add_folder_entry(root.clone(), file);
-                            }
-                            self.entry_choices = None;
-                        }
-                    }
-                    if ui.button("Cancel").clicked() {
-                        self.entry_choices = None;
-                    }
-                });
-        }
-        if let Some(id) = self.selected {
-            let mut open = true;
-            egui::Window::new("Program details")
-                .open(&mut open)
-                .show(ctx, |ui| {
-                    let mut changed = false;
-                    if let Some(item) = self.config.library.iter_mut().find(|item| item.id == id) {
-                        ui.label(item.source_path().display().to_string());
-                        changed |= ui.text_edit_singleline(&mut item.title).changed();
-                        changed |= ui.checkbox(&mut item.favorite, "Favorite").changed();
-                    }
-                    if ui.button("Change entrypoint…").clicked()
-                        && let Some(item) = self.config.library.iter().find(|item| item.id == id)
-                    {
-                        match model::discover_holyc(&item.project_root) {
-                            Ok(files) if !files.is_empty() => {
-                                self.entry_choices =
-                                    Some((item.project_root.clone(), files, Some(id)));
-                            }
-                            Ok(_) => self.status = "No .HC files found in the project".into(),
-                            Err(error) => self.status = format!("Unable to scan project: {error}"),
-                        }
-                    }
-                    if ui.button("Choose cover…").clicked() {
-                        self.import_cover(id);
-                    }
-                    if ui.button("Run").clicked() {
-                        self.launch(id);
-                    }
-                    if ui.button("Remove from library").clicked() {
-                        self.config.library.retain(|item| item.id != id);
-                        self.selected = None;
-                        changed = true;
-                    }
-                    if changed {
-                        self.persist();
-                    }
-                });
-            if !open {
-                self.selected = None;
+    let weak = ui.as_weak();
+    let game_weak = game.as_weak();
+    let shared = state.clone();
+    ui.on_choose_templeos(move || {
+        if let Some(root) = rfd::FileDialog::new().pick_folder() {
+            let mut state = shared.borrow_mut();
+            if root.join("Kernel/KernelA.HH").is_file() {
+                state.config.templeos_root = Some(root);
+                state.status = "TempleOS folder selected".into();
+                state.persist();
+            } else {
+                state.status = "That folder is not a TempleOS root".into();
             }
         }
-        if self.show_settings {
-            let mut open = true;
-            egui::Window::new("Sanctum settings")
-                .open(&mut open)
-                .show(ctx, |ui| {
-                    ui.label(format!("Data: {}", self.paths.root.display()));
-                    ui.label(format!(
-                        "Mode: {}",
-                        if self.paths.portable {
-                            "Portable"
-                        } else {
-                            "Per-user"
-                        }
-                    ));
-                    if let Some(root) = self
-                        .config
-                        .templeos_root
-                        .as_ref()
-                        .filter(|root| root.join("Kernel/KernelA.HH").is_file())
-                    {
-                        ui.label(format!("TempleOS files: {}", root.display()));
-                    } else {
-                        ui.label("TempleOS files: not installed (optional for self-contained programs)");
-                    }
-                    if ui.button("Choose extracted TempleOS folder…").clicked()
-                        && let Some(root) = rfd::FileDialog::new().pick_folder()
-                    {
-                        if root.join("Kernel/KernelA.HH").is_file() {
-                            self.config.templeos_root = Some(root);
-                            self.status = "TempleOS folder selected".into();
-                            self.persist();
-                        } else {
-                            self.status = "That folder is not a TempleOS root".into();
-                        }
-                    }
-                    ui.horizontal(|ui| {
-                        ui.label("Scaling");
-                        let changed = ui.selectable_value(
-                            &mut self.config.scale_mode,
-                            ScaleMode::Integer,
-                            "Sharp integer",
-                        ).changed() | ui.selectable_value(
-                            &mut self.config.scale_mode,
-                            ScaleMode::Fit,
-                            "Fit window",
-                        ).changed();
-                        if changed {
-                            self.persist();
-                        }
-                    });
-                    let target = if self.paths.portable {
-                        StorageMode::PerUser
-                    } else {
-                        StorageMode::Portable
-                    };
-                    let portable_available = self.paths.portable
-                        || directory_is_writable(&self.paths.executable_dir);
-                    let response = ui.add_enabled(
-                        portable_available,
-                        egui::Button::new(if self.paths.portable {
-                            "Switch to per-user storage"
-                        } else {
-                            "Switch to portable storage"
-                        }),
-                    );
-                    if response.clicked() {
-                        self.pending_storage = Some(target);
-                    }
-                    if !portable_available {
-                        response.on_disabled_hover_text(
-                            "The executable directory is not writable, so portable mode is unavailable.",
-                        );
-                    }
-                });
-            self.show_settings = open;
+        sync_from_weaks(&weak, &game_weak, &shared);
+    });
+
+    simple_main_callback!(
+        ui,
+        state,
+        on_set_scaling,
+        |state: &mut AppState, fit: bool| {
+            state.config.scale_mode = if fit {
+                ScaleMode::Fit
+            } else {
+                ScaleMode::Integer
+            };
+            state.persist();
         }
-        if let Some(target) = self.pending_storage {
-            egui::Window::new("Move Sanctum data?")
-                .collapsible(false)
-                .resizable(false)
-                .show(ctx, |ui| {
-                    ui.label(match target {
-                        StorageMode::Portable => {
-                            "Sanctum-owned settings, covers, saves, and TempleOS files will be copied beside the executable. Imported project folders remain in place."
-                        }
-                        StorageMode::PerUser => {
-                            "Sanctum-owned data will be copied to this account's application-data directory. Imported project folders remain in place."
-                        }
-                    });
-                    ui.horizontal(|ui| {
-                        if ui.button("Cancel").clicked() {
-                            self.pending_storage = None;
-                        }
-                        if ui.button("Move data and restart").clicked() {
-                            self.config.storage_mode = target;
-                            self.persist();
-                            match migrate_storage(&self.paths, target == StorageMode::Portable) {
-                                Ok(()) => {
-                                    match std::env::current_exe()
-                                        .and_then(|executable| std::process::Command::new(executable).spawn())
-                                    {
-                                        Ok(_) => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
-                                        Err(error) => self.status = format!("Data moved, but restart failed: {error}"),
-                                    }
-                                }
-                                Err(error) => {
-                                    self.config.storage_mode = if self.paths.portable {
-                                        StorageMode::Portable
-                                    } else {
-                                        StorageMode::PerUser
-                                    };
-                                    self.status = format!("Storage migration failed: {error}");
-                                }
-                            }
-                            self.pending_storage = None;
-                        }
-                    });
-                });
-        }
+    );
+
+    {
+        let weak = ui.as_weak();
+        let shared = state.clone();
+        ui.on_request_storage_change(move || {
+            let mut state = shared.borrow_mut();
+            state.pending_storage = Some(if state.paths.portable {
+                StorageMode::PerUser
+            } else {
+                StorageMode::Portable
+            });
+            if let Some(ui) = weak.upgrade() {
+                ui.set_storage_confirm_open(true);
+            }
+        });
     }
+    {
+        let weak = ui.as_weak();
+        let shared = state.clone();
+        ui.on_cancel_storage_change(move || {
+            shared.borrow_mut().pending_storage = None;
+            if let Some(ui) = weak.upgrade() {
+                ui.set_storage_confirm_open(false);
+            }
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        let shared = state.clone();
+        ui.on_confirm_storage_change(move || {
+            let mut state = shared.borrow_mut();
+            let Some(target) = state.pending_storage.take() else {
+                return;
+            };
+            state.config.storage_mode = target;
+            state.persist();
+            match migrate_storage(&state.paths, target == StorageMode::Portable) {
+                Ok(()) => match std::env::current_exe()
+                    .and_then(|exe| std::process::Command::new(exe).spawn())
+                {
+                    Ok(_) => {
+                        let _ = slint::quit_event_loop();
+                    }
+                    Err(error) => state.status = format!("Data moved, but restart failed: {error}"),
+                },
+                Err(error) => {
+                    state.config.storage_mode = if state.paths.portable {
+                        StorageMode::Portable
+                    } else {
+                        StorageMode::PerUser
+                    };
+                    state.status = format!("Storage migration failed: {error}");
+                }
+            }
+            if let Some(ui) = weak.upgrade() {
+                ui.set_storage_confirm_open(false);
+            }
+        });
+    }
+
+    simple_main_callback!(ui, state, on_show_library, |state: &mut AppState| {
+        state.detached = false;
+        state.stop();
+    });
+    simple_main_callback!(ui, state, on_stop_runner, |state: &mut AppState| {
+        state.stop();
+    });
+    simple_main_callback!(ui, state, on_restart_runner, |state: &mut AppState| {
+        state.restart();
+    });
+    simple_main_callback!(ui, state, on_toggle_mute, |state: &mut AppState| {
+        state.config.muted = !state.config.muted;
+        if let Some(runner) = &state.runner {
+            let _ = runner.set_muted(state.config.muted);
+        }
+        state.persist();
+    });
+
+    let ui_weak = ui.as_weak();
+    let game_weak = game.as_weak();
+    let shared = state.clone();
+    ui.on_toggle_fullscreen(move || {
+        let fullscreen = {
+            let mut state = shared.borrow_mut();
+            state.fullscreen = !state.fullscreen;
+            state.fullscreen
+        };
+        if let (Some(ui), Some(game)) = (ui_weak.upgrade(), game_weak.upgrade()) {
+            if shared.borrow().detached {
+                game.window().set_fullscreen(fullscreen);
+            } else {
+                ui.window().set_fullscreen(fullscreen);
+            }
+            sync_runtime(&ui, &game, &shared);
+        }
+    });
+
+    let ui_weak = ui.as_weak();
+    let game_weak = game.as_weak();
+    let shared = state.clone();
+    ui.on_toggle_detached(move || {
+        if let (Some(ui), Some(game)) = (ui_weak.upgrade(), game_weak.upgrade()) {
+            toggle_detached(&ui, &game, &shared);
+        }
+    });
+
+    simple_main_callback!(ui, state, on_toggle_log, |state: &mut AppState| {
+        state.log_open = !state.log_open;
+    });
+    simple_main_callback!(
+        ui,
+        state,
+        on_invoke_menu,
+        |state: &mut AppState, value: SharedString| {
+            if let Some((ch, scan)) = decode_menu_command(value.as_str())
+                && let Some(runner) = &state.runner
+            {
+                let _ = runner.send_key(ch, scan);
+            }
+        }
+    );
+    let shared = state.clone();
+    ui.on_game_key(move |text, shift, control, alt| {
+        shared
+            .borrow()
+            .send_input(text.as_str(), shift, control, alt);
+    });
+}
+
+fn install_game_callbacks(ui: &MainWindow, game: &GameWindow, state: &Rc<RefCell<AppState>>) {
+    let ui_weak = ui.as_weak();
+    let game_weak = game.as_weak();
+    let shared = state.clone();
+    game.on_dock(move || {
+        if let (Some(ui), Some(game)) = (ui_weak.upgrade(), game_weak.upgrade()) {
+            toggle_detached(&ui, &game, &shared);
+        }
+    });
+
+    let ui_weak = ui.as_weak();
+    let game_weak = game.as_weak();
+    let shared = state.clone();
+    game.on_stop_runner(move || {
+        shared.borrow_mut().stop();
+        sync_from_weaks(&ui_weak, &game_weak, &shared);
+    });
+    let ui_weak = ui.as_weak();
+    let game_weak = game.as_weak();
+    let shared = state.clone();
+    game.on_restart_runner(move || {
+        shared.borrow_mut().restart();
+        sync_from_weaks(&ui_weak, &game_weak, &shared);
+    });
+    let ui_weak = ui.as_weak();
+    let game_weak = game.as_weak();
+    let shared = state.clone();
+    game.on_toggle_mute(move || {
+        let mut state = shared.borrow_mut();
+        state.config.muted = !state.config.muted;
+        if let Some(runner) = &state.runner {
+            let _ = runner.set_muted(state.config.muted);
+        }
+        state.persist();
+        drop(state);
+        sync_from_weaks(&ui_weak, &game_weak, &shared);
+    });
+    let ui_weak = ui.as_weak();
+    let game_weak = game.as_weak();
+    let shared = state.clone();
+    game.on_toggle_fullscreen(move || {
+        let fullscreen = {
+            let mut state = shared.borrow_mut();
+            state.fullscreen = !state.fullscreen;
+            state.fullscreen
+        };
+        if let Some(game) = game_weak.upgrade() {
+            game.window().set_fullscreen(fullscreen);
+        }
+        sync_from_weaks(&ui_weak, &game_weak, &shared);
+    });
+    let shared = state.clone();
+    game.on_game_key(move |text, shift, control, alt| {
+        shared
+            .borrow()
+            .send_input(text.as_str(), shift, control, alt);
+    });
+}
+
+fn sync_from_weaks(
+    ui: &slint::Weak<MainWindow>,
+    game: &slint::Weak<GameWindow>,
+    state: &Rc<RefCell<AppState>>,
+) {
+    if let (Some(ui), Some(game)) = (ui.upgrade(), game.upgrade()) {
+        sync_all(&ui, &game, state);
+    }
+}
+
+fn sync_all(ui: &MainWindow, game: &GameWindow, state: &Rc<RefCell<AppState>>) {
+    sync_library(ui, state);
+    sync_runtime(ui, game, state);
+    sync_main_only(ui, state);
+}
+
+fn sync_main_only(ui: &MainWindow, state: &Rc<RefCell<AppState>>) {
+    let state = state.borrow();
+    ui.set_status(state.status.clone().into());
+    ui.set_filter_index(match state.filter {
+        Filter::All => 0,
+        Filter::Favorites => 1,
+        Filter::Recent => 2,
+    });
+    ui.set_sort_index(match state.sort {
+        Sort::Title => 0,
+        Sort::Recent => 1,
+        Sort::Added => 2,
+    });
+    ui.set_muted(state.config.muted);
+    ui.set_log_open(state.log_open);
+    ui.set_program_log(state.log.clone().into());
+    ui.set_fit_scaling(state.config.scale_mode == ScaleMode::Fit);
+    ui.set_data_path(state.paths.root.display().to_string().into());
+    ui.set_storage_label(
+        if state.paths.portable {
+            "Portable"
+        } else {
+            "Per-user"
+        }
+        .into(),
+    );
+    ui.set_storage_action(
+        if state.paths.portable {
+            "Switch to per-user storage"
+        } else {
+            "Switch to portable storage"
+        }
+        .into(),
+    );
+    ui.set_portable_available(
+        state.paths.portable || directory_is_writable(&state.paths.executable_dir),
+    );
+    ui.set_templeos_path(
+        state
+            .config
+            .templeos_root
+            .as_ref()
+            .filter(|root| root.join("Kernel/KernelA.HH").is_file())
+            .map_or_else(
+                || "Not selected — optional for self-contained programs".into(),
+                |root| root.display().to_string(),
+            )
+            .into(),
+    );
+    ui.set_details_open(state.selected.is_some());
+    if let Some(item) = state
+        .selected
+        .and_then(|id| state.config.library.iter().find(|item| item.id == id))
+    {
+        ui.set_selected_title(item.title.clone().into());
+        ui.set_selected_path(item.source_path().display().to_string().into());
+        ui.set_selected_favorite(item.favorite);
+    }
+    ui.set_choices_open(state.entry_choices.is_some());
+    let choices: Vec<ChoiceItem> = state
+        .entry_choices
+        .as_ref()
+        .map(|(_, files, _)| {
+            files
+                .iter()
+                .map(|path| ChoiceItem {
+                    path: path.display().to_string().into(),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    ui.set_entry_choices(ModelRc::new(VecModel::from(choices)));
+}
+
+fn sync_runtime(ui: &MainWindow, game: &GameWindow, state: &Rc<RefCell<AppState>>) {
+    let state = state.borrow();
+    let running = state.runner.is_some();
+    ui.set_running(running);
+    ui.set_status(state.status.clone().into());
+    ui.set_detached(state.detached);
+    ui.set_muted(state.config.muted);
+    ui.set_fullscreen(state.fullscreen);
+    ui.set_log_open(state.log_open);
+    ui.set_program_log(state.log.clone().into());
+    ui.set_frame_ready(state.frame.is_some());
+    ui.set_frame_width(state.frame_width as i32);
+    ui.set_frame_height(state.frame_height as i32);
+    game.set_frame_ready(state.frame.is_some());
+    game.set_fit_scaling(state.config.scale_mode == ScaleMode::Fit);
+    game.set_frame_width(state.frame_width as i32);
+    game.set_frame_height(state.frame_height as i32);
+    game.set_status(state.status.clone().into());
+    game.set_muted(state.config.muted);
+    game.set_fullscreen(state.fullscreen);
+    if let Some(frame) = &state.frame {
+        ui.set_game_frame(frame.clone());
+        game.set_game_frame(frame.clone());
+    }
+    ui.set_menu_items(ModelRc::new(VecModel::from(parse_menu(
+        state.menu.as_deref().unwrap_or(""),
+    ))));
+    if !running {
+        let _ = game.hide();
+    }
+}
+
+fn sync_library(ui: &MainWindow, state: &Rc<RefCell<AppState>>) {
+    let mut state = state.borrow_mut();
+    let query = state.search.to_ascii_lowercase();
+    let mut entries = state
+        .config
+        .library
+        .iter()
+        .filter(|item| {
+            (query.is_empty() || item.title.to_ascii_lowercase().contains(&query))
+                && match state.filter {
+                    Filter::All => true,
+                    Filter::Favorites => item.favorite,
+                    Filter::Recent => item.last_played.is_some(),
+                }
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    entries.sort_by(|lhs, rhs| match state.sort {
+        Sort::Title => lhs
+            .title
+            .to_ascii_lowercase()
+            .cmp(&rhs.title.to_ascii_lowercase()),
+        Sort::Recent => rhs.last_played.cmp(&lhs.last_played),
+        Sort::Added => rhs.added_at.cmp(&lhs.added_at),
+    });
+    let games: Vec<GameItem> = entries
+        .into_iter()
+        .map(|item| {
+            let cover = item
+                .cover
+                .as_ref()
+                .and_then(|path| Image::load_from_path(path).ok());
+            let source_path = item.source_path();
+            let missing = !source_path.is_file();
+            GameItem {
+                id: item.id.to_string().into(),
+                title: item.title.into(),
+                path: source_path.display().to_string().into(),
+                cover: cover.clone().unwrap_or_default(),
+                has_cover: cover.is_some(),
+                favorite: item.favorite,
+                missing,
+            }
+        })
+        .collect();
+    ui.set_games(ModelRc::new(VecModel::from(games)));
+    state.library_dirty = false;
+}
+
+fn toggle_detached(ui: &MainWindow, game: &GameWindow, state: &Rc<RefCell<AppState>>) {
+    let (detached, fullscreen) = {
+        let mut state = state.borrow_mut();
+        state.detached = !state.detached;
+        (state.detached, state.fullscreen)
+    };
+    ui.set_detached(detached);
+    if detached {
+        ui.window().set_fullscreen(false);
+        game.window().set_fullscreen(fullscreen);
+        let _ = game.show();
+    } else {
+        let _ = game.hide();
+        game.window().set_fullscreen(false);
+        ui.window().set_fullscreen(fullscreen);
+    }
+}
+
+fn indexed_image(width: u32, height: u32, indexed: &[u8]) -> Image {
+    let mut pixels = SharedPixelBuffer::<Rgba8Pixel>::new(width, height);
+    for (target, color) in pixels.make_mut_slice().iter_mut().zip(indexed) {
+        let [r, g, b] = templeos_compat::graphics::palette_rgb(*color);
+        *target = Rgba8Pixel { r, g, b, a: 255 };
+    }
+    Image::from_rgba8(pixels)
+}
+
+fn append_line(target: &mut String, text: &str) {
+    target.push_str(text);
+    if !text.ends_with('\n') {
+        target.push('\n');
+    }
+}
+
+fn parse_menu(source: &str) -> Vec<MenuItem> {
+    let mut result = Vec::new();
+    let mut rest = source;
+    while let Some(open) = rest.find('{') {
+        let title = rest[..open].split_whitespace().last().unwrap_or("Menu");
+        let after = &rest[open + 1..];
+        let Some(close) = after.find('}') else {
+            break;
+        };
+        let body = &after[..close];
+        let mut added = false;
+        for declaration in body
+            .split(';')
+            .map(str::trim)
+            .filter(|item| !item.is_empty())
+        {
+            let label = declaration.split('(').next().unwrap_or(declaration).trim();
+            let key = menu_key(declaration);
+            result.push(MenuItem {
+                label: format!("{title} · {label}").into(),
+                command: key.map_or_else(SharedString::default, |(ch, scan)| {
+                    format!("{ch}:{scan}").into()
+                }),
+                enabled: key.is_some(),
+            });
+            added = true;
+        }
+        if !added {
+            result.push(MenuItem {
+                label: title.into(),
+                command: SharedString::default(),
+                enabled: false,
+            });
+        }
+        rest = &after[close + 1..];
+    }
+    result
+}
+
+fn menu_key(declaration: &str) -> Option<(i64, i64)> {
+    if declaration.contains("CH_SHIFT_ESC") {
+        Some((0x1c, 1 << 9))
+    } else if declaration.contains("CH_ESC") {
+        Some((0x1b, 0))
+    } else if declaration.contains("SC_CURSOR_UP") {
+        Some((0, 0x48))
+    } else if declaration.contains("SC_CURSOR_DOWN") {
+        Some((0, 0x50))
+    } else if declaration.contains("SC_CURSOR_LEFT") {
+        Some((0, 0x4b))
+    } else if declaration.contains("SC_CURSOR_RIGHT") {
+        Some((0, 0x4d))
+    } else {
+        None
+    }
+}
+
+fn decode_menu_command(command: &str) -> Option<(i64, i64)> {
+    let (ch, scan) = command.split_once(':')?;
+    Some((ch.parse().ok()?, scan.parse().ok()?))
 }
 
 fn text_key_events(
@@ -821,192 +1167,70 @@ fn text_key_events(
         .filter_map(move |ch| ascii_key_event(ch, shift, ctrl, alt))
 }
 
-fn map_printable_key(key: egui::Key, shift: bool, ctrl: bool, alt: bool) -> Option<(i64, i64)> {
-    let ch = match key {
-        egui::Key::A => 'a',
-        egui::Key::B => 'b',
-        egui::Key::C => 'c',
-        egui::Key::D => 'd',
-        egui::Key::E => 'e',
-        egui::Key::F => 'f',
-        egui::Key::G => 'g',
-        egui::Key::H => 'h',
-        egui::Key::I => 'i',
-        egui::Key::J => 'j',
-        egui::Key::K => 'k',
-        egui::Key::L => 'l',
-        egui::Key::M => 'm',
-        egui::Key::N => 'n',
-        egui::Key::O => 'o',
-        egui::Key::P => 'p',
-        egui::Key::Q => 'q',
-        egui::Key::R => 'r',
-        egui::Key::S => 's',
-        egui::Key::T => 't',
-        egui::Key::U => 'u',
-        egui::Key::V => 'v',
-        egui::Key::W => 'w',
-        egui::Key::X => 'x',
-        egui::Key::Y => 'y',
-        egui::Key::Z => 'z',
-        egui::Key::Num0 => '0',
-        egui::Key::Num1 => '1',
-        egui::Key::Num2 => '2',
-        egui::Key::Num3 => '3',
-        egui::Key::Num4 => '4',
-        egui::Key::Num5 => '5',
-        egui::Key::Num6 => '6',
-        egui::Key::Num7 => '7',
-        egui::Key::Num8 => '8',
-        egui::Key::Num9 => '9',
-        egui::Key::Colon => ':',
-        egui::Key::Comma => ',',
-        egui::Key::Backslash | egui::Key::IntlBackslash => '\\',
-        egui::Key::Slash => '/',
-        egui::Key::Pipe => '|',
-        egui::Key::Questionmark => '?',
-        egui::Key::Exclamationmark => '!',
-        egui::Key::OpenBracket => '[',
-        egui::Key::CloseBracket => ']',
-        egui::Key::OpenCurlyBracket => '{',
-        egui::Key::CloseCurlyBracket => '}',
-        egui::Key::Backtick => '`',
-        egui::Key::Minus => '-',
-        egui::Key::Period => '.',
-        egui::Key::Plus => '+',
-        egui::Key::Equals => '=',
-        egui::Key::Semicolon => ';',
-        egui::Key::Quote => '\'',
-        _ => return None,
-    };
-    ascii_key_event(ch, shift, ctrl, alt)
+fn key_text(key: Key) -> SharedString {
+    key.into()
 }
 
-fn map_special_key(key: egui::Key, shift: bool, ctrl: bool, alt: bool) -> Option<(i64, i64)> {
+fn map_slint_special_key(text: &str, shift: bool, ctrl: bool, alt: bool) -> Option<(i64, i64)> {
     let flags = scan_flags(shift, ctrl, alt);
-    match key {
-        egui::Key::Escape if shift => Some((0x1c, 0x01 | flags)),
-        egui::Key::Escape => Some((0x1b, 0x01 | flags)),
-        egui::Key::Tab => Some((b'\t' as i64, 0x0f | flags)),
-        egui::Key::Backspace => Some((0x08, 0x0e | flags)),
-        egui::Key::Enter => Some((b'\n' as i64, 0x1c | flags)),
-        egui::Key::Space if shift => Some((0x1f, 0x39 | flags)),
-        egui::Key::Space => Some((b' ' as i64, 0x39 | flags)),
-        egui::Key::Home => Some((0, 0x47 | flags)),
-        egui::Key::ArrowUp => Some((0, 0x48 | flags)),
-        egui::Key::PageUp => Some((0, 0x49 | flags)),
-        egui::Key::ArrowDown => Some((0, 0x50 | flags)),
-        egui::Key::PageDown => Some((0, 0x51 | flags)),
-        egui::Key::Insert => Some((0, 0x52 | flags)),
-        egui::Key::Delete => Some((0, 0x53 | flags)),
-        egui::Key::ArrowLeft => Some((0, 0x4b | flags)),
-        egui::Key::ArrowRight => Some((0, 0x4d | flags)),
-        egui::Key::End => Some((0, 0x4f | flags)),
-        egui::Key::F1 => Some((0, 0x3b | flags)),
-        egui::Key::F2 => Some((0, 0x3c | flags)),
-        egui::Key::F3 => Some((0, 0x3d | flags)),
-        egui::Key::F4 => Some((0, 0x3e | flags)),
-        egui::Key::F5 => Some((0, 0x3f | flags)),
-        egui::Key::F6 => Some((0, 0x40 | flags)),
-        egui::Key::F7 => Some((0, 0x41 | flags)),
-        egui::Key::F8 => Some((0, 0x42 | flags)),
-        egui::Key::F9 => Some((0, 0x43 | flags)),
-        egui::Key::F10 => Some((0, 0x44 | flags)),
-        egui::Key::F11 => Some((0, 0x57 | flags)),
-        egui::Key::F12 => Some((0, 0x58 | flags)),
-        egui::Key::ShiftLeft | egui::Key::ShiftRight => Some((0, 0x2a | flags)),
-        egui::Key::ControlLeft | egui::Key::ControlRight => Some((0, 0x1d | flags)),
-        egui::Key::AltLeft | egui::Key::AltRight => Some((0, 0x38 | flags)),
-        _ => None,
+    let is = |key| key_text(key).as_str() == text;
+    if is(Key::Escape) {
+        Some((if shift { 0x1c } else { 0x1b }, 0x01 | flags))
+    } else if is(Key::Tab) || is(Key::Backtab) {
+        Some((b'\t' as i64, 0x0f | flags))
+    } else if is(Key::Backspace) {
+        Some((0x08, 0x0e | flags))
+    } else if is(Key::Return) {
+        Some((b'\n' as i64, 0x1c | flags))
+    } else if is(Key::Space) {
+        Some((if shift { 0x1f } else { b' ' as i64 }, 0x39 | flags))
+    } else if is(Key::Home) {
+        Some((0, 0x47 | flags))
+    } else if is(Key::UpArrow) {
+        Some((0, 0x48 | flags))
+    } else if is(Key::PageUp) {
+        Some((0, 0x49 | flags))
+    } else if is(Key::LeftArrow) {
+        Some((0, 0x4b | flags))
+    } else if is(Key::RightArrow) {
+        Some((0, 0x4d | flags))
+    } else if is(Key::End) {
+        Some((0, 0x4f | flags))
+    } else if is(Key::DownArrow) {
+        Some((0, 0x50 | flags))
+    } else if is(Key::PageDown) {
+        Some((0, 0x51 | flags))
+    } else if is(Key::Insert) {
+        Some((0, 0x52 | flags))
+    } else if is(Key::Delete) {
+        Some((0, 0x53 | flags))
+    } else if is(Key::F1) {
+        Some((0, 0x3b | flags))
+    } else if is(Key::F2) {
+        Some((0, 0x3c | flags))
+    } else if is(Key::F3) {
+        Some((0, 0x3d | flags))
+    } else if is(Key::F4) {
+        Some((0, 0x3e | flags))
+    } else if is(Key::F5) {
+        Some((0, 0x3f | flags))
+    } else if is(Key::F6) {
+        Some((0, 0x40 | flags))
+    } else if is(Key::F7) {
+        Some((0, 0x41 | flags))
+    } else if is(Key::F8) {
+        Some((0, 0x42 | flags))
+    } else if is(Key::F9) {
+        Some((0, 0x43 | flags))
+    } else if is(Key::F10) {
+        Some((0, 0x44 | flags))
+    } else if is(Key::F11) {
+        Some((0, 0x57 | flags))
+    } else if is(Key::F12) {
+        Some((0, 0x58 | flags))
+    } else {
+        None
     }
-}
-
-impl eframe::App for SanctumApp {
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        let ctx = ui.ctx().clone();
-        self.poll_runner(&ctx);
-        egui::CentralPanel::default().show(ui, |ui| {
-            if self.runner.is_some() {
-                self.runner_ui(ui);
-            } else {
-                self.library_ui(ui);
-            }
-            ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
-                ui.label(&self.status);
-            });
-        });
-        self.dialogs(&ctx);
-    }
-
-    fn on_exit(&mut self) {
-        if let Some(runner) = &mut self.runner {
-            runner.kill();
-        }
-        self.persist();
-    }
-}
-
-fn canvas_focus_filter() -> egui::EventFilter {
-    egui::EventFilter {
-        tab: true,
-        horizontal_arrows: true,
-        vertical_arrows: true,
-        escape: true,
-    }
-}
-
-fn configure_style(ctx: &egui::Context) {
-    let mut visuals = egui::Visuals::dark();
-    visuals.panel_fill = Color32::from_rgb(9, 20, 31);
-    visuals.window_fill = Color32::from_rgb(15, 32, 47);
-    visuals.selection.bg_fill = Color32::from_rgb(30, 125, 145);
-    visuals.hyperlink_color = Color32::from_rgb(85, 255, 255);
-    ctx.set_visuals(visuals);
-}
-
-fn menu_bar(ui: &mut egui::Ui, source: &str, mut send: impl FnMut(i64, i64)) {
-    egui::MenuBar::new().ui(ui, |ui| {
-        let mut rest = source;
-        while let Some(open) = rest.find('{') {
-            let title = rest[..open].split_whitespace().last().unwrap_or("Menu");
-            let after = &rest[open + 1..];
-            let Some(close) = after.find('}') else { break };
-            let body = &after[..close];
-            ui.menu_button(title, |ui| {
-                for declaration in body
-                    .split(';')
-                    .map(str::trim)
-                    .filter(|item| !item.is_empty())
-                {
-                    let label = declaration.split('(').next().unwrap_or(declaration).trim();
-                    let key = if declaration.contains("CH_SHIFT_ESC") {
-                        Some((0x1c, 1 << 9))
-                    } else if declaration.contains("CH_ESC") {
-                        Some((0x1b, 0))
-                    } else if declaration.contains("SC_CURSOR_UP") {
-                        Some((0, 0x48))
-                    } else if declaration.contains("SC_CURSOR_DOWN") {
-                        Some((0, 0x50))
-                    } else if declaration.contains("SC_CURSOR_LEFT") {
-                        Some((0, 0x4b))
-                    } else if declaration.contains("SC_CURSOR_RIGHT") {
-                        Some((0, 0x4d))
-                    } else {
-                        None
-                    };
-                    if ui
-                        .add_enabled(key.is_some(), egui::Button::new(label))
-                        .clicked()
-                        && let Some((ch, scan)) = key
-                    {
-                        send(ch, scan);
-                        ui.close();
-                    }
-                }
-            });
-            rest = &after[close + 1..];
-        }
-    });
 }
 
 fn copy_tree(source: &Path, destination: &Path) -> std::io::Result<()> {
@@ -1107,63 +1331,30 @@ mod tests {
     use super::*;
 
     #[test]
-    fn game_canvas_keeps_focus_for_templeos_control_keys() {
-        let filter = canvas_focus_filter();
-        assert!(filter.tab);
-        assert!(filter.horizontal_arrows);
-        assert!(filter.vertical_arrows);
-        assert!(filter.escape);
-    }
-
-    #[test]
     fn maps_templeos_special_keys_and_modifiers() {
         assert_eq!(
-            map_special_key(egui::Key::Escape, false, false, false),
+            map_slint_special_key(key_text(Key::Escape).as_str(), false, false, false),
             Some((0x1b, 0x01))
         );
         assert_eq!(
-            map_special_key(egui::Key::Escape, true, false, false),
+            map_slint_special_key(key_text(Key::Escape).as_str(), true, false, false),
             Some((0x1c, 0x01 | SCF_SHIFT))
         );
         assert_eq!(
-            map_special_key(egui::Key::Enter, false, true, false),
+            map_slint_special_key(key_text(Key::Return).as_str(), false, true, false),
             Some((b'\n' as i64, 0x1c | SCF_CTRL))
         );
         assert_eq!(
-            map_special_key(egui::Key::Space, false, false, true),
+            map_slint_special_key(key_text(Key::Space).as_str(), false, false, true),
             Some((b' ' as i64, 0x39 | SCF_ALT))
         );
         assert_eq!(
-            map_special_key(egui::Key::ArrowUp, true, true, true),
+            map_slint_special_key(key_text(Key::UpArrow).as_str(), true, true, true),
             Some((0, 0x48 | (7 << 9)))
         );
         assert_eq!(
-            map_special_key(egui::Key::ArrowDown, false, false, false),
-            Some((0, 0x50))
-        );
-        assert_eq!(
-            map_special_key(egui::Key::ArrowLeft, false, false, false),
-            Some((0, 0x4b))
-        );
-        assert_eq!(
-            map_special_key(egui::Key::ArrowRight, false, false, false),
-            Some((0, 0x4d))
-        );
-        assert_eq!(
-            map_special_key(egui::Key::Home, false, true, false),
-            Some((0, 0x47 | SCF_CTRL))
-        );
-        assert_eq!(
-            map_special_key(egui::Key::Delete, true, false, false),
-            Some((0, 0x53 | SCF_SHIFT))
-        );
-        assert_eq!(
-            map_special_key(egui::Key::F12, false, false, true),
+            map_slint_special_key(key_text(Key::F12).as_str(), false, false, true),
             Some((0, 0x58 | SCF_ALT))
-        );
-        assert_eq!(
-            map_special_key(egui::Key::Space, true, false, false),
-            Some((0x1f, 0x39 | SCF_SHIFT))
         );
     }
 
@@ -1180,18 +1371,14 @@ mod tests {
     }
 
     #[test]
-    fn maps_printable_keys_with_modifiers() {
+    fn parses_supported_menu_actions() {
+        let menu = parse_menu("File { Exit(CH_ESC); } Play { Up(SC_CURSOR_UP); Other(); }");
+        assert_eq!(menu.len(), 3);
+        assert!(menu[0].enabled);
         assert_eq!(
-            map_printable_key(egui::Key::C, false, true, false),
-            Some((3, 0x2e | SCF_CTRL))
+            decode_menu_command(menu[0].command.as_str()),
+            Some((0x1b, 0))
         );
-        assert_eq!(
-            map_printable_key(egui::Key::Z, false, false, true),
-            Some((b'z' as i64, 0x2c | SCF_ALT))
-        );
-        assert_eq!(
-            map_printable_key(egui::Key::Questionmark, false, false, true),
-            Some((b'?' as i64, 0x35 | SCF_SHIFT | SCF_ALT))
-        );
+        assert!(!menu[2].enabled);
     }
 }

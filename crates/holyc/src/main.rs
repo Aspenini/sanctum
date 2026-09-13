@@ -7,7 +7,7 @@ fn main() -> ExitCode {
     let args = env::args().skip(1).collect::<Vec<_>>();
     if args.is_empty() || args.iter().any(|a| a == "-h" || a == "--help") {
         eprintln!(
-            "holyc -- HolyC compiler\n\n  holyc [--run] [--cores N] [-I dir] <file.HC>\n  holyc --eval '<source>'\n"
+            "holycc -- HolyC compiler\n\n  holycc [--run] [--cores N] [-I dir] <file.HC>\n  holycc --eval '<source>'\n"
         );
         return ExitCode::SUCCESS;
     }

@@ -14,10 +14,13 @@ holyc = { path = "../holyc" }
 holyc-syntax = { path = "../holyc-syntax" }
 templeos-compat = { path = "../templeos-compat" }
 directories.workspace = true
-eframe.workspace = true
 image.workspace = true
 rfd.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+slint.workspace = true
 thiserror.workspace = true
 uuid.workspace = true
+
+[build-dependencies]
+slint-build.workspace = true
