@@ -3429,7 +3429,6 @@ dependencies = [
  "serde_json",
  "templeos-compat",
  "thiserror 2.0.20",
- "tos-redsea",
  "uuid",
 ]
 

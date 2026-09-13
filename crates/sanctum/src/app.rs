@@ -4,8 +4,6 @@ use eframe::egui::{self, Color32, TextureHandle, TextureOptions};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, mpsc};
 #[cfg(test)]
 use templeos_compat::host::input::{SCF_ALT, SCF_CTRL, SCF_SHIFT};
 use templeos_compat::host::input::{ascii_key_event, scan_flags};
@@ -23,11 +21,6 @@ enum Sort {
     Title,
     Recent,
     Added,
-}
-
-enum InstallEvent {
-    Progress(u64, u64, PathBuf),
-    Done(Result<PathBuf, String>),
 }
 
 pub struct SanctumApp {
@@ -52,9 +45,6 @@ pub struct SanctumApp {
     fullscreen: bool,
     pending_restart: Option<Uuid>,
     pending_storage: Option<StorageMode>,
-    install_rx: Option<mpsc::Receiver<InstallEvent>>,
-    install_cancel: Option<Arc<AtomicBool>>,
-    install_progress: Option<(u64, u64, String)>,
 }
 
 impl SanctumApp {
@@ -67,9 +57,6 @@ impl SanctumApp {
         } else {
             StorageMode::PerUser
         };
-        if config.templeos_root.is_none() && paths.templeos.join("Kernel/KernelA.HH").is_file() {
-            config.templeos_root = Some(paths.templeos.clone());
-        }
         Self {
             paths,
             config,
@@ -95,9 +82,6 @@ impl SanctumApp {
             fullscreen: false,
             pending_restart: None,
             pending_storage: None,
-            install_rx: None,
-            install_cancel: None,
-            install_progress: None,
         }
     }
 
@@ -310,90 +294,6 @@ impl SanctumApp {
             item.cover = Some(path);
             self.persist();
         }
-    }
-
-    fn poll_install(&mut self) {
-        let mut messages = Vec::new();
-        if let Some(rx) = &self.install_rx {
-            while let Ok(message) = rx.try_recv() {
-                messages.push(message);
-            }
-        }
-        for message in messages {
-            match message {
-                InstallEvent::Progress(done, total, path) => {
-                    self.install_progress = Some((done, total, path.display().to_string()));
-                }
-                InstallEvent::Done(result) => {
-                    self.install_progress = None;
-                    self.install_rx = None;
-                    self.install_cancel = None;
-                    match result {
-                        Ok(root) => {
-                            self.config.templeos_root = Some(root);
-                            self.status = "TempleOS installed".into();
-                            self.persist();
-                        }
-                        Err(error) => self.status = format!("ISO import failed: {error}"),
-                    }
-                }
-            }
-        }
-    }
-
-    fn install_iso(&mut self, iso: PathBuf) {
-        if self.install_rx.is_some() {
-            return;
-        }
-        let root = self.paths.templeos.clone();
-        let (tx, rx) = mpsc::channel();
-        let cancelled = Arc::new(AtomicBool::new(false));
-        let extraction_cancelled = cancelled.clone();
-        self.install_rx = Some(rx);
-        self.install_cancel = Some(cancelled);
-        self.status = "Inspecting TempleOS ISO".into();
-        std::thread::spawn(move || {
-            let staging = root.with_extension("installing");
-            let previous = root.with_extension("previous");
-            let _ = fs::remove_dir_all(&staging);
-            let result =
-                tos_redsea::extract_iso(&iso, &staging, &extraction_cancelled, |progress| {
-                    let _ = tx.send(InstallEvent::Progress(
-                        progress.files_done,
-                        progress.files_total,
-                        progress.path,
-                    ));
-                })
-                .map_err(|error| error.to_string())
-                .and_then(|info| {
-                    if !staging.join("Kernel/KernelA.HH").is_file() {
-                        return Err("ISO did not contain Kernel/KernelA.HH".into());
-                    }
-                    let manifest = serde_json::json!({
-                        "version": 1,
-                        "iso_sha256": info.sha256,
-                        "iso_size": info.image_size,
-                        "filesystem_offset": info.filesystem_offset,
-                        "file_count": info.file_count,
-                        "imported_at": model::now(),
-                    });
-                    fs::write(
-                        staging.join("sanctum-install.json"),
-                        serde_json::to_vec_pretty(&manifest).map_err(|error| error.to_string())?,
-                    )
-                    .map_err(|error| error.to_string())?;
-                    let _ = fs::remove_dir_all(&previous);
-                    if root.exists() {
-                        fs::rename(&root, &previous).map_err(|error| error.to_string())?;
-                    }
-                    fs::rename(&staging, &root).map_err(|error| error.to_string())?;
-                    Ok(root)
-                });
-            if result.is_err() {
-                let _ = fs::remove_dir_all(&staging);
-            }
-            let _ = tx.send(InstallEvent::Done(result));
-        });
     }
 
     fn import_cover(&mut self, id: Uuid) {
@@ -813,18 +713,12 @@ impl SanctumApp {
                     } else {
                         ui.label("TempleOS files: not installed (optional for self-contained programs)");
                     }
-                    if ui.button("Import TempleOS ISO…").clicked()
-                        && let Some(iso) = rfd::FileDialog::new()
-                            .add_filter("TempleOS ISO", &["ISO", "iso"])
-                            .pick_file()
-                    {
-                        self.install_iso(iso);
-                    }
-                    if ui.button("Use extracted TempleOS folder…").clicked()
+                    if ui.button("Choose extracted TempleOS folder…").clicked()
                         && let Some(root) = rfd::FileDialog::new().pick_folder()
                     {
                         if root.join("Kernel/KernelA.HH").is_file() {
                             self.config.templeos_root = Some(root);
+                            self.status = "TempleOS folder selected".into();
                             self.persist();
                         } else {
                             self.status = "That folder is not a TempleOS root".into();
@@ -867,17 +761,6 @@ impl SanctumApp {
                         response.on_disabled_hover_text(
                             "The executable directory is not writable, so portable mode is unavailable.",
                         );
-                    }
-                    if let Some((done, total, path)) = &self.install_progress {
-                        ui.add(
-                            egui::ProgressBar::new(*done as f32 / (*total).max(1) as f32)
-                                .text(path),
-                        );
-                        if ui.button("Cancel installation").clicked()
-                            && let Some(cancelled) = &self.install_cancel
-                        {
-                            cancelled.store(true, Ordering::Release);
-                        }
                     }
                 });
             self.show_settings = open;
@@ -1042,7 +925,6 @@ impl eframe::App for SanctumApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         self.poll_runner(&ctx);
-        self.poll_install();
         egui::CentralPanel::default().show(ui, |ui| {
             if self.runner.is_some() {
                 self.runner_ui(ui);

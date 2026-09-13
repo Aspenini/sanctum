@@ -16,8 +16,8 @@ Windows, Linux, and macOS. It has three related layers:
 
 The project does not contain, download, or redistribute TempleOS. Self-contained
 HolyC programs run without an ISO. Programs that use `::/` includes or other OS
-resources need a locally supplied TempleOS ISO, which Sanctum can safely extract
-to application storage from Settings.
+resources need an extracted TempleOS directory selected from Settings. Sanctum
+does not accept, copy, download, or extract ISO images.
 
 ## Run Sanctum
 
@@ -31,11 +31,11 @@ actions, keyboard input, sound controls, logs, fullscreen mode, and graceful
 Stop/Restart controls. A populated rendered frame can automatically become a
 game's 4:3 library cover.
 
-Settings, library metadata, covers, registry saves, and the extracted TempleOS
-tree normally live in the platform user-data directory. Portable mode can move
-Sanctum-owned data into `SanctumData` beside the executable when that location
-is writable. Imported HolyC projects always remain in place and are never
-copied or modified.
+Settings, library metadata, covers, and registry saves normally live in the
+platform user-data directory. Portable mode can move Sanctum-owned data into
+`SanctumData` beside the executable when that location is writable. Imported
+HolyC projects and the selected TempleOS directory always remain in place and
+are never copied or modified.
 
 ## Run the compiler
 

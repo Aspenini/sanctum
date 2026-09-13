@@ -132,7 +132,6 @@ pub struct StoragePaths {
     pub root: PathBuf,
     pub config: PathBuf,
     pub covers: PathBuf,
-    pub templeos: PathBuf,
     pub portable: bool,
     pub executable_dir: PathBuf,
 }
@@ -155,7 +154,6 @@ impl StoragePaths {
         Ok(Self {
             config: root.join("sanctum.json"),
             covers: root.join("covers"),
-            templeos: root.join("TempleOS"),
             root,
             portable,
             executable_dir,
@@ -256,7 +254,6 @@ mod tests {
         let paths = StoragePaths {
             config: root.join("sanctum.json"),
             covers: root.join("covers"),
-            templeos: root.join("TempleOS"),
             root: root.clone(),
             portable: true,
             executable_dir: root.clone(),
@@ -291,7 +288,6 @@ mod tests {
         let paths = StoragePaths {
             config: root.join("sanctum.json"),
             covers: root.join("covers"),
-            templeos: root.join("TempleOS"),
             root: root.clone(),
             portable: true,
             executable_dir: root.clone(),
