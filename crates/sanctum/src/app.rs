@@ -693,6 +693,15 @@ impl SanctumApp {
                 self.focus_canvas_on_frame = false;
             }
             canvas_has_focus = response.has_focus();
+            if canvas_has_focus {
+                // The running program owns its navigation keys while the canvas is
+                // focused. Without this filter egui treats each arrow press as GUI
+                // focus navigation, so the first control input moves focus away
+                // from the game and the next one requires another mouse click.
+                ui.memory_mut(|memory| {
+                    memory.set_focus_lock_filter(response.id, canvas_focus_filter());
+                });
+            }
         } else {
             ui.centered_and_justified(|ui| {
                 ui.spinner();
@@ -1055,6 +1064,15 @@ impl eframe::App for SanctumApp {
     }
 }
 
+fn canvas_focus_filter() -> egui::EventFilter {
+    egui::EventFilter {
+        tab: true,
+        horizontal_arrows: true,
+        vertical_arrows: true,
+        escape: true,
+    }
+}
+
 fn configure_style(ctx: &egui::Context) {
     let mut visuals = egui::Visuals::dark();
     visuals.panel_fill = Color32::from_rgb(9, 20, 31);
@@ -1205,6 +1223,15 @@ fn migrate_storage(paths: &StoragePaths, portable: bool) -> std::io::Result<()> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn game_canvas_keeps_focus_for_templeos_control_keys() {
+        let filter = canvas_focus_filter();
+        assert!(filter.tab);
+        assert!(filter.horizontal_arrows);
+        assert!(filter.vertical_arrows);
+        assert!(filter.escape);
+    }
 
     #[test]
     fn maps_templeos_special_keys_and_modifiers() {
