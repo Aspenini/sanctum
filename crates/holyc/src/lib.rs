@@ -224,6 +224,28 @@ Main;
     }
 
     #[test]
+    fn three_dimensional_symmetry_and_arrows_are_callable_from_holyc() {
+        tos_runtime::capture_begin();
+        run_source(
+            "graphics_3d_calls.HC",
+            r#"
+U0 Main()
+{
+  CDC *dc=DCNew(32,32,NULL,FALSE);
+  dc->color=15;
+  I64 symmetry=DCSymmetry3Set(dc,0,0,0,1,0,0,0,1,0);
+  I64 changed=GrArrow3(dc,2,16,0,24,16,0,2.75,1,0);
+  "%d %d\n",symmetry,changed>0;
+  DCDel(dc);
+}
+Main;
+"#,
+        )
+        .unwrap();
+        assert_eq!(tos_runtime::capture_take().unwrap(), b"1 1\n");
+    }
+
+    #[test]
     fn adjacent_strings_are_concatenated() {
         tos_runtime::capture_begin();
         run_source(

@@ -154,8 +154,10 @@ pub fn jit_symbols() -> Vec<(&'static str, *const u8)> {
         ("tos_DCMat4x4Set", tos_DCMat4x4Set as *const u8),
         ("tos_DCTransform", tos_DCTransform as *const u8),
         ("tos_DCSymmetrySet", tos_DCSymmetrySet as *const u8),
+        ("tos_DCSymmetry3Set", tos_DCSymmetry3Set as *const u8),
         ("tos_DCClipLine", tos_DCClipLine as *const u8),
         ("tos_GrLine3", tos_GrLine3 as *const u8),
+        ("tos_GrArrow3", tos_GrArrow3 as *const u8),
         ("tos_GrFillPoly3", tos_GrFillPoly3 as *const u8),
         ("tos_GrBlot", tos_GrBlot as *const u8),
         ("tos_GrPrint", tos_GrPrint as *const u8),
@@ -376,6 +378,82 @@ pub unsafe extern "C" fn tos_DCSymmetrySet(
         (*dc).sym_nx = nx / magnitude;
         (*dc).sym_ny = ny / magnitude;
         (*dc).sym_nz = 0.0;
+    }
+    1
+}
+
+#[unsafe(no_mangle)]
+/// Set the reflection plane from three points, matching TempleOS
+/// `DCSymmetry3Set`.
+///
+/// # Safety
+///
+/// `dc` must be null or point to a live device context.
+pub unsafe extern "C" fn tos_DCSymmetry3Set(
+    dc: *mut CDC,
+    x1: i64,
+    y1: i64,
+    z1: i64,
+    x2: i64,
+    y2: i64,
+    z2: i64,
+    x3: i64,
+    y3: i64,
+    z3: i64,
+) -> i64 {
+    let Some(ctx) = (unsafe { dc.as_ref() }) else {
+        return 0;
+    };
+    let flags = ctx.flags;
+    let matrix_ptr = ctx.r;
+    let transform = ctx.transform;
+    let a = (
+        x1 as f64 - x2 as f64,
+        y1 as f64 - y2 as f64,
+        z1 as f64 - z2 as f64,
+    );
+    let b = (
+        x3 as f64 - x2 as f64,
+        y3 as f64 - y2 as f64,
+        z3 as f64 - z2 as f64,
+    );
+    let mut normal = (
+        a.1 * b.2 - a.2 * b.1,
+        a.2 * b.0 - a.0 * b.2,
+        a.0 * b.1 - a.1 * b.0,
+    );
+    if flags & DCF_TRANSFORMATION != 0 && !matrix_ptr.is_null() {
+        let matrix = unsafe { &*matrix_ptr.cast::<[i64; 16]>() };
+        let scale = (1_u64 << 32) as f64;
+        normal = (
+            normal.0 * matrix[0] as f64 / scale
+                + normal.1 * matrix[1] as f64 / scale
+                + normal.2 * matrix[2] as f64 / scale,
+            normal.0 * matrix[4] as f64 / scale
+                + normal.1 * matrix[5] as f64 / scale
+                + normal.2 * matrix[6] as f64 / scale,
+            normal.0 * matrix[8] as f64 / scale
+                + normal.1 * matrix[9] as f64 / scale
+                + normal.2 * matrix[10] as f64 / scale,
+        );
+    }
+    let magnitude = (normal.0 * normal.0 + normal.1 * normal.1 + normal.2 * normal.2).sqrt();
+    if magnitude == 0.0 || !magnitude.is_finite() {
+        return 0;
+    }
+    let (mut sx, mut sy, mut sz) = (x1, y1, z1);
+    if flags & DCF_TRANSFORMATION != 0
+        && let Some(transform) = transform
+    {
+        unsafe { transform(dc, &mut sx, &mut sy, &mut sz) };
+    }
+    unsafe {
+        (*dc).sym_x = sx.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32;
+        (*dc).sym_y = sy.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32;
+        (*dc).sym_z = sz.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32;
+        (*dc).sym_nx = normal.0 / magnitude;
+        (*dc).sym_ny = normal.1 / magnitude;
+        (*dc).sym_nz = normal.2 / magnitude;
     }
     1
 }
@@ -790,6 +868,83 @@ pub unsafe extern "C" fn tos_GrLine3(
     changed + unsafe { raster_line(dc, x1, y1, z1, x2, y2, z2, step, start) }
 }
 
+unsafe fn raster_arrow(
+    dc: *mut CDC,
+    x1: i64,
+    y1: i64,
+    z1: i64,
+    x2: i64,
+    y2: i64,
+    z2: i64,
+    width: f64,
+    step: i64,
+    start: i64,
+) -> i64 {
+    let mut changed = unsafe { raster_line(dc, x1, y1, z1, x2, y2, z2, step, start) };
+    let dx = x2 as f64 - x1 as f64;
+    let dy = y2 as f64 - y1 as f64;
+    let length = dx.hypot(dy);
+    if length != 0.0 {
+        let thick = unsafe { (*dc).thick.max(1) } as f64;
+        let scale = width * thick / length;
+        let back_x = x2 as f64 - dx * scale;
+        let back_y = y2 as f64 - dy * scale;
+        for side in [-1.0_f64, 1.0] {
+            let wing_x = (back_x + side * dy * scale).round() as i64;
+            let wing_y = (back_y - side * dx * scale).round() as i64;
+            changed += unsafe { raster_line(dc, wing_x, wing_y, z2, x2, y2, z2, step, 0) };
+        }
+    }
+    changed
+}
+
+#[unsafe(no_mangle)]
+/// Draw a transformed 3D arrow, including mirrored geometry when enabled.
+///
+/// # Safety
+///
+/// `dc` must be null or point to a live device context.
+pub unsafe extern "C" fn tos_GrArrow3(
+    dc: *mut CDC,
+    mut x1: i64,
+    mut y1: i64,
+    mut z1: i64,
+    mut x2: i64,
+    mut y2: i64,
+    mut z2: i64,
+    width: f64,
+    step: i64,
+    start: i64,
+) -> i64 {
+    let Some(ctx) = (unsafe { dc.as_ref() }) else {
+        return 0;
+    };
+    let flags = ctx.flags;
+    let transform = ctx.transform;
+    if flags & DCF_TRANSFORMATION != 0
+        && let Some(transform) = transform
+    {
+        unsafe {
+            transform(dc, &mut x1, &mut y1, &mut z1);
+            transform(dc, &mut x2, &mut y2, &mut z2);
+        }
+    }
+    let mut changed = 0;
+    if flags & DCF_SYMMETRY != 0 {
+        let (mut mx1, mut my1, mut mz1) = (x1, y1, z1);
+        let (mut mx2, mut my2, mut mz2) = (x2, y2, z2);
+        unsafe {
+            reflect(dc, &mut mx1, &mut my1, &mut mz1);
+            reflect(dc, &mut mx2, &mut my2, &mut mz2);
+            changed += raster_arrow(dc, mx1, my1, mz1, mx2, my2, mz2, width, step, start);
+        }
+        if flags & DCF_JUST_MIRROR != 0 {
+            return changed;
+        }
+    }
+    changed + unsafe { raster_arrow(dc, x1, y1, z1, x2, y2, z2, width, step, start) }
+}
+
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn tos_GrFillPoly3(dc: *mut CDC, n: i64, poly: *const CD3I32) -> i64 {
     if dc.is_null() || poly.is_null() || !(3..=4096).contains(&n) {
@@ -882,10 +1037,14 @@ pub unsafe extern "C" fn tos_GrPrint(
         unsafe { slice::from_raw_parts(argv, argc.clamp(0, 1024) as usize) }
     };
     let text = format_graphics_text(fmt, args);
+    unsafe { draw_text_literal(dc, x, y, 0, text.as_bytes()) }
+}
+
+unsafe fn draw_text_literal(dc: *mut CDC, x: i64, y: i64, z: i64, text: &[u8]) -> i64 {
     let mut cursor_x = x;
     let mut cursor_y = y;
     let mut changed = 0;
-    for byte in text.bytes() {
+    for &byte in text {
         match byte {
             b'\n' => {
                 cursor_x = x;
@@ -902,7 +1061,7 @@ pub unsafe extern "C" fn tos_GrPrint(
                     for column in 0..8 {
                         if bits & (1 << column) != 0 {
                             changed +=
-                                unsafe { plot(dc, cursor_x + column, cursor_y + row as i64, 0) }
+                                unsafe { plot(dc, cursor_x + column, cursor_y + row as i64, z) }
                                     as i64;
                         }
                     }
@@ -913,6 +1072,27 @@ pub unsafe extern "C" fn tos_GrPrint(
         }
     }
     changed
+}
+
+fn text_dimensions(text: &[u8]) -> (i64, i64) {
+    let mut column = 0_i64;
+    let mut max_column = 0_i64;
+    let mut lines = 1_i64;
+    for &byte in text {
+        match byte {
+            b'\n' => {
+                max_column = max_column.max(column);
+                column = 0;
+                lines += 1;
+            }
+            b'\t' => column = (column + 8) & !7,
+            _ => column += 1,
+        }
+    }
+    (
+        max_column.max(column) * tos_abi::FONT_WIDTH,
+        lines * tos_abi::FONT_HEIGHT,
+    )
 }
 
 fn pad_formatted(mut value: String, width: usize) -> String {
@@ -1136,6 +1316,32 @@ unsafe fn draw_mesh(dc: *mut CDC, x: i64, y: i64, z: i64, elem: *const u8, shift
     if !(0..=65_536).contains(&vertex_count) || !(0..=65_536).contains(&triangle_count) {
         return;
     }
+    let transformed = unsafe { (*dc).flags & DCF_TRANSFORMATION != 0 };
+    let screen_shift = shifted && transformed;
+    let old_color = unsafe { (*dc).color };
+    let old_translation = unsafe { ((*dc).x, (*dc).y, (*dc).z) };
+    if screen_shift {
+        unsafe {
+            (*dc).x = (*dc)
+                .x
+                .saturating_add(shift.0.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32);
+            (*dc).y = (*dc)
+                .y
+                .saturating_add(shift.1.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32);
+            (*dc).z = (*dc)
+                .z
+                .saturating_add(shift.2.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32);
+        }
+    }
+    let origin = if screen_shift {
+        (x, y, z)
+    } else {
+        (
+            x.saturating_add(shift.0),
+            y.saturating_add(shift.1),
+            z.saturating_add(shift.2),
+        )
+    };
     let vertices = unsafe { elem.add(base) };
     let triangles = unsafe { vertices.add(vertex_count as usize * 12) };
     for triangle in 0..triangle_count as usize {
@@ -1155,15 +1361,12 @@ unsafe fn draw_mesh(dc: *mut CDC, x: i64, y: i64, z: i64, elem: *const u8, shift
         let mut points = [CD3I32 { x: 0, y: 0, z: 0 }; 3];
         for (point, index) in points.iter_mut().zip(indices) {
             let vertex = unsafe { vertices.add(index as usize * 12) };
-            point.x = unsafe { sprite_i32(vertex, 0) }.saturating_add(
-                (x + shift.0).clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32,
-            );
-            point.y = unsafe { sprite_i32(vertex, 4) }.saturating_add(
-                (y + shift.1).clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32,
-            );
-            point.z = unsafe { sprite_i32(vertex, 8) }.saturating_add(
-                (z + shift.2).clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32,
-            );
+            point.x = unsafe { sprite_i32(vertex, 0) }
+                .saturating_add(origin.0.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32);
+            point.y = unsafe { sprite_i32(vertex, 4) }
+                .saturating_add(origin.1.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32);
+            point.z = unsafe { sprite_i32(vertex, 8) }
+                .saturating_add(origin.2.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32);
         }
         let transformed = points.map(|point| unsafe { transformed_point(dc, point) });
         let flags = unsafe { (*dc).flags };
@@ -1191,13 +1394,123 @@ unsafe fn draw_mesh(dc: *mut CDC, x: i64, y: i64, z: i64, elem: *const u8, shift
             fill_polygon_pixels(dc, &transformed);
         }
     }
+    unsafe {
+        (*dc).color = old_color;
+        if screen_shift {
+            ((*dc).x, (*dc).y, (*dc).z) = old_translation;
+        }
+    }
+}
+
+unsafe fn sprite_poly_point(dc: *mut CDC, x: i64, y: i64, z: i64, elem: *const u8) {
+    const X_OFFSETS: [i64; 8] = [-1, 0, 1, -1, 1, -1, 0, 1];
+    const Y_OFFSETS: [i64; 8] = [-1, -1, -1, 0, 0, 1, 1, 1];
+    let count = unsafe { sprite_i32(elem, 1) }.clamp(0, 1_000_000) as usize;
+    let mut px = x + i64::from(unsafe { sprite_i32(elem, 5) });
+    let mut py = y + i64::from(unsafe { sprite_i32(elem, 9) });
+    unsafe { sprite_plot(dc, px, py, z) };
+    for index in 0..count {
+        let bit = index * 3;
+        let mut direction = 0_u8;
+        for component in 0..3 {
+            let bit_index = bit + component;
+            let byte = unsafe { *elem.add(13 + bit_index / 8) };
+            direction |= ((byte >> (bit_index % 8)) & 1) << component;
+        }
+        px += X_OFFSETS[usize::from(direction)];
+        py += Y_OFFSETS[usize::from(direction)];
+        unsafe { sprite_plot(dc, px, py, z) };
+    }
+}
+
+unsafe fn sprite_text(dc: *mut CDC, x: i64, y: i64, z: i64, elem: *const u8, ty: u8) {
+    let mut tx = x + i64::from(unsafe { sprite_i32(elem, 1) });
+    let mut ty_pos = y + i64::from(unsafe { sprite_i32(elem, 5) });
+    let mut tz = z;
+    if unsafe { (*dc).flags & DCF_TRANSFORMATION != 0 }
+        && let Some(transform) = unsafe { (*dc).transform }
+    {
+        unsafe { transform(dc, &mut tx, &mut ty_pos, &mut tz) };
+    }
+    let text = unsafe { CStr::from_ptr(elem.add(9).cast()) }.to_bytes();
+    // TempleOS GrPrint3 transforms the anchor and then draws through its 2D
+    // text path, so the transformed depth is intentionally not retained.
+    let text_z = 0;
+    match ty {
+        27 => {
+            unsafe { draw_text_literal(dc, tx, ty_pos, text_z, text) };
+        }
+        28 => {
+            let (width, height) = text_dimensions(text);
+            unsafe {
+                draw_text_literal(dc, tx, ty_pos, text_z, text);
+                raster_line(
+                    dc,
+                    tx - 2,
+                    ty_pos - 2,
+                    text_z,
+                    tx + width + 2,
+                    ty_pos - 2,
+                    text_z,
+                    1,
+                    0,
+                );
+                raster_line(
+                    dc,
+                    tx + width + 2,
+                    ty_pos - 2,
+                    text_z,
+                    tx + width + 2,
+                    ty_pos + height + 2,
+                    text_z,
+                    1,
+                    0,
+                );
+                raster_line(
+                    dc,
+                    tx + width + 2,
+                    ty_pos + height + 2,
+                    text_z,
+                    tx - 2,
+                    ty_pos + height + 2,
+                    text_z,
+                    1,
+                    0,
+                );
+                raster_line(
+                    dc,
+                    tx - 2,
+                    ty_pos + height + 2,
+                    text_z,
+                    tx - 2,
+                    ty_pos - 2,
+                    text_z,
+                    1,
+                    0,
+                );
+            }
+        }
+        29 => {
+            let (width, height) = text_dimensions(text);
+            let dx = (width / 2 + 2).max(tos_abi::FONT_WIDTH + 2);
+            let dy = (height / 2 + tos_abi::FONT_HEIGHT + 2).max(tos_abi::FONT_HEIGHT + 2);
+            unsafe {
+                draw_text_literal(dc, tx - width / 2, ty_pos - height / 2, text_z, text);
+                raster_line(dc, tx, ty_pos - dy, text_z, tx + dx, ty_pos, text_z, 1, 0);
+                raster_line(dc, tx + dx, ty_pos, text_z, tx, ty_pos + dy, text_z, 1, 0);
+                raster_line(dc, tx, ty_pos + dy, text_z, tx - dx, ty_pos, text_z, 1, 0);
+                raster_line(dc, tx - dx, ty_pos, text_z, tx, ty_pos - dy, text_z, 1, 0);
+            }
+        }
+        _ => {}
+    }
 }
 
 unsafe fn draw_sprite(
     dc: *mut CDC,
     mut x: i64,
     mut y: i64,
-    z: i64,
+    mut z: i64,
     elems: *mut u8,
     just_one: bool,
 ) -> bool {
@@ -1207,6 +1520,16 @@ unsafe fn draw_sprite(
     let old_color = unsafe { (*dc).color };
     let old_thick = unsafe { (*dc).thick };
     let old_flags = unsafe { (*dc).flags };
+    let old_symmetry = unsafe {
+        (
+            (*dc).sym_x,
+            (*dc).sym_y,
+            (*dc).sym_z,
+            (*dc).sym_nx,
+            (*dc).sym_ny,
+            (*dc).sym_nz,
+        )
+    };
     let mut offset = 0usize;
     loop {
         let elem = unsafe { elems.add(offset) };
@@ -1231,14 +1554,28 @@ unsafe fn draw_sprite(
                 let y1 = y + i64::from(unsafe { sprite_i32(elem, 5) });
                 let x2 = x + i64::from(unsafe { sprite_i32(elem, 9) });
                 let y2 = y + i64::from(unsafe { sprite_i32(elem, 13) });
-                if unsafe { tos_DCSymmetrySet(dc, x1, y1, x2, y2) } != 0 {
+                if unsafe { tos_DCSymmetry3Set(dc, x1, y1, z, x2, y2, z, x2, y2, z + 1) } != 0 {
                     unsafe { (*dc).flags |= DCF_SYMMETRY };
                 } else {
                     unsafe { (*dc).flags &= !DCF_SYMMETRY };
                 }
             }
-            5 => unsafe { (*dc).flags |= DCF_TRANSFORMATION },
-            6 => unsafe { (*dc).flags &= !DCF_TRANSFORMATION },
+            5 => unsafe {
+                if (*dc).flags & DCF_TRANSFORMATION == 0 {
+                    x -= i64::from((*dc).x);
+                    y -= i64::from((*dc).y);
+                    z -= i64::from((*dc).z);
+                }
+                (*dc).flags |= DCF_TRANSFORMATION;
+            },
+            6 => unsafe {
+                if (*dc).flags & DCF_TRANSFORMATION != 0 {
+                    x += i64::from((*dc).x);
+                    y += i64::from((*dc).y);
+                    z += i64::from((*dc).z);
+                }
+                (*dc).flags &= !DCF_TRANSFORMATION;
+            },
             7 => {
                 x += i64::from(unsafe { sprite_i32(elem, 1) });
                 y += i64::from(unsafe { sprite_i32(elem, 5) });
@@ -1253,18 +1590,14 @@ unsafe fn draw_sprite(
                     )
                 };
             }
-            10 | 12 | 26 => {
+            9 => unsafe { sprite_poly_point(dc, x, y, z, elem) },
+            10 | 26 => {
                 let x1 = x + i64::from(unsafe { sprite_i32(elem, 1) });
                 let y1 = y + i64::from(unsafe { sprite_i32(elem, 5) });
                 let x2 = x + i64::from(unsafe { sprite_i32(elem, 9) });
                 let y2 = y + i64::from(unsafe { sprite_i32(elem, 13) });
-                if ty == 12 {
-                    unsafe {
-                        sprite_line(dc, x1, y1, z, x2, y1, z);
-                        sprite_line(dc, x2, y1, z, x2, y2, z);
-                        sprite_line(dc, x2, y2, z, x1, y2, z);
-                        sprite_line(dc, x1, y2, z, x1, y1, z);
-                    }
+                if ty == 26 {
+                    unsafe { tos_GrArrow3(dc, x1, y1, z, x2, y2, z, 2.75, 1, 0) };
                 } else {
                     unsafe { sprite_line(dc, x1, y1, z, x2, y2, z) };
                 }
@@ -1286,6 +1619,38 @@ unsafe fn draw_sprite(
                         )
                     };
                 }
+            }
+            12 | 13 => {
+                let x1 = x + i64::from(unsafe { sprite_i32(elem, 1) });
+                let y1 = y + i64::from(unsafe { sprite_i32(elem, 5) });
+                let width = i64::from(unsafe { sprite_i32(elem, 9) })
+                    - i64::from(unsafe { sprite_i32(elem, 1) });
+                let height = i64::from(unsafe { sprite_i32(elem, 13) })
+                    - i64::from(unsafe { sprite_i32(elem, 5) });
+                let angle = if ty == 13 {
+                    -f64::from_bits(unsafe { ptr::read_unaligned(elem.add(17).cast::<u64>()) })
+                } else {
+                    0.0
+                };
+                let (sin, cos) = angle.sin_cos();
+                let point = |px: i64, py: i64| CD3I32 {
+                    x: (x1 as f64 + px as f64 * cos - py as f64 * sin)
+                        .round()
+                        .clamp(f64::from(i32::MIN), f64::from(i32::MAX))
+                        as i32,
+                    y: (y1 as f64 + px as f64 * sin + py as f64 * cos)
+                        .round()
+                        .clamp(f64::from(i32::MIN), f64::from(i32::MAX))
+                        as i32,
+                    z: z.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32,
+                };
+                let rectangle = [
+                    point(0, 0),
+                    point(width, 0),
+                    point(width, height),
+                    point(0, height),
+                ];
+                unsafe { tos_GrFillPoly3(dc, 4, rectangle.as_ptr()) };
             }
             14..=16 => {
                 let cx = x + i64::from(unsafe { sprite_i32(elem, 1) });
@@ -1339,6 +1704,7 @@ unsafe fn draw_sprite(
             }
             24 => unsafe { draw_mesh(dc, x, y, z, elem, false) },
             25 => unsafe { draw_mesh(dc, x, y, z, elem, true) },
+            27..=29 => unsafe { sprite_text(dc, x, y, z, elem, ty) },
             _ => {}
         }
         if just_one {
@@ -1352,6 +1718,12 @@ unsafe fn draw_sprite(
     unsafe {
         (*dc).color = old_color;
         (*dc).thick = old_thick;
+        (*dc).sym_x = old_symmetry.0;
+        (*dc).sym_y = old_symmetry.1;
+        (*dc).sym_z = old_symmetry.2;
+        (*dc).sym_nx = old_symmetry.3;
+        (*dc).sym_ny = old_symmetry.4;
+        (*dc).sym_nz = old_symmetry.5;
         (*dc).flags = (*dc).flags & !(DCF_SYMMETRY | DCF_TRANSFORMATION)
             | old_flags & (DCF_SYMMETRY | DCF_TRANSFORMATION);
     }
@@ -1415,36 +1787,70 @@ unsafe fn mutate_sprite_points(
         if ty == 0 {
             break;
         }
-        let (base, count) = match ty {
-            24 => (9usize, unsafe { sprite_i32(elem, 1) }.max(0) as usize),
-            25 => (21usize, unsafe { sprite_i32(elem, 13) }.max(0) as usize),
-            _ => (0, 0),
-        };
-        for point in 0..count.min(65_536) {
-            let point = unsafe { elem.add(base + point * 12) };
+        let mut transform_at = |x_offset: usize, y_offset: usize, z_offset: Option<usize>| {
             let (mut x, mut y, mut z) = (
-                i64::from(unsafe { sprite_i32(point, 0) }),
-                i64::from(unsafe { sprite_i32(point, 4) }),
-                i64::from(unsafe { sprite_i32(point, 8) }),
+                i64::from(unsafe { sprite_i32(elem, x_offset) }),
+                i64::from(unsafe { sprite_i32(elem, y_offset) }),
+                z_offset
+                    .map(|offset| i64::from(unsafe { sprite_i32(elem, offset) }))
+                    .unwrap_or(0),
             );
             transform(&mut x, &mut y, &mut z);
             unsafe {
                 sprite_write_i32(
-                    point,
-                    0,
+                    elem,
+                    x_offset,
                     x.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32,
                 );
                 sprite_write_i32(
-                    point,
-                    4,
+                    elem,
+                    y_offset,
                     y.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32,
                 );
-                sprite_write_i32(
-                    point,
-                    8,
-                    z.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32,
-                );
+                if let Some(offset) = z_offset {
+                    sprite_write_i32(
+                        elem,
+                        offset,
+                        z.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32,
+                    );
+                }
             }
+        };
+        match ty {
+            4 | 10 | 26 => {
+                transform_at(9, 13, None);
+                transform_at(1, 5, None);
+            }
+            8 | 21 | 22 | 27..=29 => transform_at(1, 5, None),
+            11 => {
+                let count = unsafe { sprite_i32(elem, 1) }.max(0) as usize;
+                for point in 0..count.min(65_536) {
+                    transform_at(5 + point * 8, 9 + point * 8, None);
+                }
+            }
+            17..=20 => {
+                let count = unsafe { sprite_i32(elem, 1) }.max(0) as usize;
+                for point in 0..count.min(65_536) {
+                    let base = 5 + point * 12;
+                    transform_at(base, base + 4, Some(base + 8));
+                }
+            }
+            24 => {
+                let count = unsafe { sprite_i32(elem, 1) }.max(0) as usize;
+                for point in 0..count.min(65_536) {
+                    let base = 9 + point * 12;
+                    transform_at(base, base + 4, Some(base + 8));
+                }
+            }
+            25 => {
+                transform_at(1, 5, Some(9));
+                let count = unsafe { sprite_i32(elem, 13) }.max(0) as usize;
+                for point in 0..count.min(65_536) {
+                    let base = 21 + point * 12;
+                    transform_at(base, base + 4, Some(base + 8));
+                }
+            }
+            _ => {}
         }
         let Some(size) = (unsafe { sprite_element_size(elem) }) else {
             break;
@@ -1455,8 +1861,11 @@ unsafe fn mutate_sprite_points(
 
 #[unsafe(no_mangle)]
 pub extern "C" fn tos_SpriteInterpolate(t: f64, a: *mut u8, b: *mut u8) -> *mut u8 {
-    let result = unsafe { owned_sprite_copy(a) };
-    if result.is_null() || unsafe { sprite_len(a) } != unsafe { sprite_len(b) } {
+    let a_len = unsafe { sprite_len(a) };
+    let b_len = unsafe { sprite_len(b) };
+    let source = if t < 0.5 { a } else { b };
+    let result = unsafe { owned_sprite_copy(source) };
+    if result.is_null() || a_len.is_none() || a_len != b_len {
         return result;
     }
     unsafe {
@@ -1471,25 +1880,75 @@ pub extern "C" fn tos_SpriteInterpolate(t: f64, a: *mut u8, b: *mut u8) -> *mut 
             if ty == 0 || ty != (*be & 0x7f) {
                 break;
             }
-            let (base, count) = match ty {
-                24 => (9usize, sprite_i32(ae, 1).max(0) as usize),
-                25 => (21usize, sprite_i32(ae, 13).max(0) as usize),
-                _ => (0, 0),
+            let interpolate_i32 = |offset: usize| {
+                let from = sprite_i32(ae, offset);
+                let to = sprite_i32(be, offset);
+                let value = f64::from(from) + (f64::from(to) - f64::from(from)) * t;
+                sprite_write_i32(
+                    re,
+                    offset,
+                    value
+                        .round()
+                        .clamp(f64::from(i32::MIN), f64::from(i32::MAX)) as i32,
+                );
             };
-            for point in 0..count.min(65_536) {
-                for component in 0..3 {
-                    let at = sprite_i32(ae, base + point * 12 + component * 4);
-                    let bt = sprite_i32(be, base + point * 12 + component * 4);
-                    let value = f64::from(at) + (f64::from(bt) - f64::from(at)) * t;
-                    sprite_write_i32(
-                        re,
-                        base + point * 12 + component * 4,
-                        value
-                            .round()
-                            .clamp(f64::from(i32::MIN), f64::from(i32::MAX))
-                            as i32,
-                    );
+            let interpolate_points = |base: usize, count: usize, dimensions: usize| {
+                for point in 0..count.min(65_536) {
+                    for component in 0..dimensions {
+                        interpolate_i32(base + point * dimensions * 4 + component * 4);
+                    }
                 }
+            };
+            match ty {
+                4 | 10 | 12 | 13 | 26 => {
+                    interpolate_i32(9);
+                    interpolate_i32(13);
+                    interpolate_i32(1);
+                    interpolate_i32(5);
+                    if ty == 13 {
+                        let from = f64::from_bits(ptr::read_unaligned(ae.add(17).cast::<u64>()));
+                        let to = f64::from_bits(ptr::read_unaligned(be.add(17).cast::<u64>()));
+                        ptr::write_unaligned(
+                            re.add(17).cast::<u64>(),
+                            (from + (to - from) * t).to_bits(),
+                        );
+                    }
+                }
+                7 | 8 | 21 | 22 | 27..=29 => {
+                    interpolate_i32(1);
+                    interpolate_i32(5);
+                }
+                9 => {
+                    interpolate_i32(5);
+                    interpolate_i32(9);
+                }
+                11 if sprite_i32(ae, 1) == sprite_i32(be, 1) => {
+                    interpolate_points(5, sprite_i32(ae, 1).max(0) as usize, 2);
+                }
+                14 => {
+                    interpolate_i32(1);
+                    interpolate_i32(5);
+                    interpolate_i32(9);
+                }
+                15 | 16 => {
+                    for field in [1, 5, 9, 13] {
+                        interpolate_i32(field);
+                    }
+                }
+                23 => {
+                    interpolate_i32(1);
+                    interpolate_i32(5);
+                }
+                17..=20 if sprite_i32(ae, 1) == sprite_i32(be, 1) => {
+                    interpolate_points(5, sprite_i32(ae, 1).max(0) as usize, 3);
+                }
+                24 if sprite_i32(ae, 1) == sprite_i32(be, 1) => {
+                    interpolate_points(9, sprite_i32(ae, 1).max(0) as usize, 3);
+                }
+                25 if sprite_i32(ae, 13) == sprite_i32(be, 13) => {
+                    interpolate_points(21, sprite_i32(ae, 13).max(0) as usize, 3);
+                }
+                _ => {}
             }
             let Some(size) = sprite_element_size(ae) else {
                 break;
@@ -1878,6 +2337,205 @@ mod tests {
                 "fan diagonal depth was {diagonal_depth}"
             );
             tos_DCDel(dc);
+        }
+    }
+
+    #[test]
+    fn three_point_symmetry_reflects_across_an_arbitrary_plane() {
+        let dc = tos_DCNew(8, 8, ptr::null_mut(), 0);
+        unsafe {
+            assert_eq!(tos_DCSymmetry3Set(dc, 0, 0, 2, 1, 0, 2, 0, 1, 2), 1);
+            let (mut x, mut y, mut z) = (3, 4, 5);
+            reflect(dc, &mut x, &mut y, &mut z);
+            assert_eq!((x, y, z), (3, 4, -1));
+            assert_eq!(tos_DCSymmetry3Set(dc, 0, 0, 0, 1, 1, 1, 2, 2, 2), 0);
+            tos_DCDel(dc);
+        }
+    }
+
+    #[test]
+    fn arrows_draw_wings_in_addition_to_the_shaft() {
+        let dc = tos_DCNew(20, 20, ptr::null_mut(), 0);
+        unsafe {
+            (*dc).color = tos_abi::WHITE;
+            assert!(tos_GrArrow3(dc, 2, 10, 0, 15, 10, 0, 2.75, 1, 0) > 13);
+            let pixels = slice::from_raw_parts((*dc).body, 400);
+            assert_eq!(pixels[10 * 20 + 15], tos_abi::WHITE as u8);
+            assert!(pixels[7 * 20 + 12] == tos_abi::WHITE as u8);
+            assert!(pixels[13 * 20 + 12] == tos_abi::WHITE as u8);
+            tos_DCDel(dc);
+        }
+    }
+
+    #[test]
+    fn sprite_rectangles_are_filled_and_packed_paths_are_decoded() {
+        let dc = tos_DCNew(12, 12, ptr::null_mut(), 0);
+        let mut sprite = vec![1, tos_abi::LTRED as u8, 12];
+        for value in [2_i32, 2, 6, 6] {
+            sprite.extend_from_slice(&value.to_le_bytes());
+        }
+        sprite.push(1);
+        sprite.push(tos_abi::WHITE as u8);
+        sprite.push(9);
+        sprite.extend_from_slice(&3_i32.to_le_bytes());
+        sprite.extend_from_slice(&8_i32.to_le_bytes());
+        sprite.extend_from_slice(&8_i32.to_le_bytes());
+        sprite.extend_from_slice(&[0xf4, 0x00]);
+        sprite.push(0);
+
+        tos_Sprite3(dc, 0, 0, 0, sprite.as_mut_ptr(), 0);
+        unsafe {
+            let pixels = slice::from_raw_parts((*dc).body, 144);
+            assert_eq!(pixels[4 * 12 + 4], tos_abi::LTRED as u8);
+            for (x, y) in [(8, 8), (9, 8), (9, 9), (8, 9)] {
+                assert_eq!(pixels[y * 12 + x], tos_abi::WHITE as u8);
+            }
+            tos_DCDel(dc);
+        }
+    }
+
+    #[test]
+    fn sprite_text_renders_and_transform_toggles_keep_the_origin_stable() {
+        let dc = tos_DCNew(48, 20, ptr::null_mut(), 0);
+        let mut sprite = vec![1, tos_abi::WHITE as u8, 5, 8];
+        sprite.extend_from_slice(&0_i32.to_le_bytes());
+        sprite.extend_from_slice(&2_i32.to_le_bytes());
+        sprite.push(6);
+        sprite.push(27);
+        sprite.extend_from_slice(&8_i32.to_le_bytes());
+        sprite.extend_from_slice(&2_i32.to_le_bytes());
+        sprite.extend_from_slice(b"A\0");
+        sprite.push(0);
+        unsafe {
+            (*dc).x = 10;
+            tos_Sprite3(dc, 10, 0, 0, sprite.as_mut_ptr(), 0);
+            let pixels = slice::from_raw_parts((*dc).body, 48 * 20);
+            assert_eq!(pixels[2 * 48 + 10], tos_abi::WHITE as u8);
+            assert!(pixels[2 * 48 + 18..10 * 48 + 26].contains(&(tos_abi::WHITE as u8)));
+            tos_DCDel(dc);
+        }
+    }
+
+    #[test]
+    fn transformed_shiftable_mesh_uses_a_screen_space_shift_and_restores_state() {
+        let dc = tos_DCNew(20, 20, ptr::null_mut(), 0);
+        let mut sprite = vec![25];
+        for value in [3_i32, 0, 0, 3, 1] {
+            sprite.extend_from_slice(&value.to_le_bytes());
+        }
+        for (x, y, z) in [(0_i32, 0_i32, 0_i32), (2, 0, 0), (0, 2, 0)] {
+            sprite.extend_from_slice(&x.to_le_bytes());
+            sprite.extend_from_slice(&y.to_le_bytes());
+            sprite.extend_from_slice(&z.to_le_bytes());
+        }
+        for value in [(tos_abi::LTRED | ROPF_TWO_SIDED) as i32, 0_i32, 1, 2] {
+            sprite.extend_from_slice(&value.to_le_bytes());
+        }
+        sprite.push(0);
+
+        unsafe {
+            (*dc).flags |= DCF_TRANSFORMATION;
+            (*dc).x = 8;
+            (*dc).y = 8;
+            tos_runtime::tos_Mat4x4RotZ((*dc).r, std::f64::consts::FRAC_PI_2);
+            tos_Sprite3(dc, 0, 0, 0, sprite.as_mut_ptr(), 0);
+            let pixels = slice::from_raw_parts((*dc).body, 400);
+            assert_ne!(pixels[9 * 20 + 10], tos_abi::BLACK as u8);
+            assert_eq!(pixels[11 * 20 + 8], tos_abi::BLACK as u8);
+            assert_eq!(((*dc).x, (*dc).y, (*dc).z), (8, 8, 0));
+            tos_DCDel(dc);
+        }
+    }
+
+    #[test]
+    fn sprite_interpolation_covers_primitive_geometry_and_switches_base_frame() {
+        fn line_sprite(color: u8, x1: i32, y1: i32, x2: i32, y2: i32) -> Vec<u8> {
+            let mut sprite = vec![1, color, 10];
+            for value in [x1, y1, x2, y2] {
+                sprite.extend_from_slice(&value.to_le_bytes());
+            }
+            sprite.push(0);
+            sprite
+        }
+        let mut a = line_sprite(tos_abi::LTRED as u8, 0, 2, 10, 12);
+        let mut b = line_sprite(tos_abi::LTBLUE as u8, 20, 22, 30, 32);
+        unsafe {
+            let early = tos_SpriteInterpolate(0.25, a.as_mut_ptr(), b.as_mut_ptr());
+            assert_eq!(*early.add(1), tos_abi::LTRED as u8);
+            assert_eq!(sprite_i32(early.add(2), 1), 5);
+            assert_eq!(sprite_i32(early.add(2), 5), 7);
+            assert_eq!(sprite_i32(early.add(2), 9), 15);
+            assert_eq!(sprite_i32(early.add(2), 13), 17);
+            tos_runtime::tos_Free(early);
+
+            let late = tos_SpriteInterpolate(0.75, a.as_mut_ptr(), b.as_mut_ptr());
+            assert_eq!(*late.add(1), tos_abi::LTBLUE as u8);
+            assert_eq!(sprite_i32(late.add(2), 1), 15);
+            assert_eq!(sprite_i32(late.add(2), 13), 27);
+            tos_runtime::tos_Free(late);
+        }
+    }
+
+    #[test]
+    fn sprite_transform_updates_lines_splines_and_shiftable_mesh_origins() {
+        let mut sprite = vec![10];
+        for value in [0_i32, 1, 2, 3] {
+            sprite.extend_from_slice(&value.to_le_bytes());
+        }
+        sprite.push(17);
+        sprite.extend_from_slice(&1_i32.to_le_bytes());
+        for value in [4_i32, 5, 6] {
+            sprite.extend_from_slice(&value.to_le_bytes());
+        }
+        sprite.push(25);
+        for value in [7_i32, 8, 9, 1, 0] {
+            sprite.extend_from_slice(&value.to_le_bytes());
+        }
+        for value in [10_i32, 11, 12] {
+            sprite.extend_from_slice(&value.to_le_bytes());
+        }
+        sprite.push(0);
+
+        let matrix = tos_runtime::tos_Mat4x4IdentNew();
+        unsafe {
+            tos_runtime::tos_Mat4x4TranslationEqu(matrix, 20, 30, 40);
+            let transformed = tos_SpriteTransform(sprite.as_mut_ptr(), matrix);
+            assert_eq!(
+                (sprite_i32(transformed, 1), sprite_i32(transformed, 5)),
+                (20, 31)
+            );
+            assert_eq!(
+                (sprite_i32(transformed, 9), sprite_i32(transformed, 13)),
+                (22, 33)
+            );
+            let spline = transformed.add(17);
+            assert_eq!(
+                (
+                    sprite_i32(spline, 5),
+                    sprite_i32(spline, 9),
+                    sprite_i32(spline, 13)
+                ),
+                (24, 35, 46)
+            );
+            let mesh = spline.add(17);
+            assert_eq!(
+                (
+                    sprite_i32(mesh, 1),
+                    sprite_i32(mesh, 5),
+                    sprite_i32(mesh, 9)
+                ),
+                (27, 38, 49)
+            );
+            assert_eq!(
+                (
+                    sprite_i32(mesh, 21),
+                    sprite_i32(mesh, 25),
+                    sprite_i32(mesh, 29)
+                ),
+                (30, 41, 52)
+            );
+            tos_runtime::tos_Free(transformed);
+            tos_runtime::tos_Free(matrix.cast::<u8>());
         }
     }
 }

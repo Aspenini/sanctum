@@ -456,6 +456,23 @@ impl Sema {
             false,
         );
         s.add_builtin(
+            "DCSymmetry3Set",
+            Ty::I64,
+            vec![
+                ("dc", cdc_ptr.clone()),
+                ("x1", Ty::I64),
+                ("y1", Ty::I64),
+                ("z1", Ty::I64),
+                ("x2", Ty::I64),
+                ("y2", Ty::I64),
+                ("z2", Ty::I64),
+                ("x3", Ty::I64),
+                ("y3", Ty::I64),
+                ("z3", Ty::I64),
+            ],
+            false,
+        );
+        s.add_builtin(
             "DCClipLine",
             Ty::I64,
             vec![
@@ -498,6 +515,23 @@ impl Sema {
                         size: 12,
                     })),
                 ),
+            ],
+            false,
+        );
+        s.add_builtin(
+            "GrArrow3",
+            Ty::I64,
+            vec![
+                ("dc", cdc_ptr.clone()),
+                ("x1", Ty::I64),
+                ("y1", Ty::I64),
+                ("z1", Ty::I64),
+                ("x2", Ty::I64),
+                ("y2", Ty::I64),
+                ("z2", Ty::I64),
+                ("width", Ty::F64),
+                ("step", Ty::I64),
+                ("start", Ty::I64),
             ],
             false,
         );

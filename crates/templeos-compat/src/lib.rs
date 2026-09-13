@@ -66,6 +66,8 @@ mod tests {
         for required in [
             "tos_Print",
             "tos_DCTransform",
+            "tos_DCSymmetry3Set",
+            "tos_GrArrow3",
             "tos_GrLine3",
             "tos_Refresh",
             "tos_Play",
