@@ -369,11 +369,43 @@ pub unsafe extern "C" fn tos_DCClipLine(
     }
     let xmax = dc.width as i64 - 1;
     let ymax = dc.height as i64 - 1;
+    let (start_x, start_y, end_x, end_y) = unsafe { (*x1, *y1, *x2, *y2) };
+    let dx = end_x as f64 - start_x as f64;
+    let dy = end_y as f64 - start_y as f64;
+    let mut entering = 0.0_f64;
+    let mut leaving = 1.0_f64;
+    for (direction, distance) in [
+        (-dx, start_x as f64),
+        (dx, xmax as f64 - start_x as f64),
+        (-dy, start_y as f64),
+        (dy, ymax as f64 - start_y as f64),
+    ] {
+        if direction == 0.0 {
+            if distance < 0.0 {
+                return 0;
+            }
+            continue;
+        }
+        let intersection = distance / direction;
+        if direction < 0.0 {
+            entering = entering.max(intersection);
+        } else {
+            leaving = leaving.min(intersection);
+        }
+        if entering > leaving {
+            return 0;
+        }
+    }
+    let clipped = |start: i64, delta: f64, position: f64, maximum: i64| {
+        (start as f64 + position * delta)
+            .round()
+            .clamp(0.0, maximum as f64) as i64
+    };
     unsafe {
-        *x1 = (*x1).clamp(0, xmax);
-        *x2 = (*x2).clamp(0, xmax);
-        *y1 = (*y1).clamp(0, ymax);
-        *y2 = (*y2).clamp(0, ymax);
+        *x1 = clipped(start_x, dx, entering, xmax);
+        *y1 = clipped(start_y, dy, entering, ymax);
+        *x2 = clipped(start_x, dx, leaving, xmax);
+        *y2 = clipped(start_y, dy, leaving, ymax);
     }
     1
 }
@@ -1374,6 +1406,26 @@ mod tests {
             assert_eq!(tos_GrLine3(dc, 0, 0, 0, 7, 7, 0, 1, 0), 8);
             assert_eq!(*(*dc).body, 4);
             assert_eq!(*(*dc).body.add(63), 4);
+        }
+    }
+
+    #[test]
+    fn clips_lines_without_changing_their_projected_slope() {
+        let dc = tos_DCNew(640, 480, ptr::null_mut(), 0);
+        let (mut x1, mut y1, mut x2, mut y2) = (-100, 100, 1000, 200);
+        unsafe {
+            assert_eq!(
+                tos_DCClipLine(dc, &mut x1, &mut y1, &mut x2, &mut y2, 1, 1),
+                1
+            );
+            assert_eq!((x1, y1, x2, y2), (0, 109, 639, 167));
+
+            let (mut ox1, mut oy1, mut ox2, mut oy2) = (10, -10, 20, -10);
+            assert_eq!(
+                tos_DCClipLine(dc, &mut ox1, &mut oy1, &mut ox2, &mut oy2, 1, 1),
+                0
+            );
+            tos_DCDel(dc);
         }
     }
 
