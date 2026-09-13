@@ -1,6 +1,7 @@
 //! Host display and input boundary for TempleOS programs.
 
 mod audio;
+pub mod input;
 mod registry;
 
 pub use registry::GlobalBinding;
@@ -217,18 +218,129 @@ pub fn framebuffer_rgb() -> Vec<u8> {
     rgb
 }
 
-fn push_key(key: Key) {
-    let mapped = match key {
-        Key::Escape => Some((0x1b, 0)),
-        Key::Enter => Some((b'\n' as i64, 0)),
-        Key::Space => Some((b' ' as i64, 0)),
-        Key::Up => Some((0, 0x48)),
-        Key::Down => Some((0, 0x50)),
-        Key::Left => Some((0, 0x4b)),
-        Key::Right => Some((0, 0x4d)),
-        _ => None,
+fn native_printable_char(key: Key, shift: bool) -> Option<char> {
+    let base = match key {
+        Key::A => 'a',
+        Key::B => 'b',
+        Key::C => 'c',
+        Key::D => 'd',
+        Key::E => 'e',
+        Key::F => 'f',
+        Key::G => 'g',
+        Key::H => 'h',
+        Key::I => 'i',
+        Key::J => 'j',
+        Key::K => 'k',
+        Key::L => 'l',
+        Key::M => 'm',
+        Key::N => 'n',
+        Key::O => 'o',
+        Key::P => 'p',
+        Key::Q => 'q',
+        Key::R => 'r',
+        Key::S => 's',
+        Key::T => 't',
+        Key::U => 'u',
+        Key::V => 'v',
+        Key::W => 'w',
+        Key::X => 'x',
+        Key::Y => 'y',
+        Key::Z => 'z',
+        Key::Key0 => '0',
+        Key::Key1 => '1',
+        Key::Key2 => '2',
+        Key::Key3 => '3',
+        Key::Key4 => '4',
+        Key::Key5 => '5',
+        Key::Key6 => '6',
+        Key::Key7 => '7',
+        Key::Key8 => '8',
+        Key::Key9 => '9',
+        Key::Apostrophe => '\'',
+        Key::Backquote => '`',
+        Key::Backslash => '\\',
+        Key::Comma => ',',
+        Key::Equal => '=',
+        Key::LeftBracket => '[',
+        Key::Minus => '-',
+        Key::Period => '.',
+        Key::RightBracket => ']',
+        Key::Semicolon => ';',
+        Key::Slash => '/',
+        _ => return None,
     };
-    if let Some(key) = mapped {
+    if !shift {
+        return Some(base);
+    }
+    Some(match base {
+        'a'..='z' => base.to_ascii_uppercase(),
+        '0' => ')',
+        '1' => '!',
+        '2' => '@',
+        '3' => '#',
+        '4' => '$',
+        '5' => '%',
+        '6' => '^',
+        '7' => '&',
+        '8' => '*',
+        '9' => '(',
+        '\'' => '"',
+        '`' => '~',
+        '\\' => '|',
+        ',' => '<',
+        '=' => '+',
+        '[' => '{',
+        '-' => '_',
+        '.' => '>',
+        ']' => '}',
+        ';' => ':',
+        '/' => '?',
+        _ => base,
+    })
+}
+
+fn native_key_event(key: Key, shift: bool, ctrl: bool, alt: bool) -> Option<(i64, i64)> {
+    let flags = input::scan_flags(shift, ctrl, alt);
+    match key {
+        Key::Escape if shift => Some((0x1c, 0x01 | flags)),
+        Key::Escape => Some((0x1b, 0x01 | flags)),
+        Key::Tab => Some((b'\t' as i64, 0x0f | flags)),
+        Key::Backspace => Some((0x08, 0x0e | flags)),
+        Key::Enter => Some((b'\n' as i64, 0x1c | flags)),
+        Key::Space if shift => Some((0x1f, 0x39 | flags)),
+        Key::Space => Some((b' ' as i64, 0x39 | flags)),
+        Key::Home => Some((0, 0x47 | flags)),
+        Key::Up => Some((0, 0x48 | flags)),
+        Key::PageUp => Some((0, 0x49 | flags)),
+        Key::Left => Some((0, 0x4b | flags)),
+        Key::Right => Some((0, 0x4d | flags)),
+        Key::End => Some((0, 0x4f | flags)),
+        Key::Down => Some((0, 0x50 | flags)),
+        Key::PageDown => Some((0, 0x51 | flags)),
+        Key::Insert => Some((0, 0x52 | flags)),
+        Key::Delete => Some((0, 0x53 | flags)),
+        Key::F1 => Some((0, 0x3b | flags)),
+        Key::F2 => Some((0, 0x3c | flags)),
+        Key::F3 => Some((0, 0x3d | flags)),
+        Key::F4 => Some((0, 0x3e | flags)),
+        Key::F5 => Some((0, 0x3f | flags)),
+        Key::F6 => Some((0, 0x40 | flags)),
+        Key::F7 => Some((0, 0x41 | flags)),
+        Key::F8 => Some((0, 0x42 | flags)),
+        Key::F9 => Some((0, 0x43 | flags)),
+        Key::F10 => Some((0, 0x44 | flags)),
+        Key::F11 => Some((0, 0x57 | flags)),
+        Key::F12 => Some((0, 0x58 | flags)),
+        Key::LeftShift | Key::RightShift => Some((0, 0x2a | flags)),
+        Key::LeftCtrl | Key::RightCtrl => Some((0, 0x1d | flags)),
+        Key::LeftAlt | Key::RightAlt => Some((0, 0x38 | flags)),
+        _ => native_printable_char(key, shift)
+            .and_then(|ch| input::ascii_key_event(ch, shift, ctrl, alt)),
+    }
+}
+
+fn push_native_key(key: Key, shift: bool, ctrl: bool, alt: bool) {
+    if let Some(key) = native_key_event(key, shift, ctrl, alt) {
         key_queue()
             .lock()
             .expect("key queue poisoned")
@@ -286,8 +398,13 @@ fn present_window(snapshot: &FrameSnapshot) {
                 .expect("key queue poisoned")
                 .push_back((0x1b, 0));
         }
+        let shift =
+            host.window.is_key_down(Key::LeftShift) || host.window.is_key_down(Key::RightShift);
+        let ctrl =
+            host.window.is_key_down(Key::LeftCtrl) || host.window.is_key_down(Key::RightCtrl);
+        let alt = host.window.is_key_down(Key::LeftAlt) || host.window.is_key_down(Key::RightAlt);
         for key in host.window.get_keys_pressed(KeyRepeat::Yes) {
-            push_key(key);
+            push_native_key(key, shift, ctrl, alt);
         }
     });
 }
@@ -373,7 +490,6 @@ mod tests {
 
     #[test]
     fn framebuffer_has_rgb_triplet_per_pixel() {
-        reset();
         assert_eq!(
             framebuffer_rgb().len(),
             DEFAULT_WIDTH as usize * DEFAULT_HEIGHT as usize * 3
@@ -383,12 +499,34 @@ mod tests {
     #[test]
     fn shares_window_keys_with_the_game_thread() {
         key_queue().lock().unwrap().clear();
-        std::thread::spawn(|| push_key(Key::Up)).join().unwrap();
+        std::thread::spawn(|| push_native_key(Key::Up, false, false, false))
+            .join()
+            .unwrap();
         set_interactive(true);
         let (mut ch, mut scan) = (-1, -1);
         unsafe { assert_eq!(tos_ScanKey(&mut ch, &mut scan, 0), 1) };
         assert_eq!((ch, scan), (0, 0x48));
         set_interactive(false);
+    }
+
+    #[test]
+    fn native_window_maps_printable_and_extended_keys() {
+        assert_eq!(
+            native_key_event(Key::A, true, false, false),
+            Some((b'A' as i64, 0x1e | input::SCF_SHIFT))
+        );
+        assert_eq!(
+            native_key_event(Key::C, false, true, false),
+            Some((3, 0x2e | input::SCF_CTRL))
+        );
+        assert_eq!(
+            native_key_event(Key::Slash, true, false, true),
+            Some((b'?' as i64, 0x35 | input::SCF_SHIFT | input::SCF_ALT))
+        );
+        assert_eq!(
+            native_key_event(Key::F12, false, false, false),
+            Some((0, 0x58))
+        );
     }
 
     #[test]

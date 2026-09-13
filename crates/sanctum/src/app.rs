@@ -6,6 +6,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, mpsc};
+#[cfg(test)]
+use templeos_compat::host::input::{SCF_ALT, SCF_CTRL, SCF_SHIFT};
+use templeos_compat::host::input::{ascii_key_event, scan_flags};
 use uuid::Uuid;
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -916,63 +919,6 @@ impl SanctumApp {
     }
 }
 
-const SCF_SHIFT: i64 = 1 << 9;
-const SCF_CTRL: i64 = 1 << 10;
-const SCF_ALT: i64 = 1 << 11;
-
-fn scan_flags(shift: bool, ctrl: bool, alt: bool) -> i64 {
-    (if shift { SCF_SHIFT } else { 0 })
-        | (if ctrl { SCF_CTRL } else { 0 })
-        | (if alt { SCF_ALT } else { 0 })
-}
-
-fn ascii_scan_code(ch: char) -> Option<(i64, bool)> {
-    let normal = [
-        ("1234567890-=", 0x02),
-        ("qwertyuiop[]", 0x10),
-        ("asdfghjkl;'`", 0x1e),
-        ("zxcvbnm,./", 0x2c),
-    ];
-    for (row, first) in normal {
-        if let Some(index) = row.find(ch.to_ascii_lowercase()) {
-            return Some((first + index as i64, ch.is_ascii_uppercase()));
-        }
-    }
-    let shifted = [
-        ("!@#$%^&*()_+", 0x02),
-        ("{}", 0x1a),
-        (":\"~", 0x27),
-        ("|", 0x2b),
-        ("<>?", 0x33),
-    ];
-    for (row, first) in shifted {
-        if let Some(index) = row.find(ch) {
-            return Some((first + index as i64, true));
-        }
-    }
-    (ch == '\\').then_some((0x2b, false))
-}
-
-fn text_key_event(ch: char, shift: bool, ctrl: bool, alt: bool) -> Option<(i64, i64)> {
-    if !ch.is_ascii() {
-        return None;
-    }
-    let (scan, inferred_shift) = if ch == ' ' {
-        (0x39, false)
-    } else {
-        ascii_scan_code(ch)?
-    };
-    let shift = shift || inferred_shift;
-    let ch = if ctrl && ch.is_ascii_alphabetic() {
-        i64::from(ch.to_ascii_lowercase() as u8 - b'a' + 1)
-    } else if shift && ch == ' ' {
-        0x1f
-    } else {
-        ch as i64
-    };
-    Some((ch, scan | scan_flags(shift, ctrl, alt)))
-}
-
 fn text_key_events(
     text: &str,
     shift: bool,
@@ -980,7 +926,7 @@ fn text_key_events(
     alt: bool,
 ) -> impl Iterator<Item = (i64, i64)> + '_ {
     text.chars()
-        .filter_map(move |ch| text_key_event(ch, shift, ctrl, alt))
+        .filter_map(move |ch| ascii_key_event(ch, shift, ctrl, alt))
 }
 
 fn map_printable_key(key: egui::Key, shift: bool, ctrl: bool, alt: bool) -> Option<(i64, i64)> {
@@ -1041,7 +987,7 @@ fn map_printable_key(key: egui::Key, shift: bool, ctrl: bool, alt: bool) -> Opti
         egui::Key::Quote => '\'',
         _ => return None,
     };
-    text_key_event(ch, shift, ctrl, alt)
+    ascii_key_event(ch, shift, ctrl, alt)
 }
 
 fn map_special_key(key: egui::Key, shift: bool, ctrl: bool, alt: bool) -> Option<(i64, i64)> {
