@@ -8,8 +8,16 @@ use tos_abi::{CD3I32, CDC, CTask};
 const DCF_TRANSFORMATION: i32 = 0x100;
 const DCF_SYMMETRY: i32 = 0x200;
 const DCF_JUST_MIRROR: i32 = 0x400;
+const DCF_NO_TRANSPARENTS: i32 = 0x4;
+const DCF_ALIAS: i32 = 0x2000;
+const COLORROP_COLORS_MASK: u32 = 0x00ff_00ff;
+const ROPB_EQU: u32 = 0;
+const ROPB_XOR: u32 = 1;
+const ROPB_COLLISION: u32 = 2;
+const ROPB_MONO: u32 = 3;
 const ROPF_HALF_RANGE_COLOR: u32 = 0x1000;
 const ROPF_TWO_SIDED: u32 = 0x2000;
+const ROPF_DITHER: u32 = 0x4000_0000;
 const ROPF_PROBABILITY_DITHER: u32 = 0x80000000;
 
 // TempleOS's standard 8x8 glyphs for printable ASCII, copied from
@@ -144,6 +152,7 @@ pub fn jit_symbols() -> Vec<(&'static str, *const u8)> {
         ("tos_DCDepthBufAlloc", tos_DCDepthBufAlloc as *const u8),
         ("tos_DCDepthBufRst", tos_DCDepthBufRst as *const u8),
         ("tos_DCMat4x4Set", tos_DCMat4x4Set as *const u8),
+        ("tos_DCTransform", tos_DCTransform as *const u8),
         ("tos_DCSymmetrySet", tos_DCSymmetrySet as *const u8),
         ("tos_DCClipLine", tos_DCClipLine as *const u8),
         ("tos_GrLine3", tos_GrLine3 as *const u8),
@@ -186,7 +195,7 @@ pub extern "C" fn tos_DCNew(
         y: 0,
         z: 0,
         thick: 1,
-        transform: None,
+        transform: Some(tos_DCTransform),
         body,
         depth_buf: ptr::null_mut(),
         sym_x: 0,
@@ -213,26 +222,26 @@ pub unsafe extern "C" fn tos_DCAlias(dc: *mut CDC, _task: *mut CTask) -> *mut CD
     Box::into_raw(Box::new(CDC {
         width: src.width,
         height: src.height,
-        flags: src.flags,
-        color: src.color,
+        flags: src.flags & !(DCF_TRANSFORMATION | DCF_SYMMETRY | DCF_JUST_MIRROR) | DCF_ALIAS,
+        color: tos_abi::BLACK,
         r: identity_matrix(),
-        x: src.x,
-        y: src.y,
-        z: src.z,
-        thick: src.thick,
-        transform: src.transform,
+        x: 0,
+        y: 0,
+        z: 0,
+        thick: 1,
+        transform: Some(tos_DCTransform),
         body: src.body,
         depth_buf: src.depth_buf,
-        sym_x: src.sym_x,
-        sym_y: src.sym_y,
-        sym_z: src.sym_z,
-        sym_nx: src.sym_nx,
-        sym_ny: src.sym_ny,
-        sym_nz: src.sym_nz,
-        light_x: src.light_x,
-        light_y: src.light_y,
-        light_z: src.light_z,
-        dither_probability_u16: src.dither_probability_u16,
+        sym_x: 0,
+        sym_y: 0,
+        sym_z: 0,
+        sym_nx: 1.0,
+        sym_ny: 0.0,
+        sym_nz: 0.0,
+        light_x: 37_837,
+        light_y: 37_837,
+        light_z: 37_837,
+        dither_probability_u16: 0,
         owns_body: false,
         owns_depth_buf: false,
     }))
@@ -323,6 +332,27 @@ pub unsafe extern "C" fn tos_DCMat4x4Set(dc: *mut CDC, r: *mut i64) {
 }
 
 #[unsafe(no_mangle)]
+/// Apply the device context's matrix and screen-space translation to a point.
+///
+/// # Safety
+///
+/// `dc` and each coordinate must be valid for the duration of the call.
+pub unsafe extern "C" fn tos_DCTransform(dc: *mut CDC, x: *mut i64, y: *mut i64, z: *mut i64) {
+    if dc.is_null() || x.is_null() || y.is_null() || z.is_null() {
+        return;
+    }
+    let ctx = unsafe { &*dc };
+    if !ctx.r.is_null() {
+        unsafe { tos_runtime::tos_Mat4x4MulXYZ(ctx.r, x, y, z) };
+    }
+    unsafe {
+        *x = (*x).saturating_add(i64::from(ctx.x));
+        *y = (*y).saturating_add(i64::from(ctx.y));
+        *z = (*z).saturating_add(i64::from(ctx.z));
+    }
+}
+
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn tos_DCSymmetrySet(
     dc: *mut CDC,
     x1: i64,
@@ -357,8 +387,8 @@ pub unsafe extern "C" fn tos_DCClipLine(
     y1: *mut i64,
     x2: *mut i64,
     y2: *mut i64,
-    _line_width: i64,
-    _line_height: i64,
+    line_width: i64,
+    line_height: i64,
 ) -> i64 {
     if dc.is_null() || x1.is_null() || y1.is_null() || x2.is_null() || y2.is_null() {
         return 0;
@@ -367,22 +397,57 @@ pub unsafe extern "C" fn tos_DCClipLine(
     if dc.width <= 0 || dc.height <= 0 {
         return 0;
     }
-    let xmax = dc.width as i64 - 1;
-    let ymax = dc.height as i64 - 1;
     let (start_x, start_y, end_x, end_y) = unsafe { (*x1, *y1, *x2, *y2) };
+    let horizontal_margin = line_width.max(0);
+    let vertical_margin = line_height.max(0);
+    let left = -horizontal_margin;
+    let top = -vertical_margin;
+    let right = i64::from(dc.width - 1).saturating_add(horizontal_margin);
+    let bottom = i64::from(dc.height - 1).saturating_add(vertical_margin);
+    let Some((entering, leaving)) =
+        line_clip_parameters(start_x, start_y, end_x, end_y, left, top, right, bottom)
+    else {
+        return 0;
+    };
     let dx = end_x as f64 - start_x as f64;
     let dy = end_y as f64 - start_y as f64;
+    let clipped = |start: i64, delta: f64, position: f64, minimum: i64, maximum: i64| {
+        (start as f64 + position * delta)
+            .round()
+            .clamp(minimum as f64, maximum as f64) as i64
+    };
+    unsafe {
+        *x1 = clipped(start_x, dx, entering, left, right);
+        *y1 = clipped(start_y, dy, entering, top, bottom);
+        *x2 = clipped(start_x, dx, leaving, left, right);
+        *y2 = clipped(start_y, dy, leaving, top, bottom);
+    }
+    1
+}
+
+fn line_clip_parameters(
+    x1: i64,
+    y1: i64,
+    x2: i64,
+    y2: i64,
+    left: i64,
+    top: i64,
+    right: i64,
+    bottom: i64,
+) -> Option<(f64, f64)> {
+    let dx = x2 as f64 - x1 as f64;
+    let dy = y2 as f64 - y1 as f64;
     let mut entering = 0.0_f64;
     let mut leaving = 1.0_f64;
     for (direction, distance) in [
-        (-dx, start_x as f64),
-        (dx, xmax as f64 - start_x as f64),
-        (-dy, start_y as f64),
-        (dy, ymax as f64 - start_y as f64),
+        (-dx, x1 as f64 - left as f64),
+        (dx, right as f64 - x1 as f64),
+        (-dy, y1 as f64 - top as f64),
+        (dy, bottom as f64 - y1 as f64),
     ] {
         if direction == 0.0 {
             if distance < 0.0 {
-                return 0;
+                return None;
             }
             continue;
         }
@@ -393,21 +458,10 @@ pub unsafe extern "C" fn tos_DCClipLine(
             leaving = leaving.min(intersection);
         }
         if entering > leaving {
-            return 0;
+            return None;
         }
     }
-    let clipped = |start: i64, delta: f64, position: f64, maximum: i64| {
-        (start as f64 + position * delta)
-            .round()
-            .clamp(0.0, maximum as f64) as i64
-    };
-    unsafe {
-        *x1 = clipped(start_x, dx, entering, xmax);
-        *y1 = clipped(start_y, dy, entering, ymax);
-        *x2 = clipped(start_x, dx, leaving, xmax);
-        *y2 = clipped(start_y, dy, leaving, ymax);
-    }
-    1
+    Some((entering, leaving))
 }
 
 unsafe fn plot(dc: *mut CDC, x: i64, y: i64, z: i64) -> bool {
@@ -421,7 +475,9 @@ unsafe fn plot(dc: *mut CDC, x: i64, y: i64, z: i64) -> bool {
     let index = y as usize * dc.width as usize + x as usize;
     if !dc.depth_buf.is_null() {
         let depth = unsafe { &mut *dc.depth_buf.add(index) };
-        if z > *depth as i64 {
+        // Perspective callbacks use negative z for points behind the camera.
+        // TempleOS only accepts depths in the inclusive range 0..=current.
+        if z < 0 || z > *depth as i64 {
             return false;
         }
         *depth = z as i32;
@@ -438,15 +494,23 @@ unsafe fn plot(dc: *mut CDC, x: i64, y: i64, z: i64) -> bool {
         hash ^= hash >> 27;
         let sample = (hash ^ (hash >> 31)) as u16;
         if u32::from(sample) < dc.dither_probability_u16.min(65_536) {
-            ((dc.color >> 16) & 0x0f) as u8
+            ((dc.color >> 16) & 0xff) as u8
         } else {
-            (dc.color & 0x0f) as u8
+            (dc.color & 0xff) as u8
         }
+    } else if dc.color & ROPF_DITHER != 0 && (x ^ y) & 1 != 0 {
+        ((dc.color >> 16) & 0xff) as u8
     } else {
-        (dc.color & 0x0f) as u8
+        (dc.color & 0xff) as u8
     };
-    let changed = *pixel != color;
-    *pixel = color;
+    let previous = *pixel;
+    match (dc.color >> 8) & 0x0f {
+        ROPB_EQU | ROPB_MONO => *pixel = color,
+        ROPB_XOR => *pixel ^= color,
+        ROPB_COLLISION => return false,
+        _ => *pixel = color,
+    }
+    let changed = *pixel != previous;
     changed
 }
 
@@ -467,7 +531,7 @@ unsafe fn transformed_point(dc: *mut CDC, point: CD3I32) -> CD3I32 {
         && ctx.flags & DCF_TRANSFORMATION != 0
         && let Some(transform) = ctx.transform
     {
-        transform(dc, &mut x, &mut y, &mut z);
+        unsafe { transform(dc, &mut x, &mut y, &mut z) };
     }
     CD3I32 {
         x: x.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32,
@@ -549,8 +613,8 @@ unsafe fn plot_brush(dc: *mut CDC, x: i64, y: i64, z: i64) -> i64 {
 
 unsafe fn raster_line(
     dc: *mut CDC,
-    mut x1: i64,
-    mut y1: i64,
+    x1: i64,
+    y1: i64,
     z1: i64,
     x2: i64,
     y2: i64,
@@ -558,6 +622,44 @@ unsafe fn raster_line(
     step: i64,
     start: i64,
 ) -> i64 {
+    let Some(ctx) = (unsafe { dc.as_ref() }) else {
+        return 0;
+    };
+    if ctx.width <= 0 || ctx.height <= 0 {
+        return 0;
+    }
+    let margin = i64::from(ctx.thick.max(1) / 2);
+    let Some((entering, leaving)) = line_clip_parameters(
+        x1,
+        y1,
+        x2,
+        y2,
+        -margin,
+        -margin,
+        i64::from(ctx.width - 1).saturating_add(margin),
+        i64::from(ctx.height - 1).saturating_add(margin),
+    ) else {
+        return 0;
+    };
+    let original_x1 = x1;
+    let original_y1 = y1;
+    let original_z1 = z1;
+    let original_dx = x2 as f64 - original_x1 as f64;
+    let original_dy = y2 as f64 - original_y1 as f64;
+    let original_dz = z2 as f64 - z1 as f64;
+    let original_steps = original_dx.abs().max(original_dy.abs()).max(1.0);
+    let clipped = |start: i64, delta: f64, position: f64| {
+        (start as f64 + delta * position)
+            .round()
+            .clamp(i64::MIN as f64, i64::MAX as f64) as i64
+    };
+    let mut x1 = clipped(original_x1, original_dx, entering);
+    let mut y1 = clipped(original_y1, original_dy, entering);
+    let x2 = clipped(original_x1, original_dx, leaving);
+    let y2 = clipped(original_y1, original_dy, leaving);
+    let z1 = clipped(original_z1, original_dz, entering);
+    let z2 = clipped(original_z1, original_dz, leaving);
+    let skipped_steps = (original_steps * entering).round() as i64;
     let dx = (x2 - x1).abs();
     let sx = if x1 < x2 { 1 } else { -1 };
     let dy = -(y2 - y1).abs();
@@ -567,7 +669,8 @@ unsafe fn raster_line(
     let mut changed = 0_i64;
     let mut n = 0_i64;
     loop {
-        if n >= start && (n - start) % step.max(1) == 0 {
+        let original_n = skipped_steps.saturating_add(n);
+        if original_n >= start && (original_n - start) % step.max(1) == 0 {
             let z = z1 + (z2 - z1) * n / total;
             changed += unsafe { plot_brush(dc, x1, y1, z) };
         }
@@ -638,6 +741,15 @@ unsafe fn fill_polygon_pixels(dc: *mut CDC, points: &[CD3I32]) -> i64 {
     changed
 }
 
+unsafe fn fill_triangle_fan(dc: *mut CDC, points: &[CD3I32]) -> i64 {
+    let mut changed = 0;
+    for index in 1..points.len().saturating_sub(1) {
+        changed +=
+            unsafe { fill_polygon_pixels(dc, &[points[0], points[index], points[index + 1]]) };
+    }
+    changed
+}
+
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn tos_GrLine3(
     dc: *mut CDC,
@@ -653,8 +765,10 @@ pub unsafe extern "C" fn tos_GrLine3(
     if let Some(ctx) = unsafe { dc.as_ref() } {
         if ctx.flags & DCF_TRANSFORMATION != 0 {
             if let Some(transform) = ctx.transform {
-                transform(dc, &mut x1, &mut y1, &mut z1);
-                transform(dc, &mut x2, &mut y2, &mut z2);
+                unsafe {
+                    transform(dc, &mut x1, &mut y1, &mut z1);
+                    transform(dc, &mut x2, &mut y2, &mut z2);
+                }
             }
         }
     }
@@ -708,12 +822,12 @@ pub unsafe extern "C" fn tos_GrFillPoly3(dc: *mut CDC, n: i64, poly: *const CD3I
             point.y = y.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32;
             point.z = z.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32;
         }
-        changed += unsafe { fill_polygon_pixels(dc, &mirrored) };
+        changed += unsafe { fill_triangle_fan(dc, &mirrored) };
         if flags & DCF_JUST_MIRROR != 0 {
             return changed;
         }
     }
-    changed + unsafe { fill_polygon_pixels(dc, points) }
+    changed + unsafe { fill_triangle_fan(dc, points) }
 }
 
 #[unsafe(no_mangle)]
@@ -725,6 +839,9 @@ pub unsafe extern "C" fn tos_GrBlot(dc: *mut CDC, x: i64, y: i64, image: *mut CD
     if image.body.is_null() {
         return 0;
     }
+    let old_color = unsafe { (*dc).color };
+    let old_depth = unsafe { (*dc).depth_buf };
+    unsafe { (*dc).depth_buf = ptr::null_mut() };
     let mut changed = 0;
     for iy in 0..image.height as i64 {
         for ix in 0..image.width as i64 {
@@ -733,9 +850,15 @@ pub unsafe extern "C" fn tos_GrBlot(dc: *mut CDC, x: i64, y: i64, image: *mut CD
                     .body
                     .add(iy as usize * image.width as usize + ix as usize)
             };
-            unsafe { (*dc).color = color as u32 };
-            changed += unsafe { plot(dc, x + ix, y + iy, 0) } as i64;
+            if color != u8::MAX || image.flags & DCF_NO_TRANSPARENTS != 0 {
+                unsafe { (*dc).color = ((*dc).color & !0xff) | u32::from(color) };
+                changed += unsafe { plot(dc, x + ix, y + iy, 0) } as i64;
+            }
         }
+    }
+    unsafe {
+        (*dc).color = old_color;
+        (*dc).depth_buf = old_depth;
     }
     changed
 }
@@ -879,7 +1002,7 @@ fn draw_sprite_placeholder(dc: *mut CDC, mut x: i64, mut y: i64, mut z: i64, col
         && ctx.flags & DCF_TRANSFORMATION != 0
         && let Some(transform) = ctx.transform
     {
-        transform(dc, &mut x, &mut y, &mut z);
+        unsafe { transform(dc, &mut x, &mut y, &mut z) };
     }
     let old_color = unsafe { (*dc).color };
     unsafe { (*dc).color = color };
@@ -970,7 +1093,7 @@ unsafe fn sprite_plot(dc: *mut CDC, mut x: i64, mut y: i64, mut z: i64) -> bool 
         && ctx.flags & DCF_TRANSFORMATION != 0
         && let Some(transform) = ctx.transform
     {
-        transform(dc, &mut x, &mut y, &mut z);
+        unsafe { transform(dc, &mut x, &mut y, &mut z) };
     }
     let mut changed = 0;
     if let Some(flags) = unsafe { dc.as_ref() }.map(|ctx| ctx.flags)
@@ -1092,9 +1215,28 @@ unsafe fn draw_sprite(
             break;
         }
         match ty {
-            1 => unsafe { (*dc).color = u32::from(*elem.add(1)) },
-            2 => unsafe { (*dc).color = u32::from(*elem.add(1)) },
+            1 => unsafe {
+                (*dc).color =
+                    (*dc).color & !(COLORROP_COLORS_MASK | ROPF_DITHER) | u32::from(*elem.add(1));
+            },
+            2 => unsafe {
+                (*dc).color = (*dc).color & !COLORROP_COLORS_MASK
+                    | u32::from(*elem.add(1))
+                    | u32::from(*elem.add(2)) << 16
+                    | ROPF_DITHER;
+            },
             3 => unsafe { (*dc).thick = sprite_i32(elem, 1).max(1) },
+            4 => {
+                let x1 = x + i64::from(unsafe { sprite_i32(elem, 1) });
+                let y1 = y + i64::from(unsafe { sprite_i32(elem, 5) });
+                let x2 = x + i64::from(unsafe { sprite_i32(elem, 9) });
+                let y2 = y + i64::from(unsafe { sprite_i32(elem, 13) });
+                if unsafe { tos_DCSymmetrySet(dc, x1, y1, x2, y2) } != 0 {
+                    unsafe { (*dc).flags |= DCF_SYMMETRY };
+                } else {
+                    unsafe { (*dc).flags &= !DCF_SYMMETRY };
+                }
+            }
             5 => unsafe { (*dc).flags |= DCF_TRANSFORMATION },
             6 => unsafe { (*dc).flags &= !DCF_TRANSFORMATION },
             7 => {
@@ -1187,8 +1329,11 @@ unsafe fn draw_sprite(
                 let stride = (width + 7) & !7;
                 for iy in 0..height {
                     for ix in 0..width {
-                        unsafe { (*dc).color = u32::from(*elem.add(17 + iy * stride + ix)) };
-                        unsafe { sprite_plot(dc, bx + ix as i64, by + iy as i64, z) };
+                        let color = unsafe { *elem.add(17 + iy * stride + ix) };
+                        if color != u8::MAX {
+                            unsafe { (*dc).color = u32::from(color) };
+                            unsafe { sprite_plot(dc, bx + ix as i64, by + iy as i64, z) };
+                        }
                     }
                 }
             }
@@ -1207,7 +1352,8 @@ unsafe fn draw_sprite(
     unsafe {
         (*dc).color = old_color;
         (*dc).thick = old_thick;
-        (*dc).flags = (*dc).flags & !DCF_TRANSFORMATION | old_flags & DCF_TRANSFORMATION;
+        (*dc).flags = (*dc).flags & !(DCF_SYMMETRY | DCF_TRANSFORMATION)
+            | old_flags & (DCF_SYMMETRY | DCF_TRANSFORMATION);
     }
     true
 }
@@ -1384,16 +1530,139 @@ mod tests {
         let dc = tos_DCNew(8, 8, ptr::null_mut(), 0);
         unsafe {
             let depth = tos_DCDepthBufAlloc(dc);
+            (*dc).flags |= DCF_TRANSFORMATION | DCF_SYMMETRY | DCF_JUST_MIRROR;
+            (*dc).color = tos_abi::LTRED;
+            (*dc).x = 12;
+            (*dc).y = 34;
+            (*dc).z = 56;
+            (*dc).thick = 7;
             let alias = tos_DCAlias(dc, ptr::null_mut());
             assert!(!(*alias).owns_body);
             assert!(!(*alias).owns_depth_buf);
             assert_ne!((*alias).r, (*dc).r);
+            assert_eq!((*alias).flags, DCF_ALIAS);
+            assert_eq!((*alias).color, tos_abi::BLACK);
+            assert_eq!(((*alias).x, (*alias).y, (*alias).z), (0, 0, 0));
+            assert_eq!((*alias).thick, 1);
+            assert!((*alias).transform.is_some());
 
             tos_DCDel(alias);
             tos_DCFill(dc, i64::from(tos_abi::LTRED));
             assert_eq!(*(*dc).body, tos_abi::LTRED as u8);
             assert_eq!((*dc).depth_buf, depth);
             assert_eq!(*tos_DCDepthBufRst(dc), i32::MAX);
+            tos_DCDel(dc);
+        }
+    }
+
+    #[test]
+    fn default_dc_transform_applies_matrix_and_screen_offset() {
+        let dc = tos_DCNew(8, 8, ptr::null_mut(), 0);
+        unsafe {
+            tos_runtime::tos_Mat4x4TranslationEqu((*dc).r, 2, 3, 4);
+            (*dc).x = 10;
+            (*dc).y = 20;
+            (*dc).z = 30;
+            let (mut x, mut y, mut z) = (1, 1, 1);
+            ((*dc).transform.unwrap())(dc, &mut x, &mut y, &mut z);
+            assert_eq!((x, y, z), (13, 24, 35));
+            tos_DCDel(dc);
+        }
+    }
+
+    #[test]
+    fn depth_buffer_rejects_geometry_behind_the_camera() {
+        let dc = tos_DCNew(4, 4, ptr::null_mut(), 0);
+        unsafe {
+            tos_DCDepthBufAlloc(dc);
+            (*dc).color = tos_abi::LTRED;
+            assert!(!plot(dc, 1, 1, -1));
+            assert_eq!(*(*dc).body.add(5), tos_abi::BLACK as u8);
+            assert_eq!(*(*dc).depth_buf.add(5), i32::MAX);
+
+            assert!(plot(dc, 1, 1, 4));
+            assert_eq!(*(*dc).body.add(5), tos_abi::LTRED as u8);
+            assert_eq!(*(*dc).depth_buf.add(5), 4);
+            tos_DCDel(dc);
+        }
+    }
+
+    #[test]
+    fn regular_dither_alternates_both_templeos_colors() {
+        let dc = tos_DCNew(4, 2, ptr::null_mut(), 0);
+        unsafe {
+            (*dc).color = tos_abi::GREEN | (tos_abi::LTGREEN << 16) | ROPF_DITHER;
+            assert!(plot(dc, 0, 0, 0));
+            assert!(plot(dc, 1, 0, 0));
+            assert!(plot(dc, 0, 1, 0));
+            assert_eq!(*(*dc).body, tos_abi::GREEN as u8);
+            assert_eq!(*(*dc).body.add(1), tos_abi::LTGREEN as u8);
+            assert_eq!(*(*dc).body.add(4), tos_abi::LTGREEN as u8);
+            tos_DCDel(dc);
+        }
+    }
+
+    #[test]
+    fn plot_honors_templeos_xor_raster_operation() {
+        let dc = tos_DCNew(2, 1, ptr::null_mut(), 0);
+        unsafe {
+            *(*dc).body = tos_abi::CYAN as u8;
+            (*dc).color = (ROPB_XOR << 8) | tos_abi::BLUE;
+            assert!(plot(dc, 0, 0, 0));
+            assert_eq!(*(*dc).body, tos_abi::GREEN as u8);
+            assert!(plot(dc, 0, 0, 0));
+            assert_eq!(*(*dc).body, tos_abi::CYAN as u8);
+            tos_DCDel(dc);
+        }
+    }
+
+    #[test]
+    fn blot_skips_transparency_and_preserves_pen_and_depth() {
+        let dc = tos_DCNew(3, 1, ptr::null_mut(), 0);
+        let image = tos_DCNew(2, 1, ptr::null_mut(), 0);
+        unsafe {
+            tos_DCFill(dc, i64::from(tos_abi::BLUE));
+            tos_DCDepthBufAlloc(dc);
+            (*dc).color = tos_abi::YELLOW;
+            *(*image).body = u8::MAX;
+            *(*image).body.add(1) = tos_abi::LTRED as u8;
+
+            assert_eq!(tos_GrBlot(dc, 0, 0, image), 1);
+            assert_eq!(*(*dc).body, tos_abi::BLUE as u8);
+            assert_eq!(*(*dc).body.add(1), tos_abi::LTRED as u8);
+            assert_eq!((*dc).color, tos_abi::YELLOW);
+            assert_eq!(*(*dc).depth_buf, i32::MAX);
+            assert_eq!(*(*dc).depth_buf.add(1), i32::MAX);
+
+            (*image).flags |= DCF_NO_TRANSPARENTS;
+            assert_eq!(tos_GrBlot(dc, 0, 0, image), 1);
+            assert_eq!(*(*dc).body, u8::MAX);
+            tos_DCDel(image);
+            tos_DCDel(dc);
+        }
+    }
+
+    #[test]
+    fn sprite_dither_and_planar_symmetry_match_templeos_state() {
+        let dc = tos_DCNew(12, 8, ptr::null_mut(), 0);
+        let mut sprite = vec![2, tos_abi::GREEN as u8, tos_abi::LTGREEN as u8, 4];
+        for value in [5_i32, 0, 5, 1] {
+            sprite.extend_from_slice(&value.to_le_bytes());
+        }
+        sprite.push(10);
+        for value in [1_i32, 4, 2, 4] {
+            sprite.extend_from_slice(&value.to_le_bytes());
+        }
+        sprite.push(0);
+
+        tos_Sprite3(dc, 0, 0, 0, sprite.as_mut_ptr(), 0);
+        unsafe {
+            let pixels = slice::from_raw_parts((*dc).body, 12 * 8);
+            assert_eq!(pixels[4 * 12 + 1], tos_abi::LTGREEN as u8);
+            assert_eq!(pixels[4 * 12 + 2], tos_abi::GREEN as u8);
+            assert_eq!(pixels[4 * 12 + 8], tos_abi::GREEN as u8);
+            assert_eq!(pixels[4 * 12 + 9], tos_abi::LTGREEN as u8);
+            assert_eq!((*dc).flags & DCF_SYMMETRY, 0);
             tos_DCDel(dc);
         }
     }
@@ -1415,15 +1684,37 @@ mod tests {
         let (mut x1, mut y1, mut x2, mut y2) = (-100, 100, 1000, 200);
         unsafe {
             assert_eq!(
-                tos_DCClipLine(dc, &mut x1, &mut y1, &mut x2, &mut y2, 1, 1),
+                tos_DCClipLine(dc, &mut x1, &mut y1, &mut x2, &mut y2, 0, 0),
                 1
             );
             assert_eq!((x1, y1, x2, y2), (0, 109, 639, 167));
 
             let (mut ox1, mut oy1, mut ox2, mut oy2) = (10, -10, 20, -10);
             assert_eq!(
-                tos_DCClipLine(dc, &mut ox1, &mut oy1, &mut ox2, &mut oy2, 1, 1),
+                tos_DCClipLine(dc, &mut ox1, &mut oy1, &mut ox2, &mut oy2, 0, 0),
                 0
+            );
+
+            let (mut fx1, mut fy1, mut fx2, mut fy2) = (10, -2, 20, -2);
+            assert_eq!(
+                tos_DCClipLine(dc, &mut fx1, &mut fy1, &mut fx2, &mut fy2, 0, 2),
+                1
+            );
+            assert_eq!((fx1, fy1, fx2, fy2), (10, -2, 20, -2));
+            tos_DCDel(dc);
+        }
+    }
+
+    #[test]
+    fn line_rasterization_clips_extreme_offscreen_endpoints() {
+        let dc = tos_DCNew(8, 8, ptr::null_mut(), 0);
+        unsafe {
+            (*dc).color = tos_abi::WHITE;
+            assert_eq!(tos_GrLine3(dc, -1_000_000, 4, 0, 1_000_000, 4, 0, 1, 0), 8);
+            assert!(
+                slice::from_raw_parts((*dc).body, 64)[32..40]
+                    .iter()
+                    .all(|pixel| *pixel == tos_abi::WHITE as u8)
             );
             tos_DCDel(dc);
         }
@@ -1565,6 +1856,28 @@ mod tests {
             tos_GrFillPoly3(dc, 3, triangle.as_ptr());
             let depth = *(*dc).depth_buf.add(8 + 1);
             assert!(depth > 10 && depth < 70, "interpolated depth was {depth}");
+        }
+    }
+
+    #[test]
+    fn convex_polygons_use_the_templeos_triangle_fan() {
+        let dc = tos_DCNew(5, 5, ptr::null_mut(), 0);
+        let quad = [
+            CD3I32 { x: 0, y: 0, z: 0 },
+            CD3I32 { x: 4, y: 0, z: 0 },
+            CD3I32 { x: 4, y: 4, z: 100 },
+            CD3I32 { x: 0, y: 4, z: 0 },
+        ];
+        unsafe {
+            tos_DCDepthBufAlloc(dc);
+            (*dc).color = tos_abi::LTBLUE;
+            tos_GrFillPoly3(dc, quad.len() as i64, quad.as_ptr());
+            let diagonal_depth = *(*dc).depth_buf.add(2 * 5 + 2);
+            assert!(
+                (45..=55).contains(&diagonal_depth),
+                "fan diagonal depth was {diagonal_depth}"
+            );
+            tos_DCDel(dc);
         }
     }
 }

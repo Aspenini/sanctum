@@ -433,6 +433,17 @@ impl Sema {
             false,
         );
         s.add_builtin(
+            "DCTransform",
+            Ty::U0,
+            vec![
+                ("dc", cdc_ptr.clone()),
+                ("x", i64_ptr.clone()),
+                ("y", i64_ptr.clone()),
+                ("z", i64_ptr.clone()),
+            ],
+            false,
+        );
+        s.add_builtin(
             "DCSymmetrySet",
             Ty::I64,
             vec![

@@ -200,6 +200,30 @@ Main;
     }
 
     #[test]
+    fn default_device_context_transform_is_callable_from_holyc() {
+        tos_runtime::capture_begin();
+        run_source(
+            "dc_transform.HC",
+            r#"
+U0 Main()
+{
+  CDC *dc=DCNew(8,8,NULL,FALSE);
+  I64 x=1,y=2,z=3;
+  dc->x=10;
+  dc->y=20;
+  dc->z=30;
+  DCTransform(dc,&x,&y,&z);
+  "%d %d %d\n",x,y,z;
+  DCDel(dc);
+}
+Main;
+"#,
+        )
+        .unwrap();
+        assert_eq!(tos_runtime::capture_take().unwrap(), b"11 22 33\n");
+    }
+
+    #[test]
     fn adjacent_strings_are_concatenated() {
         tos_runtime::capture_begin();
         run_source(

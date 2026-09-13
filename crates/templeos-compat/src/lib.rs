@@ -63,7 +63,13 @@ mod tests {
             symbols.len(),
             "duplicate compatibility symbol"
         );
-        for required in ["tos_Print", "tos_GrLine3", "tos_Refresh", "tos_Play"] {
+        for required in [
+            "tos_Print",
+            "tos_DCTransform",
+            "tos_GrLine3",
+            "tos_Refresh",
+            "tos_Play",
+        ] {
             assert!(symbols.iter().any(|(name, _)| *name == required));
         }
     }
