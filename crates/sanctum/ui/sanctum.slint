@@ -7,7 +7,6 @@ export struct GameItem {
     path: string,
     cover: image,
     has-cover: bool,
-    favorite: bool,
     missing: bool,
     needs-entrypoint: bool,
 }
@@ -27,19 +26,22 @@ component FlatButton inherits Rectangle {
     in property <bool> primary: false;
     in property <bool> enabled: true;
     in property <length> button-height: 36px;
+    in property <length> text-size: 14px;
     callback clicked;
 
     height: root.button-height;
-    min-width: 72px;
+    min-width: 80px;
     border-radius: 4px;
     background: !root.enabled ? #242424 : touch.pressed ? #4a4a4a : touch.has-hover ? #3b3b3b : root.primary ? #e0e0e0 : #303030;
     border-width: root.primary ? 0px : 1px;
     border-color: #464646;
 
     Text {
+        x: 10px;
+        width: parent.width - 20px;
         text: root.text;
         color: !root.enabled ? #686868 : root.primary ? #151515 : #ededed;
-        font-size: 14px;
+        font-size: root.text-size;
         font-weight: 500;
         horizontal-alignment: center;
         vertical-alignment: center;
@@ -75,48 +77,6 @@ component ToolButton inherits Rectangle {
         enabled: root.enabled;
         clicked => { root.clicked(); }
     }
-}
-
-component IconTextButton inherits Rectangle {
-    in property <Icon> icon;
-    in property <string> text;
-    in property <bool> active: false;
-    callback clicked;
-
-    height: 36px;
-    min-width: 104px;
-    border-radius: 4px;
-    background: touch.pressed ? #4a4a4a : touch.has-hover ? #3b3b3b : #303030;
-    border-width: 1px;
-    border-color: #464646;
-
-    HorizontalLayout {
-        padding-left: 11px;
-        padding-right: 11px;
-        spacing: 7px;
-        alignment: center;
-        Rectangle {
-            width: 18px;
-            height: 18px;
-            background: transparent;
-            IconDisplay {
-                icon: root.icon;
-                size: 18px;
-                stroke: #ededed;
-                stroke-fill: root.active ? #ededed : transparent;
-                stroke-width: 1.8;
-            }
-        }
-        Text {
-            text: root.text;
-            color: #ededed;
-            font-size: 14px;
-            font-weight: 500;
-            vertical-alignment: center;
-        }
-    }
-
-    touch := TouchArea { clicked => { root.clicked(); } }
 }
 
 component SideButton inherits Rectangle {
@@ -240,13 +200,6 @@ component GameTile inherits Rectangle {
                 vertical-alignment: center;
                 horizontal-stretch: 1;
             }
-            if root.game.favorite : IconDisplay {
-                icon: IconSet.Star;
-                size: 17px;
-                stroke: #f0f0f0;
-                stroke-fill: #f0f0f0;
-                stroke-width: 1.7;
-            }
         }
     }
 
@@ -341,13 +294,11 @@ export component MainWindow inherits Window {
     in property <bool> details-open: false;
     in property <bool> choices-open: false;
     in property <bool> storage-confirm-open: false;
-    in property <int> filter-index: 0;
     in property <int> sort-index: 0;
     in property <string> status: "Ready";
     in property <string> program-log;
     in property <string> selected-title;
     in property <string> selected-path;
-    in property <bool> selected-favorite: false;
     in property <string> data-path;
     in property <string> templeos-path;
     in property <string> storage-label;
@@ -366,14 +317,11 @@ export component MainWindow inherits Window {
     callback add-library;
     callback run-file;
     callback search-changed(string);
-    callback set-filter(int);
     callback set-sort(int);
     callback select-game(string);
     callback run-game(string);
-    callback toggle-favorite(string);
     callback close-details;
     callback save-title(string);
-    callback toggle-selected-favorite;
     callback choose-entrypoint;
     callback choose-cover;
     callback remove-selected;
@@ -408,12 +356,10 @@ export component MainWindow inherits Window {
             VerticalLayout {
                 padding: 8px;
                 spacing: 6px;
+                alignment: center;
 
-                SideButton { icon: IconSet.Library; label: "Library"; active: !root.running && !root.settings-open; clicked => { root.close-settings(); root.show-library(); root.set-filter(0); } }
+                SideButton { icon: IconSet.Library; label: "Library"; active: !root.running && !root.settings-open; clicked => { root.close-settings(); root.show-library(); } }
                 SideButton { icon: IconSet.FilePlay; label: "Run"; clicked => { root.close-settings(); root.run-file(); } }
-
-                Rectangle { vertical-stretch: 1; background: transparent; }
-
                 SideButton { icon: IconSet.Plus; label: "Add"; clicked => { root.close-settings(); root.add-library(); } }
                 SideButton { icon: IconSet.Settings; label: "Settings"; active: root.settings-open; clicked => { root.show-settings(); } }
             }
@@ -456,7 +402,7 @@ export component MainWindow inherits Window {
                         spacing: 10px;
                         Text { text: "No programs"; color: #ededed; font-size: 20px; horizontal-alignment: center; }
                         Text { text: "Choose a folder containing HolyC programs to get started."; color: #888888; font-size: 13px; horizontal-alignment: center; }
-                        FlatButton { text: "Choose library folder"; primary: true; clicked => { root.add-library(); } }
+                        FlatButton { width: 184px; text: "Choose library folder"; primary: true; clicked => { root.add-library(); } }
                     }
                 }
 
@@ -497,30 +443,30 @@ export component MainWindow inherits Window {
                         padding-right: 8px;
                         spacing: 7px;
                         alignment: center;
-                        FlatButton { text: "Library"; clicked => { root.show-library(); } }
-                        FlatButton { text: "Stop"; clicked => { root.stop-runner(); } }
-                        FlatButton { text: "Restart"; clicked => { root.restart-runner(); } }
+                        FlatButton { width: 92px; text: "Library"; clicked => { root.show-library(); } }
+                        FlatButton { width: 72px; text: "Stop"; clicked => { root.stop-runner(); } }
+                        FlatButton { width: 88px; text: "Restart"; clicked => { root.restart-runner(); } }
                         ToolButton { icon: root.muted ? IconSet.VolumeX : IconSet.Volume2; active: root.muted; clicked => { root.toggle-mute(); } }
-                        FlatButton { text: root.fullscreen ? "Windowed" : "Fullscreen"; clicked => { root.toggle-fullscreen(); } }
-                        FlatButton { text: root.detached ? "Dock" : "Pop out"; clicked => { root.toggle-detached(); } }
+                        FlatButton { width: 108px; text: root.fullscreen ? "Windowed" : "Fullscreen"; clicked => { root.toggle-fullscreen(); } }
+                        FlatButton { width: 90px; text: root.detached ? "Dock" : "Pop out"; clicked => { root.toggle-detached(); } }
                         Rectangle { horizontal-stretch: 1; background: transparent; }
                         Text { text: root.status; color: #9a9a9a; font-size: 12px; vertical-alignment: center; }
                         ToolButton { icon: IconSet.Menu; active: root.log-open; clicked => { root.toggle-log(); } }
                     }
                 }
 
-                if root.menu-items.length > 0 : Rectangle {
-                    height: 32px;
-                    background: transparent;
-                    HorizontalLayout {
-                        spacing: 5px;
-                        for menu in root.menu-items : FlatButton {
-                            text: menu.label;
-                            enabled: menu.enabled;
-                            button-height: 30px;
-                            clicked => { root.invoke-menu(menu.command); }
-                        }
-                        Rectangle { horizontal-stretch: 1; background: transparent; }
+                if root.menu-items.length > 0 : Flickable {
+                    height: 34px;
+                    viewport-width: root.menu-items.length * 120px;
+                    viewport-height: self.height;
+                    for menu[index] in root.menu-items : FlatButton {
+                        x: index * 120px;
+                        width: 114px;
+                        text: menu.label;
+                        text-size: 12px;
+                        enabled: menu.enabled;
+                        button-height: 32px;
+                        clicked => { root.invoke-menu(menu.command); }
                     }
                 }
 
@@ -593,14 +539,14 @@ export component MainWindow inherits Window {
                 Text { text: root.selected-path; color: #d0d0d0; font-size: 12px; overflow: elide; }
                 HorizontalLayout {
                     spacing: 8px;
-                    IconTextButton { icon: IconSet.Star; text: "Favorite"; active: root.selected-favorite; clicked => { root.toggle-selected-favorite(); } }
-                    FlatButton { text: "Entrypoint"; clicked => { root.choose-entrypoint(); } }
-                    FlatButton { text: "Cover image"; clicked => { root.choose-cover(); } }
+                    FlatButton { width: 112px; text: "Entrypoint"; clicked => { root.choose-entrypoint(); } }
+                    FlatButton { width: 120px; text: "Cover image"; clicked => { root.choose-cover(); } }
+                    Rectangle { horizontal-stretch: 1; background: transparent; }
                 }
                 Rectangle { vertical-stretch: 1; background: transparent; }
                 HorizontalLayout {
                     spacing: 8px;
-                    FlatButton { text: "Remove from library"; clicked => { root.remove-selected(); } }
+                    FlatButton { width: 178px; text: "Remove from library"; clicked => { root.remove-selected(); } }
                     Rectangle { horizontal-stretch: 1; background: transparent; }
                     FlatButton { text: "Run"; primary: true; clicked => { root.run-selected(); } }
                 }
@@ -770,11 +716,11 @@ export component GameWindow inherits Window {
                 padding-right: 7px;
                 spacing: 7px;
                 alignment: center;
-                FlatButton { text: "Dock"; clicked => { root.dock(); } }
-                FlatButton { text: "Stop"; clicked => { root.stop-runner(); } }
-                FlatButton { text: "Restart"; clicked => { root.restart-runner(); } }
+                FlatButton { width: 72px; text: "Dock"; clicked => { root.dock(); } }
+                FlatButton { width: 72px; text: "Stop"; clicked => { root.stop-runner(); } }
+                FlatButton { width: 88px; text: "Restart"; clicked => { root.restart-runner(); } }
                 ToolButton { icon: root.muted ? IconSet.VolumeX : IconSet.Volume2; active: root.muted; clicked => { root.toggle-mute(); } }
-                FlatButton { text: root.fullscreen ? "Windowed" : "Fullscreen"; clicked => { root.toggle-fullscreen(); } }
+                FlatButton { width: 108px; text: root.fullscreen ? "Windowed" : "Fullscreen"; clicked => { root.toggle-fullscreen(); } }
                 Rectangle { horizontal-stretch: 1; background: transparent; }
                 Text { text: root.status; color: #999999; font-size: 12px; vertical-alignment: center; }
             }

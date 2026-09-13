@@ -10,20 +10,13 @@ use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 #[cfg(test)]
 use templeos_compat::host::input::{SCF_ALT, SCF_CTRL, SCF_SHIFT};
 use templeos_compat::host::input::{ascii_key_event, scan_flags};
 use uuid::Uuid;
 
 slint::include_modules!();
-
-#[derive(Clone, Copy, Eq, PartialEq)]
-enum Filter {
-    All,
-    Favorites,
-    Recent,
-}
 
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum Sort {
@@ -48,7 +41,6 @@ struct EntryChoiceRequest {
 struct AppState {
     paths: StoragePaths,
     config: SanctumConfig,
-    filter: Filter,
     sort: Sort,
     search: String,
     selected: Option<Uuid>,
@@ -63,6 +55,7 @@ struct AppState {
     frame_width: u32,
     frame_height: u32,
     frame_sequence: u64,
+    cover_capture_started: Option<Instant>,
     menu: Option<String>,
     detached: bool,
     fullscreen: bool,
@@ -82,7 +75,6 @@ impl AppState {
         Self {
             paths,
             config,
-            filter: Filter::All,
             sort: Sort::Title,
             search: String::new(),
             selected: None,
@@ -100,6 +92,7 @@ impl AppState {
             frame_width: 640,
             frame_height: 480,
             frame_sequence: 0,
+            cover_capture_started: None,
             menu: None,
             detached: false,
             fullscreen: false,
@@ -239,6 +232,8 @@ impl AppState {
         }
         match RunnerSession::spawn(source, templeos_root.as_deref(), &self.paths.root) {
             Ok(runner) => {
+                self.cover_capture_started =
+                    matches!(&target, RunTarget::Library(_)).then(Instant::now);
                 self.running = Some(target);
                 self.runner = Some(runner);
                 self.status = "Starting".into();
@@ -339,6 +334,7 @@ impl AppState {
         let restart = self.pending_restart.take();
         self.runner = None;
         self.running = None;
+        self.cover_capture_started = None;
         if restart.is_none() {
             self.detached = false;
             self.fullscreen = false;
@@ -353,10 +349,20 @@ impl AppState {
             return;
         };
         let id = *id;
+        let Some(started) = self.cover_capture_started else {
+            return;
+        };
+        if started.elapsed() < Duration::from_secs(1) {
+            return;
+        }
         let Some(item) = self.config.library.iter_mut().find(|item| item.id == id) else {
             return;
         };
-        if item.cover.is_some() || indexed.iter().copied().collect::<HashSet<_>>().len() < 5 {
+        if item.cover.is_some() {
+            self.cover_capture_started = None;
+            return;
+        }
+        if indexed.iter().copied().collect::<HashSet<_>>().len() < 5 {
             return;
         }
         let path = self.paths.covers.join(format!("{id}.png"));
@@ -377,6 +383,7 @@ impl AppState {
             image::imageops::resize(&cropped, 640, 480, image::imageops::FilterType::Nearest);
         if cover.save(&path).is_ok() {
             item.cover = Some(path);
+            self.cover_capture_started = None;
             self.library_dirty = true;
             self.persist();
         }
@@ -571,19 +578,6 @@ fn install_main_callbacks(ui: &MainWindow, game: &GameWindow, state: &Rc<RefCell
     simple_main_callback!(
         ui,
         state,
-        on_set_filter,
-        |state: &mut AppState, value: i32| {
-            state.filter = match value {
-                1 => Filter::Favorites,
-                2 => Filter::Recent,
-                _ => Filter::All,
-            };
-            state.library_dirty = true;
-        }
-    );
-    simple_main_callback!(
-        ui,
-        state,
         on_set_sort,
         |state: &mut AppState, value: i32| {
             state.sort = match value {
@@ -612,20 +606,6 @@ fn install_main_callbacks(ui: &MainWindow, game: &GameWindow, state: &Rc<RefCell
             }
         }
     );
-    simple_main_callback!(
-        ui,
-        state,
-        on_toggle_favorite,
-        |state: &mut AppState, value: SharedString| {
-            if let Ok(id) = Uuid::parse_str(value.as_str())
-                && let Some(item) = state.config.library.iter_mut().find(|item| item.id == id)
-            {
-                item.favorite = !item.favorite;
-                state.persist();
-                state.library_dirty = true;
-            }
-        }
-    );
     simple_main_callback!(ui, state, on_close_details, |state: &mut AppState| {
         state.selected = None;
     });
@@ -643,21 +623,6 @@ fn install_main_callbacks(ui: &MainWindow, game: &GameWindow, state: &Rc<RefCell
             }
         }
     );
-    simple_main_callback!(
-        ui,
-        state,
-        on_toggle_selected_favorite,
-        |state: &mut AppState| {
-            if let Some(id) = state.selected
-                && let Some(item) = state.config.library.iter_mut().find(|item| item.id == id)
-            {
-                item.favorite = !item.favorite;
-                state.persist();
-                state.library_dirty = true;
-            }
-        }
-    );
-
     let weak = ui.as_weak();
     let game_weak = game.as_weak();
     let shared = state.clone();
@@ -974,11 +939,6 @@ fn sync_all(ui: &MainWindow, game: &GameWindow, state: &Rc<RefCell<AppState>>) {
 fn sync_main_only(ui: &MainWindow, state: &Rc<RefCell<AppState>>) {
     let state = state.borrow();
     ui.set_status(state.status.clone().into());
-    ui.set_filter_index(match state.filter {
-        Filter::All => 0,
-        Filter::Favorites => 1,
-        Filter::Recent => 2,
-    });
     ui.set_sort_index(match state.sort {
         Sort::Title => 0,
         Sort::Recent => 1,
@@ -1037,7 +997,6 @@ fn sync_main_only(ui: &MainWindow, state: &Rc<RefCell<AppState>>) {
             }
             .into(),
         );
-        ui.set_selected_favorite(item.favorite);
     }
     ui.set_choices_open(state.entry_choices.is_some());
     let choices: Vec<ChoiceItem> = state
@@ -1095,14 +1054,7 @@ fn sync_library(ui: &MainWindow, state: &Rc<RefCell<AppState>>) {
         .config
         .library
         .iter()
-        .filter(|item| {
-            (query.is_empty() || item.title.to_ascii_lowercase().contains(&query))
-                && match state.filter {
-                    Filter::All => true,
-                    Filter::Favorites => item.favorite,
-                    Filter::Recent => item.last_played.is_some(),
-                }
-        })
+        .filter(|item| query.is_empty() || item.title.to_ascii_lowercase().contains(&query))
         .cloned()
         .collect::<Vec<_>>();
     entries.sort_by(|lhs, rhs| match state.sort {
@@ -1133,7 +1085,6 @@ fn sync_library(ui: &MainWindow, state: &Rc<RefCell<AppState>>) {
                 path: source_path.display().to_string().into(),
                 cover: cover.clone().unwrap_or_default(),
                 has_cover: cover.is_some(),
-                favorite: item.favorite,
                 missing,
                 needs_entrypoint,
             }

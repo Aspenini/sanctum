@@ -28,12 +28,13 @@ does not accept, copy, download, or extract ISO images.
 cargo run -p sanctum
 ```
 
-The Slint desktop app provides a searchable library with favorites and recents,
-editable entrypoints and cover art, a live indexed-color canvas, TempleOS menu
-actions, keyboard input, sound controls, logs, fullscreen mode, and graceful
-Stop/Restart controls. The live game can be detached into its own window and
-re-docked without restarting its isolated runner. A populated rendered frame
-can automatically become a game's 4:3 library cover. A multi-file project's
+The Slint desktop app provides a searchable and sortable library, editable
+entrypoints and cover art, a live indexed-color canvas, TempleOS menu actions,
+keyboard input, sound controls, logs, fullscreen mode, and graceful Stop/Restart
+controls. The live game can be detached into its own window and re-docked
+without restarting its isolated runner. The first sufficiently populated frame
+received after one second of execution can automatically become a game's 4:3
+library cover. A multi-file project's
 entrypoint is selected on its first run and remembered. The sidebar Run action
 can also launch a chosen `.HC` file once without adding it to the library.
 
