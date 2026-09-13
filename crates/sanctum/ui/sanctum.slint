@@ -1,4 +1,5 @@
 import { LineEdit, ListView, ScrollView } from "std-widgets.slint";
+import { Icon, IconDisplay, IconSet } from "@lucide";
 
 export struct GameItem {
     id: string,
@@ -50,7 +51,7 @@ component FlatButton inherits Rectangle {
 }
 
 component ToolButton inherits Rectangle {
-    in property <string> text;
+    in property <Icon> icon;
     in property <bool> active: false;
     in property <bool> enabled: true;
     callback clicked;
@@ -60,12 +61,13 @@ component ToolButton inherits Rectangle {
     border-radius: 4px;
     background: !root.enabled ? transparent : touch.pressed ? #494949 : touch.has-hover ? #383838 : root.active ? #444444 : transparent;
 
-    Text {
-        text: root.text;
-        color: root.enabled ? #eeeeee : #676767;
-        font-size: 19px;
-        horizontal-alignment: center;
-        vertical-alignment: center;
+    IconDisplay {
+        icon: root.icon;
+        size: 20px;
+        stroke: root.enabled ? #eeeeee : #676767;
+        stroke-width: 1.8;
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
     }
 
     touch := TouchArea {
@@ -74,8 +76,50 @@ component ToolButton inherits Rectangle {
     }
 }
 
+component IconTextButton inherits Rectangle {
+    in property <Icon> icon;
+    in property <string> text;
+    in property <bool> active: false;
+    callback clicked;
+
+    height: 36px;
+    min-width: 104px;
+    border-radius: 4px;
+    background: touch.pressed ? #4a4a4a : touch.has-hover ? #3b3b3b : #303030;
+    border-width: 1px;
+    border-color: #464646;
+
+    HorizontalLayout {
+        padding-left: 11px;
+        padding-right: 11px;
+        spacing: 7px;
+        alignment: center;
+        Rectangle {
+            width: 18px;
+            height: 18px;
+            background: transparent;
+            IconDisplay {
+                icon: root.icon;
+                size: 18px;
+                stroke: #ededed;
+                stroke-fill: root.active ? #ededed : transparent;
+                stroke-width: 1.8;
+            }
+        }
+        Text {
+            text: root.text;
+            color: #ededed;
+            font-size: 14px;
+            font-weight: 500;
+            vertical-alignment: center;
+        }
+    }
+
+    touch := TouchArea { clicked => { root.clicked(); } }
+}
+
 component SideButton inherits Rectangle {
-    in property <string> symbol;
+    in property <Icon> icon;
     in property <string> label;
     in property <bool> active: false;
     callback clicked;
@@ -88,12 +132,17 @@ component SideButton inherits Rectangle {
         padding-top: 8px;
         padding-bottom: 6px;
         spacing: 1px;
-        Text {
-            text: root.symbol;
-            color: root.active ? #171717 : #eeeeee;
-            font-size: 22px;
-            horizontal-alignment: center;
-            vertical-alignment: center;
+        Rectangle {
+            height: 28px;
+            background: transparent;
+            IconDisplay {
+                icon: root.icon;
+                size: 22px;
+                stroke: root.active ? #171717 : #eeeeee;
+                stroke-width: 1.8;
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+            }
         }
         Text {
             text: root.label;
@@ -190,12 +239,12 @@ component GameTile inherits Rectangle {
                 vertical-alignment: center;
                 horizontal-stretch: 1;
             }
-            if root.game.favorite : Text {
-                text: "★";
-                color: #f0f0f0;
-                font-size: 16px;
-                font-weight: 400;
-                vertical-alignment: center;
+            if root.game.favorite : IconDisplay {
+                icon: IconSet.Star;
+                size: 17px;
+                stroke: #f0f0f0;
+                stroke-fill: #f0f0f0;
+                stroke-width: 1.7;
             }
         }
     }
@@ -359,28 +408,12 @@ export component MainWindow inherits Window {
                 padding: 8px;
                 spacing: 6px;
 
-                Rectangle {
-                    height: 56px;
-                    background: transparent;
-                    Text {
-                        text: "S";
-                        color: #f4f4f4;
-                        font-size: 24px;
-                        font-weight: 700;
-                        horizontal-alignment: center;
-                        vertical-alignment: center;
-                    }
-                }
-
-                SideButton { symbol: "▦"; label: "All"; active: !root.running && !root.settings-open && root.filter-index == 0; clicked => { root.close-settings(); root.show-library(); root.set-filter(0); } }
-                SideButton { symbol: "★"; label: "Favorites"; active: !root.running && !root.settings-open && root.filter-index == 1; clicked => { root.close-settings(); root.show-library(); root.set-filter(1); } }
-                SideButton { symbol: "◷"; label: "Recent"; active: !root.running && !root.settings-open && root.filter-index == 2; clicked => { root.close-settings(); root.show-library(); root.set-filter(2); } }
-                if root.running : SideButton { symbol: "▶"; label: "Playing"; active: true; clicked => { } }
+                SideButton { icon: IconSet.Library; label: "Library"; active: !root.running && !root.settings-open; clicked => { root.close-settings(); root.show-library(); root.set-filter(0); } }
 
                 Rectangle { vertical-stretch: 1; background: transparent; }
 
-                SideButton { symbol: "+"; label: "Add"; clicked => { root.close-settings(); root.add-file(); } }
-                SideButton { symbol: "⚙"; label: "Settings"; active: root.settings-open; clicked => { root.show-settings(); } }
+                SideButton { icon: IconSet.Plus; label: "Add"; clicked => { root.close-settings(); root.add-file(); } }
+                SideButton { icon: IconSet.Settings; label: "Settings"; active: root.settings-open; clicked => { root.show-settings(); } }
             }
         }
 
@@ -467,12 +500,12 @@ export component MainWindow inherits Window {
                         FlatButton { text: "Library"; clicked => { root.show-library(); } }
                         FlatButton { text: "Stop"; clicked => { root.stop-runner(); } }
                         FlatButton { text: "Restart"; clicked => { root.restart-runner(); } }
-                        ToolButton { text: root.muted ? "M" : "♪"; active: root.muted; clicked => { root.toggle-mute(); } }
+                        ToolButton { icon: root.muted ? IconSet.VolumeX : IconSet.Volume2; active: root.muted; clicked => { root.toggle-mute(); } }
                         FlatButton { text: root.fullscreen ? "Windowed" : "Fullscreen"; clicked => { root.toggle-fullscreen(); } }
                         FlatButton { text: root.detached ? "Dock" : "Pop out"; clicked => { root.toggle-detached(); } }
                         Rectangle { horizontal-stretch: 1; background: transparent; }
                         Text { text: root.status; color: #9a9a9a; font-size: 12px; vertical-alignment: center; }
-                        ToolButton { text: "≡"; active: root.log-open; clicked => { root.toggle-log(); } }
+                        ToolButton { icon: IconSet.Menu; active: root.log-open; clicked => { root.toggle-log(); } }
                     }
                 }
 
@@ -552,7 +585,7 @@ export component MainWindow inherits Window {
                 spacing: 12px;
                 HorizontalLayout {
                     PageTitle { text: "Program options"; horizontal-stretch: 1; font-size: 21px; }
-                    ToolButton { text: "×"; clicked => { root.close-details(); } }
+                    ToolButton { icon: IconSet.X; clicked => { root.close-details(); } }
                 }
                 Text { text: "Title"; color: #aaaaaa; font-size: 12px; }
                 LineEdit { text: root.selected-title; edited(value) => { root.save-title(value); } }
@@ -560,7 +593,7 @@ export component MainWindow inherits Window {
                 Text { text: root.selected-path; color: #d0d0d0; font-size: 12px; overflow: elide; }
                 HorizontalLayout {
                     spacing: 8px;
-                    FlatButton { text: root.selected-favorite ? "★ Favorite" : "☆ Favorite"; clicked => { root.toggle-selected-favorite(); } }
+                    IconTextButton { icon: IconSet.Star; text: "Favorite"; active: root.selected-favorite; clicked => { root.toggle-selected-favorite(); } }
                     FlatButton { text: "Entrypoint"; clicked => { root.choose-entrypoint(); } }
                     FlatButton { text: "Cover image"; clicked => { root.choose-cover(); } }
                 }
@@ -588,7 +621,7 @@ export component MainWindow inherits Window {
             HorizontalLayout {
                 height: 40px;
                 PageTitle { text: "Settings"; horizontal-stretch: 1; }
-                ToolButton { text: "×"; clicked => { root.close-settings(); } }
+                ToolButton { icon: IconSet.X; clicked => { root.close-settings(); } }
             }
 
             ScrollView {
@@ -653,7 +686,7 @@ export component MainWindow inherits Window {
                 spacing: 12px;
                 HorizontalLayout {
                     PageTitle { text: "Choose an entrypoint"; horizontal-stretch: 1; font-size: 21px; }
-                    ToolButton { text: "×"; clicked => { root.cancel-choices(); } }
+                    ToolButton { icon: IconSet.X; clicked => { root.cancel-choices(); } }
                 }
                 Text { text: "Select the .HC file Sanctum should launch."; color: #999999; font-size: 13px; }
                 ListView {
@@ -740,7 +773,7 @@ export component GameWindow inherits Window {
                 FlatButton { text: "Dock"; clicked => { root.dock(); } }
                 FlatButton { text: "Stop"; clicked => { root.stop-runner(); } }
                 FlatButton { text: "Restart"; clicked => { root.restart-runner(); } }
-                ToolButton { text: root.muted ? "M" : "♪"; active: root.muted; clicked => { root.toggle-mute(); } }
+                ToolButton { icon: root.muted ? IconSet.VolumeX : IconSet.Volume2; active: root.muted; clicked => { root.toggle-mute(); } }
                 FlatButton { text: root.fullscreen ? "Windowed" : "Fullscreen"; clicked => { root.toggle-fullscreen(); } }
                 Rectangle { horizontal-stretch: 1; background: transparent; }
                 Text { text: root.status; color: #999999; font-size: 12px; vertical-alignment: center; }
