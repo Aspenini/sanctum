@@ -443,12 +443,12 @@ export component MainWindow inherits Window {
                         padding-right: 8px;
                         spacing: 7px;
                         alignment: center;
-                        FlatButton { width: 92px; text: "Library"; clicked => { root.show-library(); } }
-                        FlatButton { width: 72px; text: "Stop"; clicked => { root.stop-runner(); } }
-                        FlatButton { width: 88px; text: "Restart"; clicked => { root.restart-runner(); } }
+                        ToolButton { icon: IconSet.Library; clicked => { root.show-library(); } }
+                        ToolButton { icon: IconSet.CircleStop; clicked => { root.stop-runner(); } }
+                        ToolButton { icon: IconSet.RotateCcw; clicked => { root.restart-runner(); } }
                         ToolButton { icon: root.muted ? IconSet.VolumeX : IconSet.Volume2; active: root.muted; clicked => { root.toggle-mute(); } }
-                        FlatButton { width: 108px; text: root.fullscreen ? "Windowed" : "Fullscreen"; clicked => { root.toggle-fullscreen(); } }
-                        FlatButton { width: 90px; text: root.detached ? "Dock" : "Pop out"; clicked => { root.toggle-detached(); } }
+                        ToolButton { icon: root.fullscreen ? IconSet.Minimize : IconSet.Maximize; active: root.fullscreen; clicked => { root.toggle-fullscreen(); } }
+                        ToolButton { icon: root.detached ? IconSet.Dock : IconSet.PictureInPicture2; active: root.detached; clicked => { root.toggle-detached(); } }
                         Rectangle { horizontal-stretch: 1; background: transparent; }
                         Text { text: root.status; color: #9a9a9a; font-size: 12px; vertical-alignment: center; }
                         ToolButton { icon: IconSet.Menu; active: root.log-open; clicked => { root.toggle-log(); } }
@@ -716,11 +716,11 @@ export component GameWindow inherits Window {
                 padding-right: 7px;
                 spacing: 7px;
                 alignment: center;
-                FlatButton { width: 72px; text: "Dock"; clicked => { root.dock(); } }
-                FlatButton { width: 72px; text: "Stop"; clicked => { root.stop-runner(); } }
-                FlatButton { width: 88px; text: "Restart"; clicked => { root.restart-runner(); } }
+                ToolButton { icon: IconSet.Dock; clicked => { root.dock(); } }
+                ToolButton { icon: IconSet.CircleStop; clicked => { root.stop-runner(); } }
+                ToolButton { icon: IconSet.RotateCcw; clicked => { root.restart-runner(); } }
                 ToolButton { icon: root.muted ? IconSet.VolumeX : IconSet.Volume2; active: root.muted; clicked => { root.toggle-mute(); } }
-                FlatButton { width: 108px; text: root.fullscreen ? "Windowed" : "Fullscreen"; clicked => { root.toggle-fullscreen(); } }
+                ToolButton { icon: root.fullscreen ? IconSet.Minimize : IconSet.Maximize; active: root.fullscreen; clicked => { root.toggle-fullscreen(); } }
                 Rectangle { horizontal-stretch: 1; background: transparent; }
                 Text { text: root.status; color: #999999; font-size: 12px; vertical-alignment: center; }
             }
