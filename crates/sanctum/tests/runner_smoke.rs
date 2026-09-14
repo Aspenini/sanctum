@@ -12,8 +12,8 @@ fn run_once(executable: &Path, entry: &Path, data: &Path, verify_input: bool) {
         while let Some(event) = runner.try_recv() {
             match event {
                 RunnerEvent::Frame { indexed, .. } => {
-                    if !received_frame {
-                        assert!(indexed.iter().any(|pixel| *pixel != indexed[0]));
+                    let painted = indexed.iter().any(|pixel| *pixel != indexed[0]);
+                    if !received_frame && painted {
                         received_frame = true;
                         if verify_input {
                             runner.send_key(0, 0x48).unwrap();

@@ -69,6 +69,9 @@ mod tests {
             "tos_DCSymmetry3Set",
             "tos_GrArrow3",
             "tos_GrLine3",
+            "tos_GrCircle3",
+            "tos_HasExcept",
+            "tos_Throw",
             "tos_Refresh",
             "tos_Play",
         ] {

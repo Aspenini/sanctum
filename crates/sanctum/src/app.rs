@@ -423,6 +423,11 @@ impl AppState {
             let _ = runner.send_key(ch, scan);
         }
     }
+
+    fn send_pointer(&self, x: i32, y: i32, left: bool, right: bool) {
+        let Some(runner) = &self.runner else { return };
+        let _ = runner.send_mouse(i64::from(x), i64::from(y), left, right);
+    }
 }
 
 impl Drop for AppState {
@@ -859,6 +864,10 @@ fn install_main_callbacks(ui: &MainWindow, game: &GameWindow, state: &Rc<RefCell
             .borrow()
             .send_input(text.as_str(), shift, control, alt);
     });
+    let shared = state.clone();
+    ui.on_game_pointer(move |x, y, left, right| {
+        shared.borrow().send_pointer(x, y, left, right);
+    });
 }
 
 fn install_game_callbacks(ui: &MainWindow, game: &GameWindow, state: &Rc<RefCell<AppState>>) {
@@ -917,6 +926,10 @@ fn install_game_callbacks(ui: &MainWindow, game: &GameWindow, state: &Rc<RefCell
         shared
             .borrow()
             .send_input(text.as_str(), shift, control, alt);
+    });
+    let shared = state.clone();
+    game.on_game_pointer(move |x, y, left, right| {
+        shared.borrow().send_pointer(x, y, left, right);
     });
 }
 

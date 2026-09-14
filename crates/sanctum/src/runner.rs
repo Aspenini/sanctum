@@ -134,6 +134,11 @@ impl RunnerSession {
         protocol::write_message(&mut *self.writer.lock().unwrap(), protocol::KEY, &payload)
     }
 
+    pub fn send_mouse(&self, x: i64, y: i64, left: bool, right: bool) -> io::Result<()> {
+        let payload = protocol::encode_mouse(x, y, left, right);
+        protocol::write_message(&mut *self.writer.lock().unwrap(), protocol::MOUSE, &payload)
+    }
+
     pub fn set_muted(&self, muted: bool) -> io::Result<()> {
         protocol::write_message(
             &mut *self.writer.lock().unwrap(),
@@ -307,6 +312,11 @@ pub fn run_child(entry: PathBuf) -> Result<(), String> {
                 protocol::KEY => {
                     if let Some((ch, scan)) = protocol::decode_key(&payload) {
                         templeos_compat::host::push_key_event(ch, scan);
+                    }
+                }
+                protocol::MOUSE => {
+                    if let Some((x, y, left, right)) = protocol::decode_mouse(&payload) {
+                        templeos_compat::host::set_mouse(x, y, left, right);
                     }
                 }
                 protocol::STOP => templeos_compat::host::request_exit(),

@@ -148,6 +148,27 @@ pub unsafe fn d3_unit(value: *mut CD3) -> *mut CD3 {
     value
 }
 
+pub fn pow_i64(base: i64, exp: i64) -> i64 {
+    if exp < 0 {
+        return 0;
+    }
+    let mut result = 1_i64;
+    let mut base = base;
+    let mut exp = exp as u64;
+    while exp > 0 {
+        if exp & 1 == 1 {
+            result = result.wrapping_mul(base);
+        }
+        base = base.wrapping_mul(base);
+        exp >>= 1;
+    }
+    result
+}
+
+pub fn pow_f64(base: f64, exp: f64) -> f64 {
+    base.powf(exp)
+}
+
 pub unsafe fn swap_i64(lhs: *mut i64, rhs: *mut i64) {
     if !lhs.is_null() && !rhs.is_null() {
         unsafe { std::ptr::swap(lhs, rhs) };
@@ -198,6 +219,15 @@ mod tests {
         let (mut x, mut y, mut z) = (0, 0, 0);
         unsafe { mat_mul_xyz(matrix.as_ptr(), &mut x, &mut y, &mut z) };
         assert_eq!((x, y, z), (10, 20, 30));
+    }
+
+    #[test]
+    fn integer_power_uses_binary_exponentiation() {
+        assert_eq!(pow_i64(2, 8), 256);
+        assert_eq!(pow_i64(3, 3), 27);
+        assert_eq!(pow_i64(5, 0), 1);
+        assert_eq!(pow_i64(2, -1), 0);
+        assert_eq!(pow_i64(-2, 3), -8);
     }
 
     #[test]

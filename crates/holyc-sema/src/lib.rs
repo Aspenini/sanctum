@@ -283,7 +283,7 @@ impl Sema {
         s.add_builtin("mp_cnt", Ty::I64, vec![], false);
         let task_ptr = Ty::Ptr(Box::new(Ty::Class {
             name: "CTask".into(),
-            size: 56,
+            size: 72,
         }));
         s.add_builtin(
             "Spawn",
@@ -503,6 +503,21 @@ impl Sema {
             false,
         );
         s.add_builtin(
+            "GrCircle3",
+            Ty::I64,
+            vec![
+                ("dc", cdc_ptr.clone()),
+                ("cx", Ty::I64),
+                ("cy", Ty::I64),
+                ("cz", Ty::I64),
+                ("radius", Ty::I64),
+                ("step", Ty::I64),
+                ("start_radians", Ty::F64),
+                ("len_radians", Ty::F64),
+            ],
+            false,
+        );
+        s.add_builtin(
             "GrFillPoly3",
             Ty::I64,
             vec![
@@ -611,14 +626,14 @@ impl Sema {
             "CTask".into(),
             ClassInfo {
                 name: "CTask".into(),
-                size: 56,
+                size: 72,
                 union_: false,
                 members: vec![
                     MemberInfo {
                         name: "addr".into(),
                         ty: Ty::Ptr(Box::new(Ty::Class {
                             name: "CTask".into(),
-                            size: 56,
+                            size: 72,
                         })),
                         offset: 0,
                         size: 8,
@@ -657,6 +672,18 @@ impl Sema {
                         name: "animate_task".into(),
                         ty: task_ptr.clone(),
                         offset: 48,
+                        size: 8,
+                    },
+                    MemberInfo {
+                        name: "pix_left".into(),
+                        ty: Ty::I64,
+                        offset: 56,
+                        size: 8,
+                    },
+                    MemberInfo {
+                        name: "pix_top".into(),
+                        ty: Ty::I64,
+                        offset: 64,
                         size: 8,
                     },
                 ],
@@ -798,10 +825,53 @@ impl Sema {
                 size: 111,
             },
         );
+        let d3i64 = Ty::Class {
+            name: "CD3I64".into(),
+            size: 24,
+        };
+        s.classes.insert(
+            "CMsStateGlbls".into(),
+            packed_class(
+                "CMsStateGlbls",
+                vec![
+                    ("pos", d3i64.clone()),
+                    ("pos_text", d3i64.clone()),
+                    ("presnap", d3i64.clone()),
+                    ("offset", d3i64),
+                    (
+                        "scale",
+                        Ty::Class {
+                            name: "CD3".into(),
+                            size: 24,
+                        },
+                    ),
+                    ("speed", Ty::F64),
+                    ("timestamp", Ty::I64),
+                    ("dbl_time", Ty::F64),
+                    ("left_dbl_time", Ty::F64),
+                    ("right_dbl_time", Ty::F64),
+                    ("lb", Ty::U8),
+                    ("rb", Ty::U8),
+                    ("show", Ty::U8),
+                    ("has_wheel", Ty::U8),
+                    ("left_dbl", Ty::U8),
+                    ("left_down_sent", Ty::U8),
+                    ("right_dbl", Ty::U8),
+                    ("right_down_sent", Ty::U8),
+                ],
+            ),
+        );
+        s.globals.insert(
+            "ms".into(),
+            Ty::Class {
+                name: "CMsStateGlbls".into(),
+                size: 168,
+            },
+        );
         if let Some(f) = s.functions.get_mut("Fs") {
             f.ret = Ty::Ptr(Box::new(Ty::Class {
                 name: "CTask".into(),
-                size: 56,
+                size: 72,
             }));
         }
         if let Some(f) = s.functions.get_mut("Gs") {
@@ -894,16 +964,7 @@ impl Sema {
         match stmt {
             Stmt::Expr { expr, span } => {
                 self.rewrite_expr(expr);
-                // `Main;` → `Main();` when Main is a function.
-                if let ExprKind::Ident(name) = &expr.kind {
-                    if self.functions.contains_key(name) {
-                        let callee = expr.clone();
-                        expr.kind = ExprKind::Call {
-                            callee: Box::new(callee),
-                            args: vec![],
-                        };
-                    }
-                }
+                Self::callify_function_ident(expr, &self.functions);
                 let _ = span;
             }
             Stmt::Block { stmts, .. } => {
@@ -974,9 +1035,23 @@ impl Sema {
             Stmt::Decl(v) => {
                 if let Some(init) = &mut v.init {
                     self.rewrite_expr(init);
+                    Self::callify_function_ident(init, &self.functions);
                 }
             }
             _ => {}
+        }
+    }
+
+    fn callify_function_ident(expr: &mut Expr, functions: &HashMap<String, FunctionInfo>) {
+        let ExprKind::Ident(name) = &expr.kind else {
+            return;
+        };
+        if functions.contains_key(name) {
+            let callee = expr.clone();
+            expr.kind = ExprKind::Call {
+                callee: Box::new(callee),
+                args: vec![],
+            };
         }
     }
 
@@ -1003,9 +1078,12 @@ impl Sema {
                     self.rewrite_expr(inner);
                 }
             }
-            ExprKind::Binary { lhs, rhs, .. } => {
+            ExprKind::Binary { op, lhs, rhs } => {
                 self.rewrite_expr(lhs);
                 self.rewrite_expr(rhs);
+                if op.is_assign() {
+                    Self::callify_function_ident(rhs, &self.functions);
+                }
             }
             ExprKind::ChainCmp { first, rest } => {
                 self.rewrite_expr(first);
@@ -1022,6 +1100,7 @@ impl Sema {
                 self.rewrite_expr(callee);
                 for a in args.iter_mut().flatten() {
                     self.rewrite_expr(a);
+                    Self::callify_function_ident(a, &self.functions);
                 }
             }
             ExprKind::Index { base, index } => {

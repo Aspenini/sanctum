@@ -6,14 +6,14 @@ mod registry;
 
 pub use registry::GlobalBinding;
 
-use minifb::{Key, KeyRepeat, Window, WindowOptions};
+use minifb::{Key, KeyRepeat, MouseButton, MouseMode, Window, WindowOptions};
 use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::ptr;
 use std::slice;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
-use tos_abi::CDC;
+use tos_abi::{CDC, CMsStateGlbls, MS_STATE_SIZE};
 
 pub const DEFAULT_WIDTH: u32 = 640;
 pub const DEFAULT_HEIGHT: u32 = 480;
@@ -24,6 +24,10 @@ static FRAMES_PRESENTED: AtomicUsize = AtomicUsize::new(0);
 static INTERACTIVE: AtomicBool = AtomicBool::new(false);
 static HOST_MODE: AtomicUsize = AtomicUsize::new(HostMode::Headless as usize);
 static WINMGR_GLOBAL: AtomicUsize = AtomicUsize::new(0);
+static MS_GLOBAL: AtomicUsize = AtomicUsize::new(0);
+static MS_X: AtomicI64 = AtomicI64::new(0);
+static MS_Y: AtomicI64 = AtomicI64::new(0);
+static MS_BUTTONS: AtomicU8 = AtomicU8::new(0);
 static KEYS: OnceLock<Mutex<VecDeque<(i64, i64)>>> = OnceLock::new();
 static FRAME: OnceLock<Mutex<FrameSnapshot>> = OnceLock::new();
 
@@ -88,12 +92,18 @@ pub fn reset() {
     audio::unbind();
     audio::reset();
     registry::reset();
+    tos_runtime::reset_exceptions();
     WINMGR_GLOBAL.store(0, Ordering::Release);
+    MS_GLOBAL.store(0, Ordering::Release);
+    MS_X.store(0, Ordering::Release);
+    MS_Y.store(0, Ordering::Release);
+    MS_BUTTONS.store(0, Ordering::Release);
     FRAMES_PRESENTED.store(0, Ordering::Release);
     WINDOW.with(|window| *window.borrow_mut() = None);
     key_queue().lock().expect("key queue poisoned").clear();
     *frame().lock().expect("frame snapshot poisoned") = FrameSnapshot::default();
     let dc = screen();
+    tos_gr::set_default_dc(dc);
     if let Some(dc) = unsafe { dc.as_ref() }
         && !dc.body.is_null()
     {
@@ -113,6 +123,7 @@ pub fn shutdown() {
     audio::unbind();
     registry::unbind();
     WINMGR_GLOBAL.store(0, Ordering::Release);
+    MS_GLOBAL.store(0, Ordering::Release);
 }
 
 pub fn bind_globals(bindings: &[GlobalBinding<'_>]) {
@@ -122,13 +133,19 @@ pub fn bind_globals(bindings: &[GlobalBinding<'_>]) {
     } else {
         audio::unbind();
     }
-    WINMGR_GLOBAL.store(
-        bindings
-            .iter()
-            .find(|binding| binding.name == "winmgr" && binding.size >= size_of::<i64>())
-            .map_or(0, |binding| binding.address as usize),
-        Ordering::Release,
-    );
+    if let Some(binding) = bindings
+        .iter()
+        .find(|binding| binding.name == "winmgr" && binding.size >= size_of::<i64>())
+    {
+        WINMGR_GLOBAL.store(binding.address as usize, Ordering::Release);
+    }
+    if let Some(binding) = bindings
+        .iter()
+        .find(|binding| binding.name == "ms" && binding.size >= MS_STATE_SIZE)
+    {
+        MS_GLOBAL.store(binding.address as usize, Ordering::Release);
+        write_bound_mouse();
+    }
 }
 
 fn advance_window_update() {
@@ -201,7 +218,31 @@ pub fn push_key_event(ch: i64, scan_code: i64) {
 
 pub fn request_exit() {
     push_key_event(0x1b, 0);
+    tos_runtime::request_throw(0x1b);
     tos_runtime::cancel_background_tasks();
+}
+
+pub fn set_mouse(x: i64, y: i64, left: bool, right: bool) {
+    MS_X.store(x, Ordering::Release);
+    MS_Y.store(y, Ordering::Release);
+    MS_BUTTONS.store(u8::from(left) | (u8::from(right) << 1), Ordering::Release);
+    write_bound_mouse();
+}
+
+fn write_bound_mouse() {
+    let address = MS_GLOBAL.load(Ordering::Acquire);
+    if address == 0 {
+        return;
+    }
+    let ms = address as *mut CMsStateGlbls;
+    unsafe {
+        (*ms).pos.x = MS_X.load(Ordering::Acquire);
+        (*ms).pos.y = MS_Y.load(Ordering::Acquire);
+        let buttons = MS_BUTTONS.load(Ordering::Acquire);
+        (*ms).lb = buttons & 1;
+        (*ms).rb = (buttons >> 1) & 1;
+        (*ms).show = 1;
+    }
 }
 
 pub fn set_muted(muted: bool) {
@@ -406,42 +447,50 @@ fn present_window(snapshot: &FrameSnapshot) {
         for key in host.window.get_keys_pressed(KeyRepeat::Yes) {
             push_native_key(key, shift, ctrl, alt);
         }
+        if let Some((x, y)) = host.window.get_mouse_pos(MouseMode::Clamp) {
+            set_mouse(
+                x.round() as i64,
+                y.round() as i64,
+                host.window.get_mouse_down(MouseButton::Left),
+                host.window.get_mouse_down(MouseButton::Right),
+            );
+        }
     });
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn tos_Refresh() {
     tos_runtime::background_checkpoint();
+    let _ = tos_runtime::tos_HasExcept();
     advance_window_update();
     let task = tos_runtime::tos_Fs();
+    let dc = screen();
     if let Some(draw) = unsafe { task.as_ref() }.and_then(|task| task.draw_it) {
-        let dc = screen();
         draw(task, dc);
-        let sequence = FRAMES_PRESENTED.fetch_add(1, Ordering::AcqRel) as u64 + 1;
-        if let Some(dc) = unsafe { dc.as_ref() }
-            && !dc.body.is_null()
-        {
-            let indexed = unsafe {
-                slice::from_raw_parts(
-                    dc.body,
-                    (dc.width as usize).saturating_mul(dc.height as usize),
-                )
-            }
-            .to_vec();
-            let snapshot = FrameSnapshot {
-                sequence,
-                width: dc.width.max(0) as u32,
-                height: dc.height.max(0) as u32,
-                indexed,
-                menu: tos_runtime::current_menu_source(),
-            };
-            *frame().lock().expect("frame snapshot poisoned") = snapshot.clone();
-            if host_mode() == HostMode::NativeWindow {
-                present_window(&snapshot);
-            }
+    }
+    let sequence = FRAMES_PRESENTED.fetch_add(1, Ordering::AcqRel) as u64 + 1;
+    if let Some(dc) = unsafe { dc.as_ref() }
+        && !dc.body.is_null()
+    {
+        let indexed = unsafe {
+            slice::from_raw_parts(
+                dc.body,
+                (dc.width as usize).saturating_mul(dc.height as usize),
+            )
+        }
+        .to_vec();
+        let snapshot = FrameSnapshot {
+            sequence,
+            width: dc.width.max(0) as u32,
+            height: dc.height.max(0) as u32,
+            indexed,
+            menu: tos_runtime::current_menu_source(),
+        };
+        *frame().lock().expect("frame snapshot poisoned") = snapshot.clone();
+        if host_mode() == HostMode::NativeWindow {
+            present_window(&snapshot);
         }
     } else if host_mode() == HostMode::NativeWindow {
-        // Background animation tasks use Refresh as their cooperative yield.
         std::thread::sleep(std::time::Duration::from_millis(16));
     }
 }
@@ -540,5 +589,21 @@ mod tests {
         advance_window_update();
         assert_eq!(updates, 42);
         WINMGR_GLOBAL.store(0, Ordering::Release);
+        MS_GLOBAL.store(0, Ordering::Release);
+    }
+
+    #[test]
+    fn mouse_writes_through_the_bound_global() {
+        let mut ms = unsafe { std::mem::zeroed::<CMsStateGlbls>() };
+        bind_globals(&[GlobalBinding {
+            name: "ms",
+            address: (&mut ms as *mut CMsStateGlbls).cast(),
+            size: MS_STATE_SIZE,
+        }]);
+        set_mouse(150, 250, true, false);
+        assert_eq!((ms.pos.x, ms.pos.y, ms.lb, ms.rb), (150, 250, 1, 0));
+        set_mouse(10, 20, false, true);
+        assert_eq!((ms.pos.x, ms.pos.y, ms.lb, ms.rb), (10, 20, 0, 1));
+        MS_GLOBAL.store(0, Ordering::Release);
     }
 }

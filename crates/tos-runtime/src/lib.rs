@@ -1,6 +1,7 @@
 //! Kernel-ish primitives HolyC programs call (`Print`, heaps, …).
 
 mod bit;
+mod except;
 mod heap;
 mod math;
 mod que;
@@ -9,6 +10,7 @@ mod shell;
 mod task;
 mod time;
 
+pub use except::{tos_ClearExcept, tos_ExceptCh, tos_HasExcept, tos_Throw};
 pub use shell::current_menu_source;
 use shell::{
     tos_AutoComplete, tos_DocClear, tos_DocCursor, tos_MenuPop, tos_MenuPush, tos_SettingsPop,
@@ -38,6 +40,7 @@ pub fn capture_begin() {
 
 pub fn set_background_tasks_enabled(enabled: bool) {
     shell::reset();
+    except::reset();
     BACKGROUND_TASKS_CANCELLED.store(false, Ordering::Release);
     BACKGROUND_TASKS_STARTED.store(0, Ordering::Release);
     BACKGROUND_TASKS_QUIESCED.store(0, Ordering::Release);
@@ -123,6 +126,12 @@ pub fn jit_symbols() -> Vec<(&'static str, *const u8)> {
         ("tos_DocClear", tos_DocClear as *const u8),
         ("tos_PutExcept", tos_PutExcept as *const u8),
         ("tos_Exit", tos_Exit as *const u8),
+        ("tos_Throw", except::tos_Throw as *const u8),
+        ("tos_HasExcept", except::tos_HasExcept as *const u8),
+        ("tos_ClearExcept", except::tos_ClearExcept as *const u8),
+        ("tos_ExceptCh", except::tos_ExceptCh as *const u8),
+        ("tos_PowI64", tos_PowI64 as *const u8),
+        ("tos_PowF64", tos_PowF64 as *const u8),
         ("tos_Mat4x4IdentEqu", tos_Mat4x4IdentEqu as *const u8),
         ("tos_Mat4x4IdentNew", tos_Mat4x4IdentNew as *const u8),
         ("tos_Mat4x4RotX", tos_Mat4x4RotX as *const u8),
@@ -206,10 +215,34 @@ pub unsafe extern "C" fn tos_Spawn(
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn tos_PutExcept() {}
+pub extern "C" fn tos_PutExcept() {
+    let ch = except::tos_ExceptCh();
+    let text = format!("Exception {ch}\n");
+    emit(text.as_bytes());
+}
 
 #[unsafe(no_mangle)]
-pub extern "C" fn tos_Exit() {}
+pub extern "C" fn tos_Exit() {
+    except::tos_Throw(0);
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn tos_PowI64(base: i64, exp: i64) -> i64 {
+    math::pow_i64(base, exp)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn tos_PowF64(base: f64, exp: f64) -> f64 {
+    math::pow_f64(base, exp)
+}
+
+pub fn request_throw(ch: i64) {
+    except::request_throw(ch);
+}
+
+pub fn reset_exceptions() {
+    except::reset();
+}
 
 fn emit(bytes: &[u8]) {
     CAPTURE.with(|c| {
@@ -445,6 +478,7 @@ pub extern "C" fn tos_Wrap(a: f64, base: f64) -> f64 {
 #[unsafe(no_mangle)]
 pub extern "C" fn tos_Sleep(ms: i64) {
     background_checkpoint();
+    let _ = except::tos_HasExcept();
     if ms > 0 {
         std::thread::sleep(std::time::Duration::from_millis(ms as u64));
     }
@@ -452,6 +486,7 @@ pub extern "C" fn tos_Sleep(ms: i64) {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn tos_Yield() {
+    let _ = except::tos_HasExcept();
     std::thread::yield_now();
 }
 

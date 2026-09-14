@@ -175,6 +175,7 @@ pub fn compile_jit(
         let id = module.declare_function(&info.link_name, linkage, &sig)?;
         func_ids.insert(name.clone(), id);
     }
+    declare_runtime_helpers(&mut module, &mut func_ids)?;
 
     // Data for string literals.
     let mut strings: HashMap<String, DataId> = HashMap::new();
@@ -272,12 +273,15 @@ pub fn compile_jit(
                     globals: &globals,
                     module_scope: false,
                     break_targets: Vec::new(),
+                    catch_targets: Vec::new(),
+                    labels: HashMap::new(),
                     sema,
                 };
                 for (i, (pname, ty)) in info.params.iter().enumerate() {
                     let val = cg.bcx.block_params(entry)[i];
                     cg.define_local(pname.clone(), ty.clone(), val)?;
                 }
+                cg.prepare_labels(body)?;
                 for stmt in body {
                     cg.stmt(stmt)?;
                 }
@@ -315,8 +319,11 @@ pub fn compile_jit(
                 globals: &globals,
                 module_scope: true,
                 break_targets: Vec::new(),
+                catch_targets: Vec::new(),
+                labels: HashMap::new(),
                 sema,
             };
+            cg.prepare_module_labels(&ast.items)?;
             for item in &ast.items {
                 if let Item::Stmt(s) = item {
                     cg.stmt(s)?;
@@ -353,6 +360,31 @@ pub fn compile_jit(
         globals,
         finalized: false,
     })
+}
+
+fn declare_runtime_helpers(
+    module: &mut JITModule,
+    func_ids: &mut HashMap<String, FuncId>,
+) -> Result<(), CodegenError> {
+    let mut declare =
+        |name: &str, params: &[Type], ret: Option<Type>| -> Result<(), CodegenError> {
+            let mut sig = module.make_signature();
+            for ty in params {
+                sig.params.push(AbiParam::new(*ty));
+            }
+            if let Some(ty) = ret {
+                sig.returns.push(AbiParam::new(ty));
+            }
+            let id = module.declare_function(name, Linkage::Import, &sig)?;
+            func_ids.insert(name.to_string(), id);
+            Ok(())
+        };
+    declare("tos_HasExcept", &[], Some(types::I64))?;
+    declare("tos_Throw", &[types::I64], None)?;
+    declare("tos_ClearExcept", &[], None)?;
+    declare("tos_PowI64", &[types::I64, types::I64], Some(types::I64))?;
+    declare("tos_PowF64", &[types::F64, types::F64], Some(types::F64))?;
+    Ok(())
 }
 
 fn make_sig(module: &mut JITModule, info: &FunctionInfo, ptr_ty: Type) -> Signature {
@@ -437,6 +469,8 @@ struct FnCg<'a, 'b> {
     globals: &'a HashMap<String, GlobalInfo>,
     module_scope: bool,
     break_targets: Vec<Block>,
+    catch_targets: Vec<Block>,
+    labels: HashMap<String, Block>,
     sema: &'a Sema,
 }
 
@@ -493,7 +527,126 @@ fn flatten_switch_body<'a>(
     }
 }
 
+fn gather_labels(stmt: &Stmt, names: &mut Vec<String>) {
+    match stmt {
+        Stmt::Label { name, .. } => names.push(name.clone()),
+        Stmt::Block { stmts, .. } | Stmt::Start { body: stmts, .. } => {
+            for stmt in stmts {
+                gather_labels(stmt, names);
+            }
+        }
+        Stmt::If { then, else_, .. } => {
+            gather_labels(then, names);
+            if let Some(else_) = else_ {
+                gather_labels(else_, names);
+            }
+        }
+        Stmt::While { body, .. }
+        | Stmt::DoWhile { body, .. }
+        | Stmt::For { body, .. }
+        | Stmt::Switch { body, .. } => gather_labels(body, names),
+        Stmt::Try { body, catch, .. } => {
+            gather_labels(body, names);
+            gather_labels(catch, names);
+        }
+        _ => {}
+    }
+}
+
 impl FnCg<'_, '_> {
+    fn prepare_labels(&mut self, stmts: &[Stmt]) -> Result<(), CodegenError> {
+        let mut names = Vec::new();
+        for stmt in stmts {
+            gather_labels(stmt, &mut names);
+        }
+        self.define_labels(names)
+    }
+
+    fn prepare_module_labels(&mut self, items: &[Item]) -> Result<(), CodegenError> {
+        let mut names = Vec::new();
+        for item in items {
+            if let Item::Stmt(stmt) = item {
+                gather_labels(stmt, &mut names);
+            }
+        }
+        self.define_labels(names)
+    }
+
+    fn define_labels(&mut self, names: Vec<String>) -> Result<(), CodegenError> {
+        let mut seen = HashSet::new();
+        for name in names {
+            if !seen.insert(name.clone()) {
+                return Err(CodegenError::Msg(format!("duplicate label `{name}`")));
+            }
+            let block = self.bcx.create_block();
+            self.labels.insert(name, block);
+        }
+        Ok(())
+    }
+
+    fn call_import(&mut self, name: &str, args: &[Value]) -> Result<Vec<Value>, CodegenError> {
+        let id = *self
+            .func_ids
+            .get(name)
+            .ok_or_else(|| CodegenError::Msg(format!("missing runtime helper `{name}`")))?;
+        let local = self.module.declare_func_in_func(id, self.bcx.func);
+        let call = self.bcx.ins().call(local, args);
+        Ok(self.bcx.inst_results(call).to_vec())
+    }
+
+    fn emit_unwind_return(&mut self) {
+        match self.ret_ty {
+            None => {
+                self.bcx.ins().return_(&[]);
+            }
+            Some(ty) => {
+                let z = self.zero(ty);
+                self.bcx.ins().return_(&[z]);
+            }
+        }
+    }
+
+    fn after_call(&mut self) -> Result<(), CodegenError> {
+        if self.bcx.is_unreachable() {
+            return Ok(());
+        }
+        let has = self.call_import("tos_HasExcept", &[])?;
+        let cond = self.truthy(has[0])?;
+        let cont = self.bcx.create_block();
+        if let Some(catch) = self.catch_targets.last().copied() {
+            self.bcx.ins().brif(cond, catch, &[], cont, &[]);
+        } else {
+            let unwind = self.bcx.create_block();
+            self.bcx.ins().brif(cond, unwind, &[], cont, &[]);
+            self.bcx.switch_to_block(unwind);
+            self.bcx.seal_block(unwind);
+            self.emit_unwind_return();
+        }
+        self.bcx.switch_to_block(cont);
+        self.bcx.seal_block(cont);
+        Ok(())
+    }
+
+    fn missing_arg(&mut self, name: &str, index: usize, ty: &Ty) -> Value {
+        match (name, index) {
+            ("Spawn", 3) => self.bcx.ins().iconst(types::I64, -1),
+            ("Spawn", 6) => self.bcx.ins().iconst(types::I64, 1),
+            ("Wrap", 1) => self
+                .bcx
+                .ins()
+                .f64const(Ieee64::with_float(-std::f64::consts::PI)),
+            ("Beep", 0) => self.bcx.ins().iconst(types::I64, 62),
+            ("DCFill", 1) => self.bcx.ins().iconst(types::I64, 0xff),
+            ("GrCircle3", 5) => self.bcx.ins().iconst(types::I64, 1),
+            ("GrCircle3", 6) => self.bcx.ins().f64const(Ieee64::with_float(0.0)),
+            ("GrCircle3", 7) => self
+                .bcx
+                .ins()
+                .f64const(Ieee64::with_float(std::f64::consts::TAU)),
+            _ => self.zero(clif_ty(ty, self.ptr_ty)),
+        }
+    }
+
     fn define_local(&mut self, name: String, ty: Ty, val: Value) -> Result<(), CodegenError> {
         let storage = if ty.is_aggregate() {
             let var = self.bcx.declare_var(self.ptr_ty);
@@ -807,6 +960,7 @@ impl FnCg<'_, '_> {
         let v = self.bcx.ins().iconst(types::I64, val);
         let nv = self.bcx.ins().iconst(types::I64, n);
         self.bcx.ins().call(local, &[ptr, v, nv]);
+        self.after_call()?;
         Ok(())
     }
 
@@ -818,6 +972,7 @@ impl FnCg<'_, '_> {
         let local = self.module.declare_func_in_func(id, self.bcx.func);
         let nv = self.bcx.ins().iconst(types::I64, n);
         self.bcx.ins().call(local, &[dst, src, nv]);
+        self.after_call()?;
         Ok(())
     }
 
@@ -838,7 +993,28 @@ impl FnCg<'_, '_> {
 
     fn stmt(&mut self, stmt: &Stmt) -> Result<(), CodegenError> {
         match stmt {
-            Stmt::Empty { .. } | Stmt::NoWarn { .. } | Stmt::Label { .. } => Ok(()),
+            Stmt::Empty { .. } | Stmt::NoWarn { .. } => Ok(()),
+            Stmt::Label { name, .. } => {
+                let block = *self
+                    .labels
+                    .get(name)
+                    .ok_or_else(|| CodegenError::Msg(format!("unknown label `{name}`")))?;
+                if !self.bcx.is_unreachable() {
+                    self.bcx.ins().jump(block, &[]);
+                }
+                self.bcx.switch_to_block(block);
+                Ok(())
+            }
+            Stmt::Goto { label, .. } => {
+                let block = *self
+                    .labels
+                    .get(label)
+                    .ok_or_else(|| CodegenError::Msg(format!("unknown label `{label}`")))?;
+                self.bcx.ins().jump(block, &[]);
+                let dead = self.bcx.create_block();
+                self.bcx.switch_to_block(dead);
+                Ok(())
+            }
             Stmt::Block { stmts, .. } => {
                 for s in stmts {
                     self.stmt(s)?;
@@ -1212,7 +1388,44 @@ impl FnCg<'_, '_> {
                 }
                 Ok(())
             }
-            Stmt::Try { body, .. } => self.stmt(body),
+            Stmt::Try { body, catch, .. } => {
+                let catch_block = self.bcx.create_block();
+                let join = self.bcx.create_block();
+                let body_block = self.bcx.create_block();
+                // Give `catch` a predecessor even if the body never throws.
+                let never = self.bcx.ins().iconst(types::I8, 0);
+                self.bcx
+                    .ins()
+                    .brif(never, catch_block, &[], body_block, &[]);
+                self.bcx.switch_to_block(body_block);
+                self.bcx.seal_block(body_block);
+                self.catch_targets.push(catch_block);
+                self.stmt(body)?;
+                self.catch_targets.pop();
+                if !self.bcx.is_unreachable() {
+                    self.bcx.ins().jump(join, &[]);
+                }
+                self.bcx.switch_to_block(catch_block);
+                let _ = self.call_import("tos_ClearExcept", &[])?;
+                self.stmt(catch)?;
+                if !self.bcx.is_unreachable() {
+                    self.bcx.ins().jump(join, &[]);
+                }
+                self.bcx.switch_to_block(join);
+                Ok(())
+            }
+            Stmt::Throw { expr, .. } => {
+                let value = self.expr(expr)?;
+                let _ = self.call_import("tos_Throw", &[value])?;
+                if let Some(catch) = self.catch_targets.last().copied() {
+                    self.bcx.ins().jump(catch, &[]);
+                } else {
+                    self.emit_unwind_return();
+                }
+                let dead = self.bcx.create_block();
+                self.bcx.switch_to_block(dead);
+                Ok(())
+            }
             other => Err(CodegenError::Msg(format!(
                 "statement not implemented: {other:?}"
             ))),
@@ -1470,6 +1683,11 @@ impl FnCg<'_, '_> {
                 BinOp::Sub => self.bcx.ins().fsub(l, r),
                 BinOp::Mul => self.bcx.ins().fmul(l, r),
                 BinOp::Div => self.bcx.ins().fdiv(l, r),
+                BinOp::Power => {
+                    let results = self.call_import("tos_PowF64", &[l, r])?;
+                    self.after_call()?;
+                    results[0]
+                }
                 BinOp::And | BinOp::Or | BinOp::XorBool => {
                     let a = self.truthy(l)?;
                     let b = self.truthy(r)?;
@@ -1520,12 +1738,9 @@ impl FnCg<'_, '_> {
                 self.bcx.ins().uextend(types::I64, c)
             }
             BinOp::Power => {
-                // integer pow via simple loop isn't here; call libm later. Use f64 pow.
-                let lf = self.bcx.ins().fcvt_from_sint(types::F64, l);
-                let rf = self.bcx.ins().fcvt_from_sint(types::F64, r);
-                // no pow in cranelift easily; multiply once if r==2 else 1
-                let _ = rf;
-                self.bcx.ins().fmul(lf, lf)
+                let results = self.call_import("tos_PowI64", &[l, r])?;
+                self.after_call()?;
+                results[0]
             }
             _ => return Err(CodegenError::Msg(format!("binop {op:?}"))),
         })
@@ -1639,6 +1854,7 @@ impl FnCg<'_, '_> {
             }
             let signature = self.bcx.import_signature(signature);
             self.bcx.ins().call_indirect(signature, address, &values);
+            self.after_call()?;
             return Ok(self.bcx.ins().iconst(types::I64, 0));
         };
         if name == "Print" {
@@ -1669,39 +1885,23 @@ impl FnCg<'_, '_> {
             } else {
                 let ty = params
                     .get(index)
-                    .map(|(_, ty)| clif_ty(ty, self.ptr_ty))
-                    .unwrap_or(types::I64);
-                let value = match (name.as_str(), index) {
-                    ("Spawn", 3) => self.bcx.ins().iconst(types::I64, -1),
-                    ("Spawn", 6) => self.bcx.ins().iconst(types::I64, 1),
-                    ("Wrap", 1) => self
-                        .bcx
-                        .ins()
-                        .f64const(Ieee64::with_float(-std::f64::consts::PI)),
-                    _ => self.zero(ty),
-                };
-                vals.push(value);
+                    .map(|(_, ty)| ty.clone())
+                    .unwrap_or(Ty::I64);
+                vals.push(self.missing_arg(name, index, &ty));
             }
         }
         for (index, (_, ty)) in params.iter().enumerate().skip(args.len()) {
-            let value = match (name.as_str(), index) {
-                ("Spawn", 3) => self.bcx.ins().iconst(types::I64, -1),
-                ("Spawn", 6) => self.bcx.ins().iconst(types::I64, 1),
-                ("Wrap", 1) => self
-                    .bcx
-                    .ins()
-                    .f64const(Ieee64::with_float(-std::f64::consts::PI)),
-                _ => self.zero(clif_ty(ty, self.ptr_ty)),
-            };
-            vals.push(value);
+            vals.push(self.missing_arg(name, index, ty));
         }
         let call = self.bcx.ins().call(local, &vals);
         let results = self.bcx.inst_results(call);
-        if results.is_empty() {
-            Ok(self.bcx.ins().iconst(types::I64, 0))
+        let value = if results.is_empty() {
+            self.bcx.ins().iconst(types::I64, 0)
         } else {
-            Ok(results[0])
-        }
+            results[0]
+        };
+        self.after_call()?;
+        Ok(value)
     }
 
     fn call_print(&mut self, args: &[Option<Expr>]) -> Result<Value, CodegenError> {
@@ -1732,7 +1932,9 @@ impl FnCg<'_, '_> {
         let id = self.func_ids["Print"];
         let local = self.module.declare_func_in_func(id, self.bcx.func);
         let call = self.bcx.ins().call(local, &[fmt, argc_v, argv]);
-        Ok(self.bcx.inst_results(call)[0])
+        let value = self.bcx.inst_results(call)[0];
+        self.after_call()?;
+        Ok(value)
     }
 
     fn call_gr_print(&mut self, args: &[Option<Expr>]) -> Result<Value, CodegenError> {
@@ -1772,6 +1974,8 @@ impl FnCg<'_, '_> {
         let id = self.func_ids["GrPrint"];
         let local = self.module.declare_func_in_func(id, self.bcx.func);
         let call = self.bcx.ins().call(local, &fixed);
-        Ok(self.bcx.inst_results(call)[0])
+        let value = self.bcx.inst_results(call)[0];
+        self.after_call()?;
+        Ok(value)
     }
 }

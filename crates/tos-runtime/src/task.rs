@@ -1,7 +1,7 @@
 use std::cell::{Cell, UnsafeCell};
 use std::ptr;
 use std::sync::OnceLock;
-use tos_abi::{CCPU, CTask, GR_HEIGHT, GR_WIDTH};
+use tos_abi::{CCPU, CTask};
 
 thread_local! {
     static FS: Cell<*mut CTask> = const { Cell::new(ptr::null_mut()) };
@@ -21,17 +21,7 @@ static TASK0: OnceLock<HostTask> = OnceLock::new();
 static CPU0: OnceLock<HostCpu> = OnceLock::new();
 
 pub fn boot_task() {
-    let task = TASK0.get_or_init(|| {
-        HostTask(UnsafeCell::new(CTask {
-            addr: ptr::null_mut(),
-            pix_width: GR_WIDTH,
-            pix_height: GR_HEIGHT,
-            draw_it: None,
-            task_end_cb: None,
-            song_task: ptr::null_mut(),
-            animate_task: ptr::null_mut(),
-        }))
-    });
+    let task = TASK0.get_or_init(|| HostTask(UnsafeCell::new(CTask::host_default())));
     let cpu = CPU0.get_or_init(|| {
         HostCpu(UnsafeCell::new(CCPU {
             num: 0,
@@ -48,15 +38,12 @@ pub fn boot_task() {
 /// keeping spawned game loops dormant makes initialization deterministic today.
 pub fn spawn(parent: *mut CTask) -> *mut CTask {
     let parent = if parent.is_null() { fs() } else { parent };
-    let task = Box::new(CTask {
-        addr: ptr::null_mut(),
-        pix_width: unsafe { (*parent).pix_width },
-        pix_height: unsafe { (*parent).pix_height },
-        draw_it: None,
-        task_end_cb: None,
-        song_task: ptr::null_mut(),
-        animate_task: ptr::null_mut(),
-    });
+    let mut task = CTask::host_default();
+    task.pix_width = unsafe { (*parent).pix_width };
+    task.pix_height = unsafe { (*parent).pix_height };
+    task.pix_left = unsafe { (*parent).pix_left };
+    task.pix_top = unsafe { (*parent).pix_top };
+    let task = Box::new(task);
     let task = Box::into_raw(task);
     unsafe { (*task).addr = task };
     task

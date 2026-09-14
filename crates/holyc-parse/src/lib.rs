@@ -48,6 +48,7 @@ impl<'a> Parser<'a> {
             "CTask",
             "CCPU",
             "CDC",
+            "CMsStateGlbls",
         ] {
             types.insert(b.into());
         }

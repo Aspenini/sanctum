@@ -13,6 +13,7 @@ pub const EXITED: u8 = 7;
 pub const KEY: u8 = 101;
 pub const STOP: u8 = 102;
 pub const MUTE: u8 = 103;
+pub const MOUSE: u8 = 104;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct KeyEvent {
@@ -81,6 +82,23 @@ pub fn decode_key_event(payload: &[u8]) -> Option<KeyEvent> {
     })
 }
 
+pub fn encode_mouse(x: i64, y: i64, left: bool, right: bool) -> [u8; 17] {
+    let mut payload = [0; 17];
+    payload[..8].copy_from_slice(&x.to_le_bytes());
+    payload[8..16].copy_from_slice(&y.to_le_bytes());
+    payload[16] = u8::from(left) | (u8::from(right) << 1);
+    payload
+}
+
+pub fn decode_mouse(payload: &[u8]) -> Option<(i64, i64, bool, bool)> {
+    Some((
+        i64::from_le_bytes(payload.get(..8)?.try_into().ok()?),
+        i64::from_le_bytes(payload.get(8..16)?.try_into().ok()?),
+        payload.get(16)? & 1 != 0,
+        payload.get(16)? & 2 != 0,
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -122,5 +140,14 @@ mod tests {
     #[test]
     fn rejects_short_key_payloads() {
         assert_eq!(decode_key_event(&[0; 15]), None);
+    }
+
+    #[test]
+    fn mouse_round_trip() {
+        assert_eq!(
+            decode_mouse(&encode_mouse(150, 250, true, false)),
+            Some((150, 250, true, false))
+        );
+        assert_eq!(decode_mouse(&[0; 16]), None);
     }
 }

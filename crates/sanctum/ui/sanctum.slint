@@ -240,10 +240,13 @@ component GameSurface inherits Rectangle {
     property <float> available-scale: Math.min(self.width / (root.frame-width * 1px), self.height / (root.frame-height * 1px));
     property <float> draw-scale: root.fit-scaling ? root.available-scale : Math.max(1, Math.floor(root.available-scale));
     callback game-key(string, bool, bool, bool);
+    callback game-pointer(int, int, bool, bool);
 
     background: #000000;
     clip: true;
     forward-focus: game-focus;
+    property <bool> pointer-left: false;
+    property <bool> pointer-right: false;
 
     if root.frame-ready : Image {
         source: root.frame;
@@ -267,6 +270,30 @@ component GameSurface inherits Rectangle {
             root.game-key(event.text, event.modifiers.shift, event.modifiers.control, event.modifiers.alt);
             accept
         }
+    }
+
+    pointer := TouchArea {
+        pointer-event(event) => {
+            if (event.button == PointerEventButton.left) {
+                if (event.kind == PointerEventKind.down) { root.pointer-left = true; }
+                if (event.kind == PointerEventKind.up) { root.pointer-left = false; }
+            }
+            if (event.button == PointerEventButton.right) {
+                if (event.kind == PointerEventKind.down) { root.pointer-right = true; }
+                if (event.kind == PointerEventKind.up) { root.pointer-right = false; }
+            }
+            root.emit-pointer();
+        }
+        moved => { root.emit-pointer(); }
+    }
+
+    function emit-pointer() {
+        root.game-pointer(
+            Math.max(0, Math.min(root.frame-width - 1, Math.floor(pointer.mouse-x / 1px / Math.max(root.draw-scale, 0.001)))),
+            Math.max(0, Math.min(root.frame-height - 1, Math.floor(pointer.mouse-y / 1px / Math.max(root.draw-scale, 0.001)))),
+            root.pointer-left,
+            root.pointer-right
+        );
     }
 }
 
@@ -344,6 +371,7 @@ export component MainWindow inherits Window {
     callback toggle-log;
     callback invoke-menu(string);
     callback game-key(string, bool, bool, bool);
+    callback game-pointer(int, int, bool, bool);
 
     HorizontalLayout {
         spacing: 0px;
@@ -479,6 +507,7 @@ export component MainWindow inherits Window {
                     frame-height: root.frame-height;
                     status: root.status;
                     game-key(text, shift, control, alt) => { root.game-key(text, shift, control, alt); }
+                    game-pointer(x, y, left, right) => { root.game-pointer(x, y, left, right); }
                 }
 
                 if root.detached : Rectangle {
@@ -703,6 +732,7 @@ export component GameWindow inherits Window {
     callback toggle-mute;
     callback toggle-fullscreen;
     callback game-key(string, bool, bool, bool);
+    callback game-pointer(int, int, bool, bool);
 
     VerticalLayout {
         padding: 8px;
@@ -734,6 +764,7 @@ export component GameWindow inherits Window {
             frame-height: root.frame-height;
             status: root.status;
             game-key(text, shift, control, alt) => { root.game-key(text, shift, control, alt); }
+            game-pointer(x, y, left, right) => { root.game-pointer(x, y, left, right); }
         }
     }
 }

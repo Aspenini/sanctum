@@ -78,7 +78,52 @@ pub struct CTask {
     pub task_end_cb: Option<extern "C" fn()>,
     pub song_task: *mut CTask,
     pub animate_task: *mut CTask,
+    pub pix_left: i64,
+    pub pix_top: i64,
 }
+
+impl CTask {
+    pub fn host_default() -> Self {
+        Self {
+            addr: std::ptr::null_mut(),
+            pix_width: GR_WIDTH,
+            pix_height: GR_HEIGHT,
+            draw_it: None,
+            task_end_cb: None,
+            song_task: std::ptr::null_mut(),
+            animate_task: std::ptr::null_mut(),
+            pix_left: 0,
+            pix_top: 0,
+        }
+    }
+}
+
+/// Packed public mouse state. Field offsets match the HolyC `CMsStateGlbls`
+/// subset programs actually read (`pos` and button flags).
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct CMsStateGlbls {
+    pub pos: CD3I64,
+    pub pos_text: CD3I64,
+    pub presnap: CD3I64,
+    pub offset: CD3I64,
+    pub scale: CD3,
+    pub speed: f64,
+    pub timestamp: i64,
+    pub dbl_time: f64,
+    pub left_dbl_time: f64,
+    pub right_dbl_time: f64,
+    pub lb: u8,
+    pub rb: u8,
+    pub show: u8,
+    pub has_wheel: u8,
+    pub left_dbl: u8,
+    pub left_down_sent: u8,
+    pub right_dbl: u8,
+    pub right_down_sent: u8,
+}
+
+pub const MS_STATE_SIZE: usize = 168;
 
 /// Current CPU. HolyC `Gs` points here.
 #[repr(C)]
@@ -160,5 +205,21 @@ mod tests {
         assert_eq!(offset_of!(CMusicGlbls, mute), 39);
         assert_eq!(offset_of!(CMusicGlbls, tempo), 63);
         assert_eq!(offset_of!(CMusicGlbls, play_note_num), 79);
+    }
+
+    #[test]
+    fn task_exposes_window_pixel_origin() {
+        assert_eq!(offset_of!(CTask, pix_width), 8);
+        assert_eq!(offset_of!(CTask, pix_left), 56);
+        assert_eq!(offset_of!(CTask, pix_top), 64);
+        assert_eq!(size_of::<CTask>(), 72);
+    }
+
+    #[test]
+    fn mouse_layout_matches_injected_holyc_class() {
+        assert_eq!(size_of::<CMsStateGlbls>(), MS_STATE_SIZE);
+        assert_eq!(offset_of!(CMsStateGlbls, pos), 0);
+        assert_eq!(offset_of!(CMsStateGlbls, lb), 160);
+        assert_eq!(offset_of!(CMsStateGlbls, rb), 161);
     }
 }

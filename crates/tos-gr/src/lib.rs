@@ -3,7 +3,10 @@
 use std::ffi::CStr;
 use std::ptr;
 use std::slice;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use tos_abi::{CD3I32, CDC, CTask};
+
+static DEFAULT_DC: AtomicUsize = AtomicUsize::new(0);
 
 const DCF_TRANSFORMATION: i32 = 0x100;
 const DCF_SYMMETRY: i32 = 0x200;
@@ -157,6 +160,7 @@ pub fn jit_symbols() -> Vec<(&'static str, *const u8)> {
         ("tos_DCSymmetry3Set", tos_DCSymmetry3Set as *const u8),
         ("tos_DCClipLine", tos_DCClipLine as *const u8),
         ("tos_GrLine3", tos_GrLine3 as *const u8),
+        ("tos_GrCircle3", tos_GrCircle3 as *const u8),
         ("tos_GrArrow3", tos_GrArrow3 as *const u8),
         ("tos_GrFillPoly3", tos_GrFillPoly3 as *const u8),
         ("tos_GrBlot", tos_GrBlot as *const u8),
@@ -170,6 +174,19 @@ pub fn jit_symbols() -> Vec<(&'static str, *const u8)> {
 
 fn identity_matrix() -> *mut i64 {
     tos_runtime::tos_Mat4x4IdentNew()
+}
+
+/// Screen device context used when HolyC omits `DCAlias`/`DCFill`/`Gr*` arguments.
+pub fn set_default_dc(dc: *mut CDC) {
+    DEFAULT_DC.store(dc as usize, Ordering::Release);
+}
+
+pub fn default_dc() -> *mut CDC {
+    DEFAULT_DC.load(Ordering::Acquire) as *mut CDC
+}
+
+fn resolve_dc(dc: *mut CDC) -> *mut CDC {
+    if dc.is_null() { default_dc() } else { dc }
 }
 
 #[unsafe(no_mangle)]
@@ -217,6 +234,7 @@ pub extern "C" fn tos_DCNew(
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn tos_DCAlias(dc: *mut CDC, _task: *mut CTask) -> *mut CDC {
+    let dc = resolve_dc(dc);
     if dc.is_null() {
         return ptr::null_mut();
     }
@@ -274,6 +292,7 @@ pub unsafe extern "C" fn tos_DCDel(dc: *mut CDC) {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn tos_DCFill(dc: *mut CDC, color: i64) {
+    let dc = resolve_dc(dc);
     if dc.is_null() {
         return;
     }
@@ -866,6 +885,74 @@ pub unsafe extern "C" fn tos_GrLine3(
         }
     }
     changed + unsafe { raster_line(dc, x1, y1, z1, x2, y2, z2, step, start) }
+}
+
+unsafe fn raster_circle(
+    dc: *mut CDC,
+    cx: i64,
+    cy: i64,
+    cz: i64,
+    radius: i64,
+    step: i64,
+    start_radians: f64,
+    len_radians: f64,
+) -> i64 {
+    if radius <= 0 {
+        return unsafe { plot_brush(dc, cx, cy, cz) };
+    }
+    let step = step.max(1);
+    let samples = ((radius as f64) * len_radians.abs())
+        .ceil()
+        .max(8.0)
+        .min(16_384.0) as i64;
+    let mut changed = 0;
+    let mut i = 0;
+    while i < samples {
+        let t = i as f64 / samples as f64;
+        let angle = start_radians + len_radians * t;
+        let x = cx + (radius as f64 * angle.cos()).round() as i64;
+        let y = cy + (radius as f64 * angle.sin()).round() as i64;
+        changed += unsafe { plot_brush(dc, x, y, cz) };
+        i += step;
+    }
+    changed
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tos_GrCircle3(
+    dc: *mut CDC,
+    mut cx: i64,
+    mut cy: i64,
+    mut cz: i64,
+    radius: i64,
+    step: i64,
+    start_radians: f64,
+    len_radians: f64,
+) -> i64 {
+    let dc = resolve_dc(dc);
+    if dc.is_null() {
+        return 0;
+    }
+    if let Some(ctx) = unsafe { dc.as_ref() }
+        && ctx.flags & DCF_TRANSFORMATION != 0
+        && let Some(transform) = ctx.transform
+    {
+        unsafe { transform(dc, &mut cx, &mut cy, &mut cz) };
+    }
+    let mut changed = 0_i64;
+    if let Some(flags) = unsafe { dc.as_ref() }.map(|ctx| ctx.flags)
+        && flags & DCF_SYMMETRY != 0
+    {
+        let (mut mx, mut my, mut mz) = (cx, cy, cz);
+        unsafe {
+            reflect(dc, &mut mx, &mut my, &mut mz);
+            changed += raster_circle(dc, mx, my, mz, radius, step, start_radians, len_radians);
+        }
+        if flags & DCF_JUST_MIRROR != 0 {
+            return changed;
+        }
+    }
+    changed + unsafe { raster_circle(dc, cx, cy, cz, radius, step, start_radians, len_radians) }
 }
 
 unsafe fn raster_arrow(
@@ -2537,5 +2624,35 @@ mod tests {
             tos_runtime::tos_Free(transformed);
             tos_runtime::tos_Free(matrix.cast::<u8>());
         }
+    }
+
+    #[test]
+    fn circle_plots_a_ring_with_brush_thickness() {
+        let dc = tos_DCNew(64, 64, ptr::null_mut(), 0);
+        unsafe {
+            (*dc).color = tos_abi::WHITE;
+            (*dc).thick = 3;
+            assert!(tos_GrCircle3(dc, 32, 32, 0, 20, 1, 0.0, std::f64::consts::TAU) > 0);
+            let pixels = slice::from_raw_parts((*dc).body, 64 * 64);
+            assert_eq!(pixels[32 * 64 + 32], tos_abi::BLACK as u8);
+            assert_eq!(pixels[32 * 64 + 52], tos_abi::WHITE as u8);
+            tos_DCDel(dc);
+        }
+    }
+
+    #[test]
+    fn null_dc_uses_the_configured_default() {
+        let dc = tos_DCNew(8, 8, ptr::null_mut(), 0);
+        set_default_dc(dc);
+        unsafe {
+            tos_DCFill(ptr::null_mut(), i64::from(tos_abi::LTRED));
+            assert_eq!(*(*dc).body, tos_abi::LTRED as u8);
+            let alias = tos_DCAlias(ptr::null_mut(), ptr::null_mut());
+            assert!(!alias.is_null());
+            assert_eq!((*alias).body, (*dc).body);
+            tos_DCDel(alias);
+            tos_DCDel(dc);
+        }
+        set_default_dc(ptr::null_mut());
     }
 }

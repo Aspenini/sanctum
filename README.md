@@ -55,17 +55,22 @@ independent of the Sanctum GUI.
 
 The implemented language/runtime subset includes preprocessing, TempleOS
 operator precedence, packed classes and unions, globals, pointers, callbacks,
-control flow, integer and `F64` arithmetic, tasks, menus and settings, heap and
-queue primitives, indexed graphics and 3D mesh sprites, registry persistence,
-CP437 source/output handling, and CPAL square-wave audio. Missing or lost audio
-devices produce a warning and silent fallback instead of preventing launch.
+control flow including `goto` and `try`/`catch`, integer and `F64` arithmetic
+(including the HolyC power operator), tasks, menus and settings, heap and queue
+primitives, indexed graphics with 3D mesh sprites and circles, mouse and
+keyboard input, registry
+persistence, CP437 source/output handling, and CPAL square-wave audio. Missing
+or lost audio devices produce a warning and silent fallback instead of
+preventing launch.
 
 `TempleOS/Demo/Games/Talons.HC` compiles end-to-end and has JIT acceptance tests
 covering terrain initialization, its real draw callback, a non-empty 640x480
 frame, input, cleanup, and the actual fishing loop. The gameplay test locates a
 generated fish through Talons' own object queues, verifies that approaching it
 lowers and visibly renders the claws, and verifies that a catch removes it and
-decrements the fish counter. A smaller tracked graphical smoke program also
+decrements the fish counter. `TempleOS/Demo/Games/TicTacToe.HC` is covered the
+same way: a helper drives `ms` clicks through a winning X column and throws to
+leave the outer `try` loop. A smaller tracked graphical smoke program also
 exercises the complete Sanctum runner lifecycle, including frame delivery,
 input, clean exit, and repeated launches.
 

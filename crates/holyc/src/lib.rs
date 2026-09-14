@@ -801,4 +801,112 @@ Main;
         let out = tos_runtime::capture_take().unwrap();
         assert_eq!(out, b"640\n");
     }
+
+    #[test]
+    fn integer_and_float_power_use_real_exponents() {
+        tos_runtime::capture_begin();
+        run_source(
+            "pow.HC",
+            r#"
+U0 Main()
+{
+  "%d %d %d ",2`8,3`3,(-2)`3;
+  "%d\n",ToI64(2.0`3.0);
+}
+Main;
+"#,
+        )
+        .unwrap();
+        assert_eq!(tos_runtime::capture_take().unwrap(), b"256 27 -8 8\n");
+    }
+
+    #[test]
+    fn goto_jumps_to_labels() {
+        tos_runtime::capture_begin();
+        run_source(
+            "goto.HC",
+            r#"
+U0 Main()
+{
+  I64 x=0;
+  goto skip;
+  x=1;
+skip:
+  x+=2;
+  "%d\n",x;
+}
+Main;
+"#,
+        )
+        .unwrap();
+        assert_eq!(tos_runtime::capture_take().unwrap(), b"2\n");
+    }
+
+    #[test]
+    fn try_catch_handles_throw_from_a_callee() {
+        tos_runtime::capture_begin();
+        run_source(
+            "except.HC",
+            r#"
+U0 Boom()
+{
+  throw(7);
+}
+U0 Main()
+{
+  I64 x=1;
+  try {
+    Boom;
+    x=99;
+  } catch
+    x+=10;
+  "%d\n",x;
+}
+Main;
+"#,
+        )
+        .unwrap();
+        assert_eq!(tos_runtime::capture_take().unwrap(), b"11\n");
+    }
+
+    #[test]
+    fn bare_defaulted_callee_is_a_call_in_a_declaration() {
+        tos_runtime::capture_begin();
+        run_source(
+            "alias_decl.HC",
+            r#"
+U0 Main()
+{
+  CDC *dc=DCAlias;
+  "%d\n",dc!=NULL;
+  DCDel(dc);
+}
+Main;
+"#,
+        )
+        .unwrap();
+        assert_eq!(tos_runtime::capture_take().unwrap(), b"1\n");
+    }
+
+    #[test]
+    fn default_circle_and_fill_arguments_are_callable() {
+        tos_runtime::capture_begin();
+        run_source(
+            "circle.HC",
+            r#"
+U0 Main()
+{
+  CDC *dc=DCNew(48,48,NULL,FALSE);
+  dc->color=15;
+  dc->thick=2;
+  I64 changed=GrCircle3(dc,24,24,0,10);
+  "%d\n",changed>0;
+  DCDel(dc);
+}
+Main;
+"#,
+        )
+        .unwrap();
+        assert_eq!(tos_runtime::capture_take().unwrap(), b"1\n");
+    }
 }
