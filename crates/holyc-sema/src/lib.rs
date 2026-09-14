@@ -1252,6 +1252,8 @@ fn builtin_integer_constant(name: &str) -> Option<i64> {
         "DCF_NO_TRANSPARENTS" => 4,
         "DCF_TRANSFORMATION" => 0x100,
         "DCF_SYMMETRY" => 0x200,
+        "DCF_JUST_MIRROR" => 0x400,
+        "DCF_ALIAS" => 0x2000,
         "SC_CURSOR_UP" => 0x48,
         "SC_CURSOR_DOWN" => 0x50,
         "SC_CURSOR_LEFT" => 0x4b,

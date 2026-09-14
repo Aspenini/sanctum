@@ -63,6 +63,11 @@ persistence, CP437 source/output handling, and CPAL square-wave audio. Missing
 or lost audio devices produce a warning and silent fallback instead of
 preventing launch.
 
+A checked-in compile matrix in `crates/holyc/tests/demo_games_matrix.rs`
+tracks every `TempleOS/Demo/Games` HolyC file: Talons and TicTacToe compile
+today, and each remaining demo pins its current first error so progress or
+regressions show up in CI.
+
 `TempleOS/Demo/Games/Talons.HC` compiles end-to-end and has JIT acceptance tests
 covering terrain initialization, its real draw callback, a non-empty 640x480
 frame, input, cleanup, and the actual fishing loop. The gameplay test locates a
