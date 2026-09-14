@@ -63,6 +63,11 @@ persistence, CP437 source/output handling, and CPAL square-wave audio. Missing
 or lost audio devices produce a warning and silent fallback instead of
 preventing launch.
 
+Read-only TempleOS file calls (`FileRead`, `FileFind`, `FilesFind`, `Cd`,
+`IsDir`, `DirCur`) resolve inside the program directory and the selected
+TempleOS tree (`::/`). Writes are not implemented; paths cannot climb out of
+those roots.
+
 A checked-in compile matrix in `crates/holyc/tests/demo_games_matrix.rs`
 tracks every `TempleOS/Demo/Games` HolyC file: Talons and TicTacToe compile
 today, and each remaining demo pins its current first error so progress or

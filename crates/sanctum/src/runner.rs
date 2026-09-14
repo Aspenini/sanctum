@@ -290,7 +290,7 @@ pub fn run_child(entry: PathBuf) -> Result<(), String> {
         format!("Compiling {}\n", entry.display()).into_bytes(),
     )?;
     let options = CompileOptions {
-        system_root: templeos_root,
+        system_root: templeos_root.clone(),
         ..CompileOptions::default()
     };
     let program = match holyc::compile_file(&entry, &options) {
@@ -305,6 +305,7 @@ pub fn run_child(entry: PathBuf) -> Result<(), String> {
         }
     };
     queue_message(&writer, protocol::LOG, b"Compilation finished\n".to_vec())?;
+    templeos_compat::host::set_file_roots(entry.parent().map(PathBuf::from), templeos_root.clone());
     let mut command_reader = stream;
     thread::spawn(move || {
         while let Ok((kind, payload)) = protocol::read_message(&mut command_reader) {

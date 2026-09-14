@@ -402,6 +402,54 @@ impl Sema {
         }));
         let u8_ptr = Ty::Ptr(Box::new(Ty::U8));
         let i32_ptr = Ty::Ptr(Box::new(Ty::I32));
+        let dir_entry = Ty::Class {
+            name: "CDirEntry".into(),
+            size: 112,
+        };
+        let dir_ptr = Ty::Ptr(Box::new(dir_entry.clone()));
+        s.add_builtin(
+            "FileRead",
+            u8_ptr.clone(),
+            vec![
+                ("filename", u8_ptr.clone()),
+                ("size", Ty::Ptr(Box::new(Ty::I64))),
+                ("attr", Ty::Ptr(Box::new(Ty::I64))),
+            ],
+            false,
+        );
+        s.add_builtin(
+            "FileFind",
+            Ty::I64,
+            vec![
+                ("filename", u8_ptr.clone()),
+                ("de", dir_ptr.clone()),
+                ("fuf_flags", Ty::I64),
+            ],
+            false,
+        );
+        s.add_builtin(
+            "FilesFind",
+            dir_ptr.clone(),
+            vec![("mask", u8_ptr.clone()), ("fuf_flags", Ty::I64)],
+            false,
+        );
+        s.add_builtin("DirEntryDel", Ty::U0, vec![("de", dir_ptr.clone())], false);
+        s.add_builtin("DirEntryDel2", Ty::U0, vec![("de", dir_ptr.clone())], false);
+        s.add_builtin("DirTreeDel", Ty::U0, vec![("de", dir_ptr.clone())], false);
+        s.add_builtin("DirTreeDel2", Ty::U0, vec![("de", dir_ptr.clone())], false);
+        s.add_builtin(
+            "Cd",
+            Ty::I64,
+            vec![("dirname", u8_ptr.clone()), ("make_dirs", Ty::I64)],
+            false,
+        );
+        s.add_builtin("IsDir", Ty::I64, vec![("name", u8_ptr.clone())], false);
+        s.add_builtin(
+            "DirCur",
+            u8_ptr.clone(),
+            vec![("task", task_ptr.clone()), ("mem_task", task_ptr.clone())],
+            false,
+        );
         s.add_builtin(
             "DCNew",
             cdc_ptr.clone(),
@@ -871,6 +919,47 @@ impl Sema {
                 size: 168,
             },
         );
+        s.classes.insert(
+            "CDate".into(),
+            packed_class("CDate", vec![("time", Ty::U32), ("date", Ty::I32)]),
+        );
+        s.classes.insert(
+            "CDirEntry".into(),
+            packed_class(
+                "CDirEntry",
+                vec![
+                    (
+                        "next",
+                        Ty::Ptr(Box::new(Ty::Class {
+                            name: "CDirEntry".into(),
+                            size: 112,
+                        })),
+                    ),
+                    (
+                        "parent",
+                        Ty::Ptr(Box::new(Ty::Class {
+                            name: "CDirEntry".into(),
+                            size: 112,
+                        })),
+                    ),
+                    (
+                        "sub",
+                        Ty::Ptr(Box::new(Ty::Class {
+                            name: "CDirEntry".into(),
+                            size: 112,
+                        })),
+                    ),
+                    ("full_name", Ty::Ptr(Box::new(Ty::U8))),
+                    ("user_data", Ty::I64),
+                    ("user_data2", Ty::I64),
+                    ("attr", Ty::U16),
+                    ("name", Ty::Array(Box::new(Ty::U8), Some(38))),
+                    ("clus", Ty::I64),
+                    ("size", Ty::I64),
+                    ("datetime", Ty::I64),
+                ],
+            ),
+        );
         if let Some(f) = s.functions.get_mut("Fs") {
             f.ret = Ty::Ptr(Box::new(Ty::Class {
                 name: "CTask".into(),
@@ -1254,6 +1343,13 @@ fn builtin_integer_constant(name: &str) -> Option<i64> {
         "DCF_SYMMETRY" => 0x200,
         "DCF_JUST_MIRROR" => 0x400,
         "DCF_ALIAS" => 0x2000,
+        "RS_ATTR_DIR" => 0x10,
+        "RS_ATTR_COMPRESSED" => 0x400,
+        "FUF_RECURSE" => 1,
+        "FUF_SINGLE" => 1 << 9,
+        "FUF_JUST_DIRS" => 1 << 10,
+        "FUF_JUST_FILES" => 1 << 11,
+        "CDIR_FILENAME_LEN" => 38,
         "SC_CURSOR_UP" => 0x48,
         "SC_CURSOR_DOWN" => 0x50,
         "SC_CURSOR_LEFT" => 0x4b,

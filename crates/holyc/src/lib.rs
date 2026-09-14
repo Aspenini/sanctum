@@ -96,12 +96,21 @@ pub fn run_source(path: &str, src: &str) -> Result<(), HolyCError> {
 
 pub fn run_file(path: &Path, opts: &CompileOptions) -> Result<(), HolyCError> {
     let prog = compile_file(path, opts)?;
+    bind_file_roots(path, opts);
     run_program(prog, templeos_compat::HostMode::Headless)
 }
 
 pub fn run_file_interactive(path: &Path, opts: &CompileOptions) -> Result<(), HolyCError> {
     let prog = compile_file(path, opts)?;
+    bind_file_roots(path, opts);
     run_program(prog, templeos_compat::HostMode::NativeWindow)
+}
+
+fn bind_file_roots(path: &Path, opts: &CompileOptions) {
+    templeos_compat::host::set_file_roots(
+        path.parent().map(Path::to_path_buf),
+        opts.system_root.clone(),
+    );
 }
 
 /// Run a compiled program using the selected compatibility host.
@@ -984,5 +993,72 @@ Main;
         )
         .unwrap();
         assert_eq!(tos_runtime::capture_take().unwrap(), b"12\n");
+    }
+
+    #[test]
+    fn file_read_find_and_cd_stay_inside_project_root() {
+        let root = std::env::temp_dir().join(format!("sanctum-holyc-fs-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("sub")).unwrap();
+        std::fs::write(root.join("note.TXT"), b"hello file").unwrap();
+        std::fs::write(root.join("sub").join("inner.HC"), b"inner").unwrap();
+        tos_host::set_file_roots(Some(root.clone()), None);
+        tos_runtime::capture_begin();
+        run_source(
+            "files.HC",
+            r#"
+U0 Main()
+{
+  I64 size=0;
+  U8 *s=FileRead("note.TXT",&size);
+  "%s %d ",s,size;
+  Free(s);
+  CDirEntry de;
+  "%d ",FileFind("note.TXT",&de);
+  "%d ",Cd("sub");
+  s=FileRead("inner.HC");
+  "%s ",s;
+  Free(s);
+  Free(de.full_name);
+  "%d\n",FileRead("../secret.TXT")==NULL;
+}
+Main;
+"#,
+        )
+        .unwrap();
+        assert_eq!(
+            tos_runtime::capture_take().unwrap(),
+            b"hello file 10 1 1 inner 1\n"
+        );
+        let _ = std::fs::remove_dir_all(root);
+        tos_host::set_file_roots(None, None);
+    }
+
+    #[test]
+    fn file_read_opens_templeos_system_paths() {
+        let templeos = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../TempleOS");
+        let tic = templeos.join("Demo/Games/TicTacToe.HC");
+        if !tic.is_file() {
+            eprintln!("skipping ::/ FileRead test: {} is absent", tic.display());
+            return;
+        }
+        tos_host::set_file_roots(None, Some(templeos));
+        tos_runtime::capture_begin();
+        run_source(
+            "system_file.HC",
+            r#"
+U0 Main()
+{
+  I64 size=0;
+  U8 *s=FileRead("::/Demo/Games/TicTacToe.HC",&size);
+  "%d %d\n",s!=NULL,size>20;
+  Free(s);
+}
+Main;
+"#,
+        )
+        .unwrap();
+        assert_eq!(tos_runtime::capture_take().unwrap(), b"1 1\n");
+        tos_host::set_file_roots(None, None);
     }
 }

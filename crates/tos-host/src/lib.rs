@@ -1,6 +1,7 @@
 //! Host display and input boundary for TempleOS programs.
 
 mod audio;
+mod fs;
 pub mod input;
 mod registry;
 
@@ -85,6 +86,16 @@ pub fn jit_symbols() -> Vec<(&'static str, *const u8)> {
         ("tos_RegDft", registry::tos_RegDft as *const u8),
         ("tos_RegExe", registry::tos_RegExe as *const u8),
         ("tos_RegWrite", registry::tos_RegWrite as *const u8),
+        ("tos_FileRead", fs::tos_FileRead as *const u8),
+        ("tos_FileFind", fs::tos_FileFind as *const u8),
+        ("tos_FilesFind", fs::tos_FilesFind as *const u8),
+        ("tos_DirEntryDel", fs::tos_DirEntryDel as *const u8),
+        ("tos_DirEntryDel2", fs::tos_DirEntryDel2 as *const u8),
+        ("tos_DirTreeDel", fs::tos_DirTreeDel as *const u8),
+        ("tos_DirTreeDel2", fs::tos_DirTreeDel2 as *const u8),
+        ("tos_Cd", fs::tos_Cd as *const u8),
+        ("tos_IsDir", fs::tos_IsDir as *const u8),
+        ("tos_DirCur", fs::tos_DirCur as *const u8),
     ]
 }
 
@@ -92,6 +103,7 @@ pub fn reset() {
     audio::unbind();
     audio::reset();
     registry::reset();
+    fs::reset();
     tos_runtime::reset_exceptions();
     WINMGR_GLOBAL.store(0, Ordering::Release);
     MS_GLOBAL.store(0, Ordering::Release);
@@ -124,6 +136,10 @@ pub fn shutdown() {
     registry::unbind();
     WINMGR_GLOBAL.store(0, Ordering::Release);
     MS_GLOBAL.store(0, Ordering::Release);
+}
+
+pub fn set_file_roots(project: Option<std::path::PathBuf>, system: Option<std::path::PathBuf>) {
+    fs::set_roots(project, system);
 }
 
 pub fn bind_globals(bindings: &[GlobalBinding<'_>]) {

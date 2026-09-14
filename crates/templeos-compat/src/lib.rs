@@ -74,6 +74,9 @@ mod tests {
             "tos_Throw",
             "tos_Refresh",
             "tos_Play",
+            "tos_FileRead",
+            "tos_FilesFind",
+            "tos_Cd",
         ] {
             assert!(symbols.iter().any(|(name, _)| *name == required));
         }

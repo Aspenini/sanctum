@@ -125,6 +125,35 @@ pub struct CMsStateGlbls {
 
 pub const MS_STATE_SIZE: usize = 168;
 
+pub const CDIR_FILENAME_LEN: usize = 38;
+pub const CDIR_ENTRY_SIZE: usize = 112;
+pub const RS_ATTR_DIR: u16 = 0x10;
+pub const RS_ATTR_COMPRESSED: u16 = 0x400;
+
+pub const FUF_RECURSE: i64 = 1;
+pub const FUF_SINGLE: i64 = 1 << 9;
+pub const FUF_JUST_DIRS: i64 = 1 << 10;
+pub const FUF_JUST_FILES: i64 = 1 << 11;
+pub const FUF_Z_OR_NOT_Z: i64 = 1 << 18;
+pub const FUF_SCAN_PARENTS: i64 = 1 << 20;
+
+/// Packed `CDirEntry` from KernelA.HH. Offsets are the ABI.
+#[repr(C, packed)]
+#[derive(Clone, Copy, Debug)]
+pub struct CDirEntry {
+    pub next: *mut CDirEntry,
+    pub parent: *mut CDirEntry,
+    pub sub: *mut CDirEntry,
+    pub full_name: *mut u8,
+    pub user_data: i64,
+    pub user_data2: i64,
+    pub attr: u16,
+    pub name: [u8; CDIR_FILENAME_LEN],
+    pub clus: i64,
+    pub size: i64,
+    pub datetime: i64,
+}
+
 /// Current CPU. HolyC `Gs` points here.
 #[repr(C)]
 pub struct CCPU {
@@ -221,5 +250,15 @@ mod tests {
         assert_eq!(offset_of!(CMsStateGlbls, pos), 0);
         assert_eq!(offset_of!(CMsStateGlbls, lb), 160);
         assert_eq!(offset_of!(CMsStateGlbls, rb), 161);
+    }
+
+    #[test]
+    fn dir_entry_layout_is_packed() {
+        assert_eq!(size_of::<CDirEntry>(), CDIR_ENTRY_SIZE);
+        assert_eq!(offset_of!(CDirEntry, full_name), 24);
+        assert_eq!(offset_of!(CDirEntry, attr), 48);
+        assert_eq!(offset_of!(CDirEntry, name), 50);
+        assert_eq!(offset_of!(CDirEntry, size), 96);
+        assert_eq!(offset_of!(CDirEntry, datetime), 104);
     }
 }
