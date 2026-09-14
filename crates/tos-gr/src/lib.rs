@@ -1446,7 +1446,7 @@ fn format_graphics_text(fmt: &[u8], args: &[i64]) -> String {
             b'X' => format!("{:X}", argument as u64),
             b'c' => char::from(argument as u8).to_string(),
             b's' if argument != 0 => unsafe {
-                CStr::from_ptr(argument as *const i8)
+                CStr::from_ptr(argument as *const std::ffi::c_char)
                     .to_string_lossy()
                     .into_owned()
             },

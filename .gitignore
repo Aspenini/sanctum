@@ -16,3 +16,15 @@
 # Local portable-mode data created when running Sanctum from the repository.
 /SanctumData/
 /portable.mode
+
+# Android build outputs and secrets. Build the APK locally; do not commit it.
+*.apk
+*.ap_
+*.aab
+*.keystore
+*.jks
+local.properties
+android-project/.gradle/
+android-project/**/build/
+android-project/**/jniLibs/
+crates/sanctum/android/

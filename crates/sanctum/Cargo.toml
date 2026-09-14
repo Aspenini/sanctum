@@ -9,18 +9,57 @@ description = "Graphical library and isolated runner for HolyC programs"
 name = "sanctum"
 path = "src/main.rs"
 
+[lib]
+name = "sanctum"
+path = "src/lib.rs"
+crate-type = ["rlib", "cdylib"]
+
 [dependencies]
 holyc = { path = "../holyc" }
 holyc-syntax = { path = "../holyc-syntax" }
 templeos-compat = { path = "../templeos-compat" }
 directories.workspace = true
+gilrs.workspace = true
 image.workspace = true
-rfd.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 slint.workspace = true
 thiserror.workspace = true
 uuid.workspace = true
+
+[target.'cfg(not(target_os = "android"))'.dependencies]
+rfd.workspace = true
+
+[target.'cfg(target_os = "android")'.dependencies]
+jni = "0.21"
+slint = { workspace = true, features = ["backend-android-activity-06"] }
+
+[features]
+android-backend = ["slint/backend-android-activity-06"]
+
+[package.metadata.android]
+package = "dev.sanctum.app"
+apk_name = "Sanctum"
+
+[package.metadata.android.sdk]
+min_sdk_version = 26
+target_sdk_version = 35
+
+[package.metadata.android.application]
+label = "Sanctum"
+
+[package.metadata.android.application.activity]
+config_changes = "orientation|screenSize|screenLayout|keyboardHidden"
+orientation = "unspecified"
+exported = true
+launch_mode = "singleTask"
+
+[package.metadata.android.signing.release]
+path = "android/debug.keystore"
+keystore_password = "android"
+
+[[package.metadata.android.uses_permission]]
+name = "android.permission.INTERNET"
 
 [build-dependencies]
 lucide-slint.workspace = true

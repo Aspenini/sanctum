@@ -26,8 +26,16 @@ pub enum RunnerEvent {
     Exited(bool),
 }
 
+enum RunnerProc {
+    Child(Child),
+    Thread {
+        done: Arc<AtomicBool>,
+        handle: Option<thread::JoinHandle<()>>,
+    },
+}
+
 pub struct RunnerSession {
-    child: Child,
+    proc: RunnerProc,
     writer: Arc<Mutex<TcpStream>>,
     events: mpsc::Receiver<RunnerEvent>,
     stopping_since: Option<Instant>,
@@ -35,7 +43,50 @@ pub struct RunnerSession {
 
 impl RunnerSession {
     pub fn spawn(entry: &Path, templeos_root: Option<&Path>, data_root: &Path) -> io::Result<Self> {
+        if cfg!(target_os = "android") {
+            return Self::spawn_in_process(entry, templeos_root, data_root);
+        }
         Self::spawn_with_executable(&std::env::current_exe()?, entry, templeos_root, data_root)
+    }
+
+    /// Run the HolyC program in-process over the same TCP protocol.
+    ///
+    /// Android cannot spawn the Sanctum executable, so the isolated child is
+    /// replaced with a worker thread that still talks over localhost.
+    pub fn spawn_in_process(
+        entry: &Path,
+        templeos_root: Option<&Path>,
+        data_root: &Path,
+    ) -> io::Result<Self> {
+        let listener = TcpListener::bind(("127.0.0.1", 0))?;
+        listener.set_nonblocking(true)?;
+        let address = listener.local_addr()?;
+        let token = Uuid::new_v4().to_string();
+        let entry = entry.to_path_buf();
+        let templeos_root = templeos_root.map(Path::to_path_buf);
+        let data_root = data_root.to_path_buf();
+        let address_text = address.to_string();
+        let worker_token = token.clone();
+        let done = Arc::new(AtomicBool::new(false));
+        let finished = done.clone();
+        let handle = thread::spawn(move || {
+            let result = run_session(entry, address_text, worker_token, templeos_root, data_root);
+            if let Err(error) = result {
+                eprintln!("{error}");
+            }
+            finished.store(true, Ordering::Release);
+        });
+        let stream = accept_runner(&listener, RunnerWait::Thread(done.clone()), &token)?;
+        let (writer, events, _) = attach_stream(stream)?;
+        Ok(Self {
+            proc: RunnerProc::Thread {
+                done,
+                handle: Some(handle),
+            },
+            writer,
+            events,
+            stopping_since: None,
+        })
     }
 
     /// Spawn a runner using an explicit Sanctum executable.
@@ -72,54 +123,24 @@ impl RunnerSession {
             command.creation_flags(0x0800_0000);
         }
         let mut child = command.spawn()?;
-        let deadline = Instant::now() + Duration::from_secs(5);
-        let mut stream = loop {
-            match listener.accept() {
-                Ok((stream, _)) => break stream,
-                Err(error)
-                    if error.kind() == io::ErrorKind::WouldBlock && Instant::now() < deadline =>
-                {
-                    if child.try_wait()?.is_some() {
-                        return Err(io::Error::other("runner exited before connecting"));
-                    }
-                    thread::sleep(Duration::from_millis(10));
-                }
-                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                    let _ = child.kill();
-                    return Err(io::Error::new(
-                        io::ErrorKind::TimedOut,
-                        "runner connection timed out",
-                    ));
-                }
-                Err(error) => return Err(error),
+        let stream = match accept_runner(&listener, RunnerWait::Child(&mut child), &token) {
+            Ok(stream) => stream,
+            Err(error) => {
+                let _ = child.kill();
+                return Err(error);
             }
         };
-        stream.set_nonblocking(false)?;
-        stream.set_nodelay(true)?;
-        let (kind, hello) = protocol::read_message(&mut stream)?;
-        let expected = format!("{}:{token}", protocol::VERSION);
-        if kind != protocol::HELLO || hello != expected.as_bytes() {
-            let _ = child.kill();
-            return Err(io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                "runner authentication failed",
-            ));
-        }
-
-        let (tx, events) = mpsc::channel();
-        let reader = stream.try_clone()?;
-        let event_tx = tx.clone();
-        thread::spawn(move || read_events(reader, event_tx));
+        let (writer, events, logs) = attach_stream(stream)?;
         if let Some(stdout) = child.stdout.take() {
-            spawn_log_reader(stdout, tx.clone(), false);
+            spawn_log_reader(stdout, logs.clone(), false);
         }
         if let Some(stderr) = child.stderr.take() {
-            spawn_log_reader(stderr, tx, true);
+            spawn_log_reader(stderr, logs, true);
         }
 
         Ok(Self {
-            child,
-            writer: Arc::new(Mutex::new(stream)),
+            proc: RunnerProc::Child(child),
+            writer,
             events,
             stopping_since: None,
         })
@@ -156,23 +177,40 @@ impl RunnerSession {
     }
 
     pub fn update_lifecycle(&mut self) -> io::Result<bool> {
-        if self.child.try_wait()?.is_some() {
+        let finished = match &mut self.proc {
+            RunnerProc::Child(child) => child.try_wait()?.is_some(),
+            RunnerProc::Thread { done, handle } => {
+                done.load(Ordering::Acquire) || handle.as_ref().is_some_and(|item| item.is_finished())
+            }
+        };
+        if finished {
             return Ok(false);
         }
         if self
             .stopping_since
             .is_some_and(|started| started.elapsed() >= Duration::from_secs(2))
         {
-            self.child.kill()?;
-            let _ = self.child.wait();
+            self.kill();
             return Ok(false);
         }
         Ok(true)
     }
 
     pub fn kill(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        match &mut self.proc {
+            RunnerProc::Child(child) => {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+            RunnerProc::Thread { handle, .. } => {
+                let _ = protocol::write_message(
+                    &mut *self.writer.lock().unwrap(),
+                    protocol::STOP,
+                    &[],
+                );
+                let _ = handle.take();
+            }
+        }
     }
 }
 
@@ -249,6 +287,68 @@ fn read_events(mut stream: TcpStream, tx: mpsc::Sender<RunnerEvent>) {
     }
 }
 
+enum RunnerWait<'a> {
+    Child(&'a mut Child),
+    Thread(Arc<AtomicBool>),
+}
+
+fn accept_runner(
+    listener: &TcpListener,
+    mut wait: RunnerWait<'_>,
+    token: &str,
+) -> io::Result<TcpStream> {
+    let deadline = Instant::now() + Duration::from_secs(8);
+    let mut stream = loop {
+        match listener.accept() {
+            Ok((stream, _)) => break stream,
+            Err(error)
+                if error.kind() == io::ErrorKind::WouldBlock && Instant::now() < deadline =>
+            {
+                let gone = match &mut wait {
+                    RunnerWait::Child(child) => child.try_wait()?.is_some(),
+                    RunnerWait::Thread(done) => done.load(Ordering::Acquire),
+                };
+                if gone {
+                    return Err(io::Error::other("runner exited before connecting"));
+                }
+                thread::sleep(Duration::from_millis(10));
+            }
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "runner connection timed out",
+                ));
+            }
+            Err(error) => return Err(error),
+        }
+    };
+    stream.set_nonblocking(false)?;
+    stream.set_nodelay(true)?;
+    let (kind, hello) = protocol::read_message(&mut stream)?;
+    let expected = format!("{}:{token}", protocol::VERSION);
+    if kind != protocol::HELLO || hello != expected.as_bytes() {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "runner authentication failed",
+        ));
+    }
+    Ok(stream)
+}
+
+fn attach_stream(
+    stream: TcpStream,
+) -> io::Result<(
+    Arc<Mutex<TcpStream>>,
+    mpsc::Receiver<RunnerEvent>,
+    mpsc::Sender<RunnerEvent>,
+)> {
+    let (tx, events) = mpsc::channel();
+    let reader = stream.try_clone()?;
+    let event_tx = tx.clone();
+    thread::spawn(move || read_events(reader, event_tx));
+    Ok((Arc::new(Mutex::new(stream)), events, tx))
+}
+
 fn queue_message(
     writer: &mpsc::SyncSender<(u8, Vec<u8>)>,
     kind: u8,
@@ -263,6 +363,20 @@ pub fn run_child(entry: PathBuf) -> Result<(), String> {
     let address = std::env::var("SANCTUM_RUNNER_ADDR").map_err(|_| "missing runner address")?;
     let token = std::env::var("SANCTUM_RUNNER_TOKEN").map_err(|_| "missing runner token")?;
     let templeos_root = std::env::var_os("SANCTUM_TEMPLEOS_ROOT").map(PathBuf::from);
+    let data_root = std::env::var_os("SANCTUM_DATA_DIR").map(PathBuf::from);
+    run_session(entry, address, token, templeos_root, data_root.unwrap_or_default())
+}
+
+fn run_session(
+    entry: PathBuf,
+    address: String,
+    token: String,
+    templeos_root: Option<PathBuf>,
+    data_root: PathBuf,
+) -> Result<(), String> {
+    if !data_root.as_os_str().is_empty() {
+        unsafe { std::env::set_var("SANCTUM_DATA_DIR", &data_root) };
+    }
     let stream = TcpStream::connect(address).map_err(|error| error.to_string())?;
     stream
         .set_nodelay(true)

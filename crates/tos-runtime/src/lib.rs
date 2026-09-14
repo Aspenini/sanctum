@@ -279,7 +279,7 @@ pub unsafe extern "C" fn tos_Print(fmt: *const u8, argc: i64, argv: *const i64) 
     if fmt.is_null() {
         return 0;
     }
-    let cstr = unsafe { CStr::from_ptr(fmt as *const i8) };
+    let cstr = unsafe { CStr::from_ptr(fmt.cast()) };
     let fmt = cstr.to_string_lossy();
     let args: &[i64] = if argc > 0 && !argv.is_null() {
         unsafe { slice::from_raw_parts(argv, argc as usize) }
@@ -636,7 +636,7 @@ pub unsafe extern "C" fn tos_StrLen(s: *const u8) -> i64 {
     if s.is_null() {
         return 0;
     }
-    unsafe { CStr::from_ptr(s as *const i8) }.to_bytes().len() as i64
+    unsafe { CStr::from_ptr(s.cast()) }.to_bytes().len() as i64
 }
 
 #[unsafe(no_mangle)]
@@ -739,7 +739,7 @@ fn format_tos(fmt: &str, args: &[i64]) -> String {
         let mut formatted = match specifier {
             b's' if argument == 0 => "NULL".to_string(),
             b's' => unsafe {
-                CStr::from_ptr(argument as *const i8)
+                CStr::from_ptr(argument as *const std::ffi::c_char)
                     .to_string_lossy()
                     .into_owned()
             },

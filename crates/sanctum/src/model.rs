@@ -1,3 +1,5 @@
+use crate::controls::InputSettings;
+#[cfg(not(target_os = "android"))]
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -136,6 +138,8 @@ pub struct SanctumConfig {
     pub templeos_root: Option<PathBuf>,
     pub scale_mode: ScaleMode,
     pub muted: bool,
+    #[serde(default)]
+    pub input: InputSettings,
 }
 
 impl Default for SanctumConfig {
@@ -147,6 +151,7 @@ impl Default for SanctumConfig {
             templeos_root: None,
             scale_mode: ScaleMode::Integer,
             muted: false,
+            input: InputSettings::default(),
         }
     }
 }
@@ -160,8 +165,40 @@ pub struct StoragePaths {
     pub executable_dir: PathBuf,
 }
 
+#[cfg(target_os = "android")]
+static ANDROID_DATA_DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+#[cfg(target_os = "android")]
+pub fn set_android_data_dir(path: PathBuf) {
+    let _ = ANDROID_DATA_DIR.set(path);
+}
+
 impl StoragePaths {
     pub fn detect() -> io::Result<Self> {
+        #[cfg(target_os = "android")]
+        {
+            return Self::detect_android();
+        }
+        #[cfg(not(target_os = "android"))]
+        Self::detect_desktop()
+    }
+
+    #[cfg(target_os = "android")]
+    fn detect_android() -> io::Result<Self> {
+        let root = ANDROID_DATA_DIR.get().cloned().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::NotFound, "Android data directory unavailable")
+        })?;
+        Ok(Self {
+            config: root.join("sanctum.json"),
+            covers: root.join("covers"),
+            executable_dir: root.clone(),
+            root,
+            portable: false,
+        })
+    }
+
+    #[cfg(not(target_os = "android"))]
+    fn detect_desktop() -> io::Result<Self> {
         let executable = std::env::current_exe()?;
         let executable_dir = executable.parent().unwrap_or(Path::new(".")).to_path_buf();
         let portable = executable_dir.join("portable.mode").is_file();
@@ -208,6 +245,7 @@ pub fn load(paths: &StoragePaths) -> io::Result<SanctumConfig> {
         ));
     }
     config.version = CONFIG_VERSION;
+    config.input.ensure_defaults();
     Ok(config)
 }
 

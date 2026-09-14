@@ -1,3 +1,4 @@
+use crate::controls::{Action, ControlRect, GamepadSource, InputEvent, InputRuntime};
 use crate::model::{self, LibraryEntry, SanctumConfig, ScaleMode, StorageMode, StoragePaths};
 use crate::runner::{RunnerEvent, RunnerSession};
 use slint::platform::Key;
@@ -17,6 +18,95 @@ use templeos_compat::host::input::{ascii_key_event, scan_flags};
 use uuid::Uuid;
 
 slint::include_modules!();
+
+fn desktop_chrome() -> bool {
+    !cfg!(target_os = "android")
+}
+
+fn window_logical_size(ui: &MainWindow) -> (f32, f32) {
+    let window = ui.window();
+    let scale = window.scale_factor().max(0.001);
+    let size = window.size();
+    (size.width as f32 / scale, size.height as f32 / scale)
+}
+
+fn compact_layout_for(ui: &MainWindow) -> bool {
+    if !desktop_chrome() {
+        return true;
+    }
+    window_logical_size(ui).0 < 760.0
+}
+
+fn landscape_for(ui: &MainWindow) -> bool {
+    let (width, height) = window_logical_size(ui);
+    width > height
+}
+
+fn sync_layout_mode(ui: &MainWindow) {
+    ui.set_desktop_chrome(desktop_chrome());
+    ui.set_compact_layout(compact_layout_for(ui));
+    ui.set_landscape(landscape_for(ui));
+}
+
+fn apply_templeos_folder(state: &mut AppState, root: &Path) {
+    if root.join("Kernel/KernelA.HH").is_file() {
+        state.config.templeos_root = Some(root.to_path_buf());
+        state.status = "TempleOS folder selected".into();
+        state.persist();
+    } else {
+        state.status = "That folder is not a TempleOS root".into();
+    }
+}
+
+#[cfg(all(target_os = "android", feature = "android-backend"))]
+fn apply_android_pick(
+    state: &mut AppState,
+    kind: crate::android_picker::PickerKind,
+    path: Option<&Path>,
+) {
+    use crate::android_picker::PickerKind;
+    let Some(path) = path else {
+        state.status = "Picker cancelled".into();
+        return;
+    };
+    match kind {
+        PickerKind::LibraryFolder => state.add_library_folder(path),
+        PickerKind::TempleOsFolder => apply_templeos_folder(state, path),
+        PickerKind::HolyCFile => state.launch_direct(path),
+        PickerKind::CoverImage => {
+            if let Some(id) = state.selected {
+                state.import_cover_from(id, path);
+            }
+        }
+    }
+}
+
+#[cfg(not(all(target_os = "android", feature = "android-backend")))]
+fn pick_folder() -> Option<PathBuf> {
+    #[cfg(not(target_os = "android"))]
+    {
+        rfd::FileDialog::new().pick_folder()
+    }
+    #[cfg(target_os = "android")]
+    {
+        None
+    }
+}
+
+#[cfg(not(all(target_os = "android", feature = "android-backend")))]
+fn pick_file(filter_name: &str, extensions: &[&str]) -> Option<PathBuf> {
+    #[cfg(not(target_os = "android"))]
+    {
+        rfd::FileDialog::new()
+            .add_filter(filter_name, extensions)
+            .pick_file()
+    }
+    #[cfg(target_os = "android")]
+    {
+        let _ = (filter_name, extensions);
+        None
+    }
+}
 
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum Sort {
@@ -60,6 +150,11 @@ struct AppState {
     detached: bool,
     fullscreen: bool,
     log_open: bool,
+    overlay_selected: String,
+    bind_target: Option<String>,
+    controls_editor: bool,
+    bind_open: bool,
+    input: InputRuntime,
     library_dirty: bool,
 }
 
@@ -72,7 +167,7 @@ impl AppState {
         } else {
             StorageMode::PerUser
         };
-        Self {
+        let mut state = Self {
             paths,
             config,
             sort: Sort::Title,
@@ -97,14 +192,52 @@ impl AppState {
             detached: false,
             fullscreen: false,
             log_open: false,
+            overlay_selected: String::new(),
+            bind_target: None,
+            controls_editor: false,
+            bind_open: false,
+            input: InputRuntime::new(),
             library_dirty: true,
-        }
+        };
+        state.config.input.ensure_defaults();
+        state
     }
 
     fn persist(&mut self) {
         if let Err(error) = model::save(&self.paths, &self.config) {
             self.status = format!("Could not save library: {error}");
         }
+    }
+
+    fn apply_input(&mut self, events: Vec<InputEvent>) {
+        for event in events {
+            match event {
+                InputEvent::Key(ch, scan) => {
+                    if let Some(runner) = &self.runner {
+                        let _ = runner.send_key(ch, scan);
+                    }
+                }
+                InputEvent::Mouse {
+                    x,
+                    y,
+                    left,
+                    right,
+                } => {
+                    if let Some(runner) = &self.runner {
+                        let _ = runner.send_mouse(x, y, left, right);
+                    }
+                }
+            }
+        }
+    }
+
+    fn poll_input(&mut self) {
+        let preset = self.config.input.active().clone();
+        let width = i64::from(self.frame_width.max(1));
+        let height = i64::from(self.frame_height.max(1));
+        let mut events = self.input.poll_gamepad(&preset, width, height);
+        events.extend(self.input.repeats());
+        self.apply_input(events);
     }
 
     fn add_library_folder(&mut self, root: &Path) {
@@ -389,13 +522,15 @@ impl AppState {
         }
     }
 
+    #[cfg(not(all(target_os = "android", feature = "android-backend")))]
     fn import_cover(&mut self, id: Uuid) {
-        let Some(source) = rfd::FileDialog::new()
-            .add_filter("Image", &["png", "jpg", "jpeg"])
-            .pick_file()
-        else {
+        let Some(source) = pick_file("Image", &["png", "jpg", "jpeg"]) else {
             return;
         };
+        self.import_cover_from(id, &source);
+    }
+
+    fn import_cover_from(&mut self, id: Uuid, source: &Path) {
         let extension = source
             .extension()
             .and_then(|ext| ext.to_str())
@@ -453,6 +588,7 @@ macro_rules! simple_main_callback {
                     sync_library(&ui, &shared);
                 }
                 sync_main_only(&ui, &shared);
+                sync_controls(&ui, &shared);
             }
         });
     }};
@@ -469,6 +605,7 @@ macro_rules! simple_main_callback {
                     sync_library(&ui, &shared);
                 }
                 sync_main_only(&ui, &shared);
+                sync_controls(&ui, &shared);
             }
         });
     }};
@@ -485,6 +622,7 @@ macro_rules! simple_main_callback {
                     sync_library(&ui, &shared);
                 }
                 sync_main_only(&ui, &shared);
+                sync_controls(&ui, &shared);
             }
         });
     }};
@@ -492,50 +630,72 @@ macro_rules! simple_main_callback {
 
 pub fn run() -> Result<(), slint::PlatformError> {
     let ui = MainWindow::new()?;
-    let game = GameWindow::new()?;
+    let game = if desktop_chrome() {
+        Some(GameWindow::new()?)
+    } else {
+        None
+    };
     let state = Rc::new(RefCell::new(AppState::new()));
 
-    install_main_callbacks(&ui, &game, &state);
-    install_game_callbacks(&ui, &game, &state);
-    sync_all(&ui, &game, &state);
+    sync_layout_mode(&ui);
+    #[cfg(all(target_os = "android", feature = "android-backend"))]
+    {
+        let weak = ui.as_weak();
+        let game_weak = game.as_ref().map(GameWindow::as_weak);
+        let shared = state.clone();
+        crate::android_picker::set_handler(Box::new(move |kind, path| {
+            apply_android_pick(&mut shared.borrow_mut(), kind, path.as_deref());
+            sync_from_weaks(&weak, &game_weak, &shared);
+        }));
+    }
+    install_main_callbacks(&ui, game.as_ref(), &state);
+    if let Some(game) = game.as_ref() {
+        install_game_callbacks(&ui, game, &state);
+    }
+    sync_all(&ui, game.as_ref(), &state);
 
     let ui_weak = ui.as_weak();
-    let game_weak = game.as_weak();
+    let game_weak = game.as_ref().map(GameWindow::as_weak);
     let timer_state = state.clone();
     let timer = Timer::default();
     timer.start(TimerMode::Repeated, Duration::from_millis(16), move || {
         timer_state.borrow_mut().poll_runner();
-        if let (Some(ui), Some(game)) = (ui_weak.upgrade(), game_weak.upgrade()) {
-            sync_runtime(&ui, &game, &timer_state);
+        timer_state.borrow_mut().poll_input();
+        if let Some(ui) = ui_weak.upgrade() {
+            sync_layout_mode(&ui);
+            let game = upgrade_game(&game_weak);
+            sync_runtime(&ui, game.as_ref(), &timer_state);
             if timer_state.borrow().library_dirty {
                 sync_library(&ui, &timer_state);
             }
         }
     });
 
-    let ui_weak = ui.as_weak();
-    let game_weak = game.as_weak();
-    let game_close_state = state.clone();
-    game.window().on_close_requested(move || {
-        let fullscreen = {
-            let mut state = game_close_state.borrow_mut();
-            state.detached = false;
-            state.fullscreen
-        };
-        if let Some(ui) = ui_weak.upgrade() {
-            ui.set_detached(false);
-            ui.window().set_fullscreen(fullscreen);
-        }
-        if let Some(game) = game_weak.upgrade() {
-            game.window().set_fullscreen(false);
-        }
-        CloseRequestResponse::HideWindow
-    });
+    if let Some(game) = game.as_ref() {
+        let ui_weak = ui.as_weak();
+        let game_weak = game.as_weak();
+        let game_close_state = state.clone();
+        game.window().on_close_requested(move || {
+            let fullscreen = {
+                let mut state = game_close_state.borrow_mut();
+                state.detached = false;
+                state.fullscreen
+            };
+            if let Some(ui) = ui_weak.upgrade() {
+                ui.set_detached(false);
+                ui.window().set_fullscreen(fullscreen);
+            }
+            if let Some(game) = game_weak.upgrade() {
+                game.window().set_fullscreen(false);
+            }
+            CloseRequestResponse::HideWindow
+        });
+    }
 
-    let game_weak = game.as_weak();
+    let game_weak = game.as_ref().map(GameWindow::as_weak);
     let close_state = state.clone();
     ui.window().on_close_requested(move || {
-        if let Some(game) = game_weak.upgrade() {
+        if let Some(game) = upgrade_game(&game_weak) {
             let _ = game.hide();
         }
         if let Some(mut runner) = close_state.borrow_mut().runner.take() {
@@ -547,28 +707,53 @@ pub fn run() -> Result<(), slint::PlatformError> {
     ui.run()
 }
 
-fn install_main_callbacks(ui: &MainWindow, game: &GameWindow, state: &Rc<RefCell<AppState>>) {
+fn upgrade_game(game: &Option<slint::Weak<GameWindow>>) -> Option<GameWindow> {
+    game.as_ref().and_then(slint::Weak::upgrade)
+}
+
+fn install_main_callbacks(
+    ui: &MainWindow,
+    game: Option<&GameWindow>,
+    state: &Rc<RefCell<AppState>>,
+) {
     let weak = ui.as_weak();
-    let game_weak = game.as_weak();
+    let game_weak = game.map(GameWindow::as_weak);
     let shared = state.clone();
     ui.on_add_library(move || {
-        if let Some(root) = rfd::FileDialog::new().pick_folder() {
-            shared.borrow_mut().add_library_folder(&root);
+        #[cfg(all(target_os = "android", feature = "android-backend"))]
+        {
+            shared.borrow_mut().status = "Pick a folder…".into();
+            crate::android_picker::begin(crate::android_picker::PickerKind::LibraryFolder);
+            sync_from_weaks(&weak, &game_weak, &shared);
+            return;
         }
-        sync_from_weaks(&weak, &game_weak, &shared);
+        #[cfg(not(all(target_os = "android", feature = "android-backend")))]
+        {
+            if let Some(root) = pick_folder() {
+                shared.borrow_mut().add_library_folder(&root);
+            }
+            sync_from_weaks(&weak, &game_weak, &shared);
+        }
     });
 
     let weak = ui.as_weak();
-    let game_weak = game.as_weak();
+    let game_weak = game.map(GameWindow::as_weak);
     let shared = state.clone();
     ui.on_run_file(move || {
-        if let Some(path) = rfd::FileDialog::new()
-            .add_filter("HolyC", &["HC", "hc"])
-            .pick_file()
+        #[cfg(all(target_os = "android", feature = "android-backend"))]
         {
-            shared.borrow_mut().launch_direct(&path);
+            shared.borrow_mut().status = "Pick a HolyC file…".into();
+            crate::android_picker::begin(crate::android_picker::PickerKind::HolyCFile);
+            sync_from_weaks(&weak, &game_weak, &shared);
+            return;
         }
-        sync_from_weaks(&weak, &game_weak, &shared);
+        #[cfg(not(all(target_os = "android", feature = "android-backend")))]
+        {
+            if let Some(path) = pick_file("HolyC", &["HC", "hc"]) {
+                shared.borrow_mut().launch_direct(&path);
+            }
+            sync_from_weaks(&weak, &game_weak, &shared);
+        }
     });
 
     simple_main_callback!(
@@ -629,7 +814,7 @@ fn install_main_callbacks(ui: &MainWindow, game: &GameWindow, state: &Rc<RefCell
         }
     );
     let weak = ui.as_weak();
-    let game_weak = game.as_weak();
+    let game_weak = game.map(GameWindow::as_weak);
     let shared = state.clone();
     ui.on_choose_entrypoint(move || {
         let selection = {
@@ -650,7 +835,17 @@ fn install_main_callbacks(ui: &MainWindow, game: &GameWindow, state: &Rc<RefCell
     });
 
     simple_main_callback!(ui, state, on_choose_cover, |state: &mut AppState| {
-        if let Some(id) = state.selected {
+        let Some(id) = state.selected else {
+            return;
+        };
+        #[cfg(all(target_os = "android", feature = "android-backend"))]
+        {
+            let _ = id;
+            state.status = "Pick a cover image…".into();
+            crate::android_picker::begin(crate::android_picker::PickerKind::CoverImage);
+        }
+        #[cfg(not(all(target_os = "android", feature = "android-backend")))]
+        {
             state.import_cover(id);
         }
     });
@@ -708,20 +903,23 @@ fn install_main_callbacks(ui: &MainWindow, game: &GameWindow, state: &Rc<RefCell
     }
 
     let weak = ui.as_weak();
-    let game_weak = game.as_weak();
+    let game_weak = game.map(GameWindow::as_weak);
     let shared = state.clone();
     ui.on_choose_templeos(move || {
-        if let Some(root) = rfd::FileDialog::new().pick_folder() {
-            let mut state = shared.borrow_mut();
-            if root.join("Kernel/KernelA.HH").is_file() {
-                state.config.templeos_root = Some(root);
-                state.status = "TempleOS folder selected".into();
-                state.persist();
-            } else {
-                state.status = "That folder is not a TempleOS root".into();
-            }
+        #[cfg(all(target_os = "android", feature = "android-backend"))]
+        {
+            shared.borrow_mut().status = "Pick a TempleOS folder…".into();
+            crate::android_picker::begin(crate::android_picker::PickerKind::TempleOsFolder);
+            sync_from_weaks(&weak, &game_weak, &shared);
+            return;
         }
-        sync_from_weaks(&weak, &game_weak, &shared);
+        #[cfg(not(all(target_os = "android", feature = "android-backend")))]
+        {
+            if let Some(root) = pick_folder() {
+                apply_templeos_folder(&mut shared.borrow_mut(), &root);
+            }
+            sync_from_weaks(&weak, &game_weak, &shared);
+        }
     });
 
     simple_main_callback!(
@@ -742,6 +940,9 @@ fn install_main_callbacks(ui: &MainWindow, game: &GameWindow, state: &Rc<RefCell
         let weak = ui.as_weak();
         let shared = state.clone();
         ui.on_request_storage_change(move || {
+            if !desktop_chrome() {
+                return;
+            }
             let mut state = shared.borrow_mut();
             state.pending_storage = Some(if state.paths.portable {
                 StorageMode::PerUser
@@ -816,29 +1017,38 @@ fn install_main_callbacks(ui: &MainWindow, game: &GameWindow, state: &Rc<RefCell
     });
 
     let ui_weak = ui.as_weak();
-    let game_weak = game.as_weak();
+    let game_weak = game.map(GameWindow::as_weak);
     let shared = state.clone();
     ui.on_toggle_fullscreen(move || {
+        if !desktop_chrome() {
+            return;
+        }
         let fullscreen = {
             let mut state = shared.borrow_mut();
             state.fullscreen = !state.fullscreen;
             state.fullscreen
         };
-        if let (Some(ui), Some(game)) = (ui_weak.upgrade(), game_weak.upgrade()) {
+        if let Some(ui) = ui_weak.upgrade() {
+            let game = upgrade_game(&game_weak);
             if shared.borrow().detached {
-                game.window().set_fullscreen(fullscreen);
+                if let Some(game) = &game {
+                    game.window().set_fullscreen(fullscreen);
+                }
             } else {
                 ui.window().set_fullscreen(fullscreen);
             }
-            sync_runtime(&ui, &game, &shared);
+            sync_runtime(&ui, game.as_ref(), &shared);
         }
     });
 
     let ui_weak = ui.as_weak();
-    let game_weak = game.as_weak();
+    let game_weak = game.map(GameWindow::as_weak);
     let shared = state.clone();
     ui.on_toggle_detached(move || {
-        if let (Some(ui), Some(game)) = (ui_weak.upgrade(), game_weak.upgrade()) {
+        if !desktop_chrome() {
+            return;
+        }
+        if let (Some(ui), Some(game)) = (ui_weak.upgrade(), upgrade_game(&game_weak)) {
             toggle_detached(&ui, &game, &shared);
         }
     });
@@ -846,6 +1056,198 @@ fn install_main_callbacks(ui: &MainWindow, game: &GameWindow, state: &Rc<RefCell
     simple_main_callback!(ui, state, on_toggle_log, |state: &mut AppState| {
         state.log_open = !state.log_open;
     });
+    simple_main_callback!(ui, state, on_toggle_overlay, |state: &mut AppState| {
+        state.config.input.overlay_enabled = !state.config.input.overlay_enabled;
+        state.persist();
+    });
+    {
+        let shared = state.clone();
+        ui.on_overlay_pressed(move |id, nx, ny| {
+            let mut state = shared.borrow_mut();
+            if state.controls_editor {
+                return;
+            }
+            let preset = state.config.input.active().clone();
+            let width = i64::from(state.frame_width.max(1));
+            let height = i64::from(state.frame_height.max(1));
+            let events = state
+                .input
+                .overlay_press(&preset, id.as_str(), nx, ny, width, height);
+            state.apply_input(events);
+        });
+        let shared = state.clone();
+        ui.on_overlay_moved(move |id, nx, ny| {
+            let mut state = shared.borrow_mut();
+            if state.controls_editor {
+                return;
+            }
+            let preset = state.config.input.active().clone();
+            let width = i64::from(state.frame_width.max(1));
+            let height = i64::from(state.frame_height.max(1));
+            let events = state
+                .input
+                .overlay_move(&preset, id.as_str(), nx, ny, width, height);
+            state.apply_input(events);
+        });
+        let shared = state.clone();
+        ui.on_overlay_released(move |id| {
+            let mut state = shared.borrow_mut();
+            let events = state.input.overlay_release(id.as_str());
+            state.apply_input(events);
+        });
+        let weak = ui.as_weak();
+        let shared = state.clone();
+        ui.on_overlay_dragged(move |id, x, y| {
+            let mut state = shared.borrow_mut();
+            let landscape = weak
+                .upgrade()
+                .map(|ui| ui.get_landscape())
+                .unwrap_or(false);
+            let size = state
+                .config
+                .input
+                .active()
+                .overlay
+                .iter()
+                .find(|item| item.id == id.as_str())
+                .map(|item| {
+                    if landscape {
+                        (item.landscape.w, item.landscape.h)
+                    } else {
+                        (item.portrait.w, item.portrait.h)
+                    }
+                })
+                .unwrap_or((0.18, 0.18));
+            InputRuntime::move_overlay(
+                state.config.input.active_mut(),
+                id.as_str(),
+                landscape,
+                ControlRect::new(x, y, size.0, size.1),
+            );
+            state.persist();
+            drop(state);
+            if let Some(ui) = weak.upgrade() {
+                sync_controls(&ui, &shared);
+            }
+        });
+        let weak = ui.as_weak();
+        let shared = state.clone();
+        ui.on_select_overlay(move |id| {
+            shared.borrow_mut().overlay_selected = id.to_string();
+            if let Some(ui) = weak.upgrade() {
+                sync_controls(&ui, &shared);
+            }
+        });
+        let weak = ui.as_weak();
+        let shared = state.clone();
+        ui.on_open_controls_editor(move || {
+            shared.borrow_mut().controls_editor = true;
+            if let Some(ui) = weak.upgrade() {
+                ui.set_settings_open(false);
+                sync_controls(&ui, &shared);
+            }
+        });
+        let weak = ui.as_weak();
+        let shared = state.clone();
+        ui.on_close_controls_editor(move || {
+            shared.borrow_mut().controls_editor = false;
+            if let Some(ui) = weak.upgrade() {
+                sync_controls(&ui, &shared);
+            }
+        });
+        let weak = ui.as_weak();
+        let shared = state.clone();
+        ui.on_select_preset(move |name| {
+            shared.borrow_mut().config.input.select(name.as_str());
+            shared.borrow_mut().persist();
+            if let Some(ui) = weak.upgrade() {
+                sync_controls(&ui, &shared);
+            }
+        });
+        let weak = ui.as_weak();
+        ui.on_preset_name_changed(move |name| {
+            if let Some(ui) = weak.upgrade() {
+                ui.set_preset_name_edit(name);
+            }
+        });
+        let weak = ui.as_weak();
+        let shared = state.clone();
+        ui.on_save_preset(move || {
+            if let Some(ui) = weak.upgrade() {
+                let name = ui.get_preset_name_edit().to_string();
+                if !name.trim().is_empty() {
+                    shared.borrow_mut().config.input.save_as(name);
+                    shared.borrow_mut().persist();
+                    sync_controls(&ui, &shared);
+                }
+            }
+        });
+        let weak = ui.as_weak();
+        let shared = state.clone();
+        ui.on_new_preset(move || {
+            if let Some(ui) = weak.upgrade() {
+                let mut name = ui.get_preset_name_edit().to_string();
+                if name.trim().is_empty() {
+                    name = format!("Preset {}", shared.borrow().config.input.presets.len() + 1);
+                }
+                shared.borrow_mut().config.input.save_as(name);
+                shared.borrow_mut().persist();
+                sync_controls(&ui, &shared);
+            }
+        });
+        let weak = ui.as_weak();
+        let shared = state.clone();
+        ui.on_delete_preset(move || {
+            shared.borrow_mut().config.input.delete_active();
+            shared.borrow_mut().persist();
+            if let Some(ui) = weak.upgrade() {
+                sync_controls(&ui, &shared);
+            }
+        });
+        let weak = ui.as_weak();
+        let shared = state.clone();
+        ui.on_reset_preset(move || {
+            shared.borrow_mut().config.input.reset_active();
+            shared.borrow_mut().persist();
+            if let Some(ui) = weak.upgrade() {
+                sync_controls(&ui, &shared);
+            }
+        });
+        let weak = ui.as_weak();
+        let shared = state.clone();
+        ui.on_open_bind(move |target| {
+            shared.borrow_mut().bind_target = Some(target.to_string());
+            shared.borrow_mut().bind_open = true;
+            if let Some(ui) = weak.upgrade() {
+                sync_controls(&ui, &shared);
+            }
+        });
+        let weak = ui.as_weak();
+        let shared = state.clone();
+        ui.on_close_bind(move || {
+            shared.borrow_mut().bind_open = false;
+            shared.borrow_mut().bind_target = None;
+            if let Some(ui) = weak.upgrade() {
+                sync_controls(&ui, &shared);
+            }
+        });
+        let weak = ui.as_weak();
+        let shared = state.clone();
+        ui.on_choose_bind(move |choice| {
+            {
+                let mut state = shared.borrow_mut();
+                if let Some(target) = state.bind_target.clone() {
+                    bind_choice(&mut state, &target, choice.as_str());
+                    state.bind_open = false;
+                    state.bind_target = None;
+                    state.persist();
+                }
+            }
+            if let Some(ui) = weak.upgrade() {
+                sync_controls(&ui, &shared);
+            }
+        });
+    }
     simple_main_callback!(
         ui,
         state,
@@ -881,21 +1283,21 @@ fn install_game_callbacks(ui: &MainWindow, game: &GameWindow, state: &Rc<RefCell
     });
 
     let ui_weak = ui.as_weak();
-    let game_weak = game.as_weak();
+    let game_weak = Some(game.as_weak());
     let shared = state.clone();
     game.on_stop_runner(move || {
         shared.borrow_mut().stop();
         sync_from_weaks(&ui_weak, &game_weak, &shared);
     });
     let ui_weak = ui.as_weak();
-    let game_weak = game.as_weak();
+    let game_weak = Some(game.as_weak());
     let shared = state.clone();
     game.on_restart_runner(move || {
         shared.borrow_mut().restart();
         sync_from_weaks(&ui_weak, &game_weak, &shared);
     });
     let ui_weak = ui.as_weak();
-    let game_weak = game.as_weak();
+    let game_weak = Some(game.as_weak());
     let shared = state.clone();
     game.on_toggle_mute(move || {
         let mut state = shared.borrow_mut();
@@ -908,7 +1310,7 @@ fn install_game_callbacks(ui: &MainWindow, game: &GameWindow, state: &Rc<RefCell
         sync_from_weaks(&ui_weak, &game_weak, &shared);
     });
     let ui_weak = ui.as_weak();
-    let game_weak = game.as_weak();
+    let game_weak = Some(game.as_weak());
     let shared = state.clone();
     game.on_toggle_fullscreen(move || {
         let fullscreen = {
@@ -916,7 +1318,7 @@ fn install_game_callbacks(ui: &MainWindow, game: &GameWindow, state: &Rc<RefCell
             state.fullscreen = !state.fullscreen;
             state.fullscreen
         };
-        if let Some(game) = game_weak.upgrade() {
+        if let Some(game) = upgrade_game(&game_weak) {
             game.window().set_fullscreen(fullscreen);
         }
         sync_from_weaks(&ui_weak, &game_weak, &shared);
@@ -935,18 +1337,138 @@ fn install_game_callbacks(ui: &MainWindow, game: &GameWindow, state: &Rc<RefCell
 
 fn sync_from_weaks(
     ui: &slint::Weak<MainWindow>,
-    game: &slint::Weak<GameWindow>,
+    game: &Option<slint::Weak<GameWindow>>,
     state: &Rc<RefCell<AppState>>,
 ) {
-    if let (Some(ui), Some(game)) = (ui.upgrade(), game.upgrade()) {
-        sync_all(&ui, &game, state);
+    if let Some(ui) = ui.upgrade() {
+        let game = upgrade_game(game);
+        sync_all(&ui, game.as_ref(), state);
     }
 }
 
-fn sync_all(ui: &MainWindow, game: &GameWindow, state: &Rc<RefCell<AppState>>) {
+fn sync_all(ui: &MainWindow, game: Option<&GameWindow>, state: &Rc<RefCell<AppState>>) {
     sync_library(ui, state);
     sync_runtime(ui, game, state);
     sync_main_only(ui, state);
+    sync_controls(ui, state);
+}
+
+fn bind_choice(state: &mut AppState, target: &str, choice: &str) {
+    let action = match choice {
+        "mouse-left" => Action::MouseLeft,
+        "mouse-right" => Action::MouseRight,
+        "mouse-move" => Action::MouseMove,
+        "arrows" => Action::Dpad {
+            up: "up".into(),
+            down: "down".into(),
+            left: "left".into(),
+            right: "right".into(),
+        },
+        "wasd" => Action::Dpad {
+            up: "w".into(),
+            down: "s".into(),
+            left: "a".into(),
+            right: "d".into(),
+        },
+        name => Action::Key {
+            name: name.to_string(),
+        },
+    };
+    if let Some(id) = target.strip_prefix("overlay:") {
+        InputRuntime::bind_overlay_action(state.config.input.active_mut(), id, action);
+    } else if let Some(id) = target.strip_prefix("gamepad:")
+        && let Some(source) = GamepadSource::parse(id)
+    {
+        InputRuntime::bind_gamepad(state.config.input.active_mut(), source, action);
+    }
+}
+
+fn sync_controls(ui: &MainWindow, state: &Rc<RefCell<AppState>>) {
+    let state = state.borrow();
+    let landscape = ui.get_landscape();
+    let preset = state.config.input.active();
+    let items: Vec<OverlayItem> = preset
+        .overlay
+        .iter()
+        .map(|item| {
+            let rect = if landscape {
+                item.landscape
+            } else {
+                item.portrait
+            };
+            OverlayItem {
+                id: item.id.clone().into(),
+                kind: item.kind.as_str().into(),
+                label: item.label.clone().into(),
+                x: rect.x,
+                y: rect.y,
+                w: rect.w,
+                h: rect.h,
+            }
+        })
+        .collect();
+    ui.set_overlay_items(ModelRc::new(VecModel::from(items)));
+    ui.set_overlay_enabled(state.config.input.overlay_enabled);
+    ui.set_overlay_selected(state.overlay_selected.clone().into());
+    ui.set_active_preset(preset.name.clone().into());
+    ui.set_preset_name_edit(preset.name.clone().into());
+    ui.set_controls_editor_open(state.controls_editor);
+    ui.set_bind_open(state.bind_open);
+    let presets: Vec<BindChoice> = state
+        .config
+        .input
+        .presets
+        .iter()
+        .map(|item| BindChoice {
+            id: item.name.clone().into(),
+            label: item.name.clone().into(),
+        })
+        .collect();
+    ui.set_preset_choices(ModelRc::new(VecModel::from(presets)));
+    let pads: Vec<BindChoice> = preset
+        .gamepad
+        .iter()
+        .map(|item| BindChoice {
+            id: format!("gamepad:{}", item.source.id()).into(),
+            label: format!("{} → {}", item.source.label(), crate::controls::action_label(&item.action)).into(),
+        })
+        .collect();
+    ui.set_gamepad_choices(ModelRc::new(VecModel::from(pads)));
+    let mut bind_choices = vec![
+        BindChoice {
+            id: "arrows".into(),
+            label: "D-pad arrows".into(),
+        },
+        BindChoice {
+            id: "wasd".into(),
+            label: "WASD".into(),
+        },
+        BindChoice {
+            id: "mouse-move".into(),
+            label: "Mouse move".into(),
+        },
+        BindChoice {
+            id: "mouse-left".into(),
+            label: "Mouse left".into(),
+        },
+        BindChoice {
+            id: "mouse-right".into(),
+            label: "Mouse right".into(),
+        },
+    ];
+    bind_choices.extend(crate::controls::named_keys().into_iter().map(|key| BindChoice {
+        id: key.name.into(),
+        label: format!("Key {}", key.label).into(),
+    }));
+    ui.set_bind_choices(ModelRc::new(VecModel::from(bind_choices)));
+    ui.set_bind_title(
+        state
+            .bind_target
+            .as_deref()
+            .unwrap_or("Bind")
+            .into(),
+    );
+    ui.set_capture_hint("Choose a TempleOS action. Gamepad buttons follow this preset instantly.".into());
 }
 
 fn sync_main_only(ui: &MainWindow, state: &Rc<RefCell<AppState>>) {
@@ -963,7 +1485,9 @@ fn sync_main_only(ui: &MainWindow, state: &Rc<RefCell<AppState>>) {
     ui.set_fit_scaling(state.config.scale_mode == ScaleMode::Fit);
     ui.set_data_path(state.paths.root.display().to_string().into());
     ui.set_storage_label(
-        if state.paths.portable {
+        if !desktop_chrome() {
+            "App storage"
+        } else if state.paths.portable {
             "Portable"
         } else {
             "Per-user"
@@ -979,7 +1503,8 @@ fn sync_main_only(ui: &MainWindow, state: &Rc<RefCell<AppState>>) {
         .into(),
     );
     ui.set_portable_available(
-        state.paths.portable || directory_is_writable(&state.paths.executable_dir),
+        desktop_chrome()
+            && (state.paths.portable || directory_is_writable(&state.paths.executable_dir)),
     );
     ui.set_templeos_path(
         state
@@ -1028,36 +1553,40 @@ fn sync_main_only(ui: &MainWindow, state: &Rc<RefCell<AppState>>) {
     ui.set_entry_choices(ModelRc::new(VecModel::from(choices)));
 }
 
-fn sync_runtime(ui: &MainWindow, game: &GameWindow, state: &Rc<RefCell<AppState>>) {
+fn sync_runtime(ui: &MainWindow, game: Option<&GameWindow>, state: &Rc<RefCell<AppState>>) {
     let state = state.borrow();
     let running = state.runner.is_some();
     ui.set_running(running);
     ui.set_status(state.status.clone().into());
-    ui.set_detached(state.detached);
+    ui.set_detached(desktop_chrome() && state.detached);
     ui.set_muted(state.config.muted);
-    ui.set_fullscreen(state.fullscreen);
+    ui.set_fullscreen(desktop_chrome() && state.fullscreen);
     ui.set_log_open(state.log_open);
     ui.set_program_log(state.log.clone().into());
     ui.set_frame_ready(state.frame.is_some());
     ui.set_frame_width(state.frame_width as i32);
     ui.set_frame_height(state.frame_height as i32);
-    game.set_frame_ready(state.frame.is_some());
-    game.set_fit_scaling(state.config.scale_mode == ScaleMode::Fit);
-    game.set_frame_width(state.frame_width as i32);
-    game.set_frame_height(state.frame_height as i32);
-    game.set_status(state.status.clone().into());
-    game.set_muted(state.config.muted);
-    game.set_fullscreen(state.fullscreen);
-    if let Some(frame) = &state.frame {
+    if let Some(game) = game {
+        game.set_frame_ready(state.frame.is_some());
+        game.set_fit_scaling(state.config.scale_mode == ScaleMode::Fit);
+        game.set_frame_width(state.frame_width as i32);
+        game.set_frame_height(state.frame_height as i32);
+        game.set_status(state.status.clone().into());
+        game.set_muted(state.config.muted);
+        game.set_fullscreen(state.fullscreen);
+        if let Some(frame) = &state.frame {
+            ui.set_game_frame(frame.clone());
+            game.set_game_frame(frame.clone());
+        }
+        if !running {
+            let _ = game.hide();
+        }
+    } else if let Some(frame) = &state.frame {
         ui.set_game_frame(frame.clone());
-        game.set_game_frame(frame.clone());
     }
     ui.set_menu_items(ModelRc::new(VecModel::from(parse_menu(
         state.menu.as_deref().unwrap_or(""),
     ))));
-    if !running {
-        let _ = game.hide();
-    }
 }
 
 fn sync_library(ui: &MainWindow, state: &Rc<RefCell<AppState>>) {
@@ -1414,6 +1943,11 @@ mod tests {
         assert!(mapped.contains(&(b'\\' as i64, 0x2b)));
         assert!(mapped.contains(&(b'~' as i64, 0x29 | SCF_SHIFT)));
         assert!(mapped.contains(&(b'H' as i64, 0x23 | SCF_SHIFT)));
+    }
+
+    #[test]
+    fn desktop_chrome_follows_the_host_os() {
+        assert_eq!(desktop_chrome(), !cfg!(target_os = "android"));
     }
 
     #[test]
