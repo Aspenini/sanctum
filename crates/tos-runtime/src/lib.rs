@@ -1,6 +1,7 @@
 //! Kernel-ish primitives HolyC programs call (`Print`, heaps, …).
 
 mod bit;
+mod env;
 mod except;
 mod heap;
 mod math;
@@ -41,6 +42,7 @@ pub fn capture_begin() {
 pub fn set_background_tasks_enabled(enabled: bool) {
     shell::reset();
     except::reset();
+    env::reset();
     BACKGROUND_TASKS_CANCELLED.store(false, Ordering::Release);
     BACKGROUND_TASKS_STARTED.store(0, Ordering::Release);
     BACKGROUND_TASKS_QUIESCED.store(0, Ordering::Release);
@@ -132,6 +134,9 @@ pub fn jit_symbols() -> Vec<(&'static str, *const u8)> {
         ("tos_ExceptCh", except::tos_ExceptCh as *const u8),
         ("tos_PowI64", tos_PowI64 as *const u8),
         ("tos_PowF64", tos_PowF64 as *const u8),
+        ("tos_EnvPush", env::tos_EnvPush as *const u8),
+        ("tos_EnvPop", env::tos_EnvPop as *const u8),
+        ("tos_EnvPeek", env::tos_EnvPeek as *const u8),
         ("tos_Mat4x4IdentEqu", tos_Mat4x4IdentEqu as *const u8),
         ("tos_Mat4x4IdentNew", tos_Mat4x4IdentNew as *const u8),
         ("tos_Mat4x4RotX", tos_Mat4x4RotX as *const u8),

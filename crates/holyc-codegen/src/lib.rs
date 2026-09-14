@@ -13,7 +13,7 @@ use cranelift_module::{
     DataDescription, DataId, FuncId, Linkage, Module as _, default_libcall_names,
 };
 use holyc_ast::*;
-use holyc_sema::{FunctionInfo, Sema, resolve_ty};
+use holyc_sema::{ClassInfo, FunctionInfo, Sema, resolve_ty};
 use std::collections::{HashMap, HashSet};
 use std::mem;
 use thiserror::Error;
@@ -243,11 +243,27 @@ pub fn compile_jit(
         bins.insert((*file, *idx), id);
     }
 
-    // Define user functions.
+    let mut fn_defs = Vec::new();
     for item in &ast.items {
-        let Item::Fn(f) = item else { continue };
+        if let Item::Fn(function) = item {
+            collect_fn_defs(function, None, &mut fn_defs);
+        }
+    }
+    let mut env_layouts = HashMap::new();
+    for (link, function) in &fn_defs {
+        if let Some(layout) = env_layout_for(link, function, sema) {
+            env_layouts.insert(link.clone(), layout);
+        }
+    }
+
+    // Define user functions, including nested ones.
+    for (link, f) in &fn_defs {
         let Some(body) = &f.body else { continue };
-        let info = sema.functions.get(&f.name).unwrap();
+        let info = sema
+            .functions
+            .get(link)
+            .or_else(|| sema.functions.get(&f.name))
+            .unwrap();
         ctx.func.signature = make_sig(&mut module, info, ptr_ty);
         {
             let mut bcx = FunctionBuilder::new(&mut ctx.func, &mut func_ctx);
@@ -275,12 +291,19 @@ pub fn compile_jit(
                     break_targets: Vec::new(),
                     catch_targets: Vec::new(),
                     labels: HashMap::new(),
+                    current_link: link.clone(),
+                    env_slot: None,
+                    env_offsets: HashMap::new(),
+                    env_pushed: false,
+                    env_layouts: &env_layouts,
                     sema,
                 };
+                cg.begin_env()?;
                 for (i, (pname, ty)) in info.params.iter().enumerate() {
                     let val = cg.bcx.block_params(entry)[i];
                     cg.define_local(pname.clone(), ty.clone(), val)?;
                 }
+                cg.import_captures()?;
                 cg.prepare_labels(body)?;
                 for stmt in body {
                     cg.stmt(stmt)?;
@@ -290,7 +313,11 @@ pub fn compile_jit(
             }
             bcx.finalize(module.target_config());
         }
-        let id = func_ids[&f.name];
+        let id = func_ids
+            .get(link)
+            .or_else(|| func_ids.get(&f.name))
+            .copied()
+            .ok_or_else(|| CodegenError::Msg(format!("missing function id for `{link}`")))?;
         module
             .define_function(id, &mut ctx)
             .map_err(|e| CodegenError::Cranelift(format!("{e:?}")))?;
@@ -321,6 +348,11 @@ pub fn compile_jit(
                 break_targets: Vec::new(),
                 catch_targets: Vec::new(),
                 labels: HashMap::new(),
+                current_link: String::new(),
+                env_slot: None,
+                env_offsets: HashMap::new(),
+                env_pushed: false,
+                env_layouts: &env_layouts,
                 sema,
             };
             cg.prepare_module_labels(&ast.items)?;
@@ -366,6 +398,7 @@ fn declare_runtime_helpers(
     module: &mut JITModule,
     func_ids: &mut HashMap<String, FuncId>,
 ) -> Result<(), CodegenError> {
+    let ptr_ty = module.target_config().pointer_type();
     let mut declare =
         |name: &str, params: &[Type], ret: Option<Type>| -> Result<(), CodegenError> {
             let mut sig = module.make_signature();
@@ -384,6 +417,9 @@ fn declare_runtime_helpers(
     declare("tos_ClearExcept", &[], None)?;
     declare("tos_PowI64", &[types::I64, types::I64], Some(types::I64))?;
     declare("tos_PowF64", &[types::F64, types::F64], Some(types::F64))?;
+    declare("tos_EnvPush", &[ptr_ty], None)?;
+    declare("tos_EnvPop", &[], None)?;
+    declare("tos_EnvPeek", &[], Some(ptr_ty))?;
     Ok(())
 }
 
@@ -471,6 +507,11 @@ struct FnCg<'a, 'b> {
     break_targets: Vec<Block>,
     catch_targets: Vec<Block>,
     labels: HashMap<String, Block>,
+    current_link: String,
+    env_slot: Option<StackSlot>,
+    env_offsets: HashMap<String, i32>,
+    env_pushed: bool,
+    env_layouts: &'a HashMap<String, EnvLayout>,
     sema: &'a Sema,
 }
 
@@ -485,6 +526,145 @@ struct GlobalInfo {
 enum LocalStorage {
     Value(Variable),
     Stack(StackSlot),
+    Env(i32),
+    Captured { depth: u32, offset: i32 },
+}
+
+struct EnvLayout {
+    slots: HashMap<String, (i32, Ty)>,
+    size: u32,
+}
+
+fn collect_fn_defs<'a>(
+    function: &'a FnDecl,
+    parent: Option<&str>,
+    out: &mut Vec<(String, &'a FnDecl)>,
+) {
+    let link = match parent {
+        Some(parent) => Sema::nested_link_name(parent, &function.name),
+        None => function.name.clone(),
+    };
+    out.push((link.clone(), function));
+    if let Some(body) = &function.body {
+        for stmt in body {
+            walk_nested_fns(stmt, &link, out);
+        }
+    }
+}
+
+fn walk_nested_fns<'a>(stmt: &'a Stmt, parent: &str, out: &mut Vec<(String, &'a FnDecl)>) {
+    match stmt {
+        Stmt::Fn(function) => collect_fn_defs(function, Some(parent), out),
+        Stmt::Block { stmts, .. } | Stmt::Start { body: stmts, .. } => {
+            for stmt in stmts {
+                walk_nested_fns(stmt, parent, out);
+            }
+        }
+        Stmt::If { then, else_, .. } => {
+            walk_nested_fns(then, parent, out);
+            if let Some(else_) = else_ {
+                walk_nested_fns(else_, parent, out);
+            }
+        }
+        Stmt::While { body, .. }
+        | Stmt::DoWhile { body, .. }
+        | Stmt::For { body, .. }
+        | Stmt::Switch { body, .. } => walk_nested_fns(body, parent, out),
+        Stmt::Try { body, catch, .. } => {
+            walk_nested_fns(body, parent, out);
+            walk_nested_fns(catch, parent, out);
+        }
+        _ => {}
+    }
+}
+
+fn stmt_has_nested_fn(stmt: &Stmt) -> bool {
+    match stmt {
+        Stmt::Fn(_) => true,
+        Stmt::Block { stmts, .. } | Stmt::Start { body: stmts, .. } => {
+            stmts.iter().any(stmt_has_nested_fn)
+        }
+        Stmt::If { then, else_, .. } => {
+            stmt_has_nested_fn(then) || else_.as_deref().is_some_and(stmt_has_nested_fn)
+        }
+        Stmt::While { body, .. }
+        | Stmt::DoWhile { body, .. }
+        | Stmt::For { body, .. }
+        | Stmt::Switch { body, .. } => stmt_has_nested_fn(body),
+        Stmt::Try { body, catch, .. } => stmt_has_nested_fn(body) || stmt_has_nested_fn(catch),
+        _ => false,
+    }
+}
+
+fn collect_env_decls(
+    stmt: &Stmt,
+    classes: &HashMap<String, ClassInfo>,
+    slots: &mut HashMap<String, (i32, Ty)>,
+    offset: &mut i32,
+) {
+    match stmt {
+        Stmt::Decl(variable) => {
+            if slots.contains_key(&variable.name) {
+                return;
+            }
+            let ty = resolve_ty(&variable.ty, classes);
+            let size = ty.size().max(8);
+            *offset = (*offset + 7) & !7;
+            slots.insert(variable.name.clone(), (*offset, ty));
+            *offset += size as i32;
+        }
+        Stmt::Fn(_) => {}
+        Stmt::Block { stmts, .. } | Stmt::Start { body: stmts, .. } => {
+            for stmt in stmts {
+                collect_env_decls(stmt, classes, slots, offset);
+            }
+        }
+        Stmt::If { then, else_, .. } => {
+            collect_env_decls(then, classes, slots, offset);
+            if let Some(else_) = else_ {
+                collect_env_decls(else_, classes, slots, offset);
+            }
+        }
+        Stmt::While { body, .. } | Stmt::DoWhile { body, .. } | Stmt::Switch { body, .. } => {
+            collect_env_decls(body, classes, slots, offset);
+        }
+        Stmt::For { init, body, .. } => {
+            if let Some(init) = init {
+                collect_env_decls(init, classes, slots, offset);
+            }
+            collect_env_decls(body, classes, slots, offset);
+        }
+        Stmt::Try { body, catch, .. } => {
+            collect_env_decls(body, classes, slots, offset);
+            collect_env_decls(catch, classes, slots, offset);
+        }
+        _ => {}
+    }
+}
+
+fn env_layout_for(link: &str, function: &FnDecl, sema: &Sema) -> Option<EnvLayout> {
+    let body = function.body.as_ref()?;
+    if !body.iter().any(stmt_has_nested_fn) {
+        return None;
+    }
+    let mut offset = 8_i32;
+    let mut slots = HashMap::new();
+    if let Some(info) = sema.functions.get(link) {
+        for (name, ty) in &info.params {
+            let size = ty.size().max(8);
+            offset = (offset + 7) & !7;
+            slots.insert(name.clone(), (offset, ty.clone()));
+            offset += size as i32;
+        }
+    }
+    for stmt in body {
+        collect_env_decls(stmt, &sema.classes, &mut slots, &mut offset);
+    }
+    offset = (offset + 7) & !7;
+    Some(EnvLayout {
+        slots,
+        size: offset.max(8) as u32,
+    })
 }
 
 #[derive(Clone, Copy)]
@@ -549,6 +729,7 @@ fn gather_labels(stmt: &Stmt, names: &mut Vec<String>) {
             gather_labels(body, names);
             gather_labels(catch, names);
         }
+        Stmt::Fn(_) => {}
         _ => {}
     }
 }
@@ -595,6 +776,7 @@ impl FnCg<'_, '_> {
     }
 
     fn emit_unwind_return(&mut self) {
+        let _ = self.pop_env();
         match self.ret_ty {
             None => {
                 self.bcx.ins().return_(&[]);
@@ -647,7 +829,113 @@ impl FnCg<'_, '_> {
         }
     }
 
+    fn lookup_fn(&self, name: &str) -> Option<&FunctionInfo> {
+        self.sema.lookup_function_from(name, &self.current_link)
+    }
+
+    fn func_id(&self, name: &str) -> Result<FuncId, CodegenError> {
+        let info = self
+            .lookup_fn(name)
+            .ok_or_else(|| CodegenError::Msg(format!("unknown function `{name}`")))?;
+        self.func_ids
+            .get(&info.link_name)
+            .or_else(|| self.func_ids.get(&info.name))
+            .copied()
+            .ok_or_else(|| CodegenError::Msg(format!("missing function id for `{name}`")))
+    }
+
+    fn begin_env(&mut self) -> Result<(), CodegenError> {
+        let Some((size, offsets)) = self.env_layouts.get(&self.current_link).map(|layout| {
+            (
+                layout.size,
+                layout
+                    .slots
+                    .iter()
+                    .map(|(name, (offset, _))| (name.clone(), *offset))
+                    .collect::<HashMap<_, _>>(),
+            )
+        }) else {
+            return Ok(());
+        };
+        let slot = self.bcx.create_sized_stack_slot(StackSlotData::new(
+            StackSlotKind::ExplicitSlot,
+            size,
+            3,
+        ));
+        let ptr = self.bcx.ins().stack_addr(self.ptr_ty, slot, 0);
+        self.memset(ptr, 0, i64::from(size))?;
+        self.env_offsets = offsets;
+        self.env_slot = Some(slot);
+        self.env_pushed = true;
+        let _ = self.call_import("tos_EnvPush", &[ptr])?;
+        Ok(())
+    }
+
+    fn import_captures(&mut self) -> Result<(), CodegenError> {
+        let mut depth = u32::from(self.env_pushed);
+        let mut parent = self
+            .sema
+            .functions
+            .get(&self.current_link)
+            .and_then(|info| info.parent_link.clone());
+        while let Some(link) = parent {
+            let captured = self.env_layouts.get(&link).map(|layout| {
+                layout
+                    .slots
+                    .iter()
+                    .map(|(name, (offset, ty))| (name.clone(), *offset, ty.clone()))
+                    .collect::<Vec<_>>()
+            });
+            if let Some(captured) = captured {
+                for (name, offset, ty) in captured {
+                    self.vars
+                        .entry(name)
+                        .or_insert((LocalStorage::Captured { depth, offset }, ty));
+                }
+            }
+            parent = self
+                .sema
+                .functions
+                .get(&link)
+                .and_then(|info| info.parent_link.clone());
+            depth += 1;
+        }
+        Ok(())
+    }
+
+    fn own_env_ptr(&mut self) -> Result<Value, CodegenError> {
+        let slot = self
+            .env_slot
+            .ok_or_else(|| CodegenError::Msg("function environment is missing".into()))?;
+        Ok(self.bcx.ins().stack_addr(self.ptr_ty, slot, 0))
+    }
+
+    fn env_at(&mut self, depth: u32) -> Result<Value, CodegenError> {
+        let results = self.call_import("tos_EnvPeek", &[])?;
+        let mut ptr = results[0];
+        for _ in 0..depth {
+            ptr = self
+                .bcx
+                .ins()
+                .load(self.ptr_ty, MemFlagsData::trusted(), ptr, 0);
+        }
+        Ok(ptr)
+    }
+
+    fn pop_env(&mut self) -> Result<(), CodegenError> {
+        if self.env_pushed && !self.bcx.is_unreachable() {
+            let _ = self.call_import("tos_EnvPop", &[])?;
+        }
+        Ok(())
+    }
+
     fn define_local(&mut self, name: String, ty: Ty, val: Value) -> Result<(), CodegenError> {
+        if let Some(offset) = self.env_offsets.get(&name).copied() {
+            let env = self.own_env_ptr()?;
+            self.store_mem(env, offset, &ty, val)?;
+            self.vars.insert(name, (LocalStorage::Env(offset), ty));
+            return Ok(());
+        }
         let storage = if ty.is_aggregate() {
             let var = self.bcx.declare_var(self.ptr_ty);
             self.bcx.def_var(var, val);
@@ -669,7 +957,7 @@ impl FnCg<'_, '_> {
     fn expr_ty(&self, e: &Expr) -> Option<Ty> {
         match &e.kind {
             ExprKind::Call { callee, .. } => match &callee.kind {
-                ExprKind::Ident(n) => self.sema.functions.get(n).map(|f| f.ret.clone()),
+                ExprKind::Ident(n) => self.lookup_fn(n).map(|f| f.ret.clone()),
                 _ => None,
             },
             ExprKind::Ident(n) => self
@@ -677,7 +965,7 @@ impl FnCg<'_, '_> {
                 .get(n)
                 .map(|(_, t)| t.clone())
                 .or_else(|| self.globals.get(n).map(|global| global.ty.clone()))
-                .or_else(|| self.sema.functions.get(n).map(|f| f.ret.clone())),
+                .or_else(|| self.lookup_fn(n).map(|f| f.ret.clone())),
             ExprKind::Field { base, name, .. } => {
                 let bt = self.expr_ty(base)?;
                 if let Some(view) = scalar_lane_view(&bt, name) {
@@ -792,6 +1080,14 @@ impl FnCg<'_, '_> {
                         LocalStorage::Value(var) if ty.is_aggregate() => self.bcx.use_var(var),
                         LocalStorage::Stack(slot) => {
                             self.bcx.ins().stack_addr(self.ptr_ty, slot, 0)
+                        }
+                        LocalStorage::Env(offset) => {
+                            let env = self.own_env_ptr()?;
+                            self.place_addr(env, offset)
+                        }
+                        LocalStorage::Captured { depth, offset } => {
+                            let env = self.env_at(depth)?;
+                            self.place_addr(env, offset)
                         }
                         LocalStorage::Value(_) => {
                             return Err(CodegenError::Msg(format!(
@@ -980,6 +1276,7 @@ impl FnCg<'_, '_> {
         if self.bcx.is_unreachable() {
             return;
         }
+        let _ = self.pop_env();
         match self.ret_ty {
             None => {
                 self.bcx.ins().return_(&[]);
@@ -993,7 +1290,7 @@ impl FnCg<'_, '_> {
 
     fn stmt(&mut self, stmt: &Stmt) -> Result<(), CodegenError> {
         match stmt {
-            Stmt::Empty { .. } | Stmt::NoWarn { .. } => Ok(()),
+            Stmt::Empty { .. } | Stmt::NoWarn { .. } | Stmt::Fn(_) => Ok(()),
             Stmt::Label { name, .. } => {
                 let block = *self
                     .labels
@@ -1040,6 +1337,17 @@ impl FnCg<'_, '_> {
                     return Ok(());
                 }
                 if ty.is_aggregate() {
+                    if let Some(offset) = self.env_offsets.get(&v.name).copied() {
+                        let env = self.own_env_ptr()?;
+                        let ptr = self.place_addr(env, offset);
+                        self.memset(ptr, 0, ty.size())?;
+                        if let Some(init) = &v.init {
+                            self.initialize(ptr, &ty, init)?;
+                        }
+                        self.vars
+                            .insert(v.name.clone(), (LocalStorage::Env(offset), ty));
+                        return Ok(());
+                    }
                     let sz = ty.size().max(8) as u32;
                     let slot = self.bcx.create_sized_stack_slot(StackSlotData::new(
                         StackSlotKind::ExplicitSlot,
@@ -1353,17 +1661,21 @@ impl FnCg<'_, '_> {
                     (Some(e), Some(_)) => {
                         let v = self.expr(e)?;
                         let v = self.coerce_to(v, self.ret_ty.unwrap());
+                        self.pop_env()?;
                         self.bcx.ins().return_(&[v]);
                     }
                     (Some(e), None) => {
                         let _ = self.expr(e)?;
+                        self.pop_env()?;
                         self.bcx.ins().return_(&[]);
                     }
                     (None, Some(ty)) => {
                         let z = self.zero(ty);
+                        self.pop_env()?;
                         self.bcx.ins().return_(&[z]);
                     }
                     (None, None) => {
+                        self.pop_env()?;
                         self.bcx.ins().return_(&[]);
                     }
                 }
@@ -1482,9 +1794,8 @@ impl FnCg<'_, '_> {
                 if self.vars.contains_key(name) || self.globals.contains_key(name) {
                     let (ptr, ty, off) = self.place(expr)?;
                     self.read_place(ptr, &ty, off)
-                } else if self.sema.functions.contains_key(name) {
-                    // function address
-                    let id = self.func_ids[name];
+                } else if self.lookup_fn(name).is_some() {
+                    let id = self.func_id(name)?;
                     let f = self.module.declare_func_in_func(id, self.bcx.func);
                     Ok(self.bcx.ins().func_addr(self.ptr_ty, f))
                 } else {
@@ -1532,12 +1843,12 @@ impl FnCg<'_, '_> {
             }
             ExprKind::Call { callee, args } => self.call(callee, args),
             ExprKind::Addr(inner) => {
-                if let ExprKind::Ident(name) = &inner.kind {
-                    if self.sema.functions.contains_key(name) {
-                        let id = self.func_ids[name];
-                        let f = self.module.declare_func_in_func(id, self.bcx.func);
-                        return Ok(self.bcx.ins().func_addr(self.ptr_ty, f));
-                    }
+                if let ExprKind::Ident(name) = &inner.kind
+                    && self.lookup_fn(name).is_some()
+                {
+                    let id = self.func_id(name)?;
+                    let f = self.module.declare_func_in_func(id, self.bcx.func);
+                    return Ok(self.bcx.ins().func_addr(self.ptr_ty, f));
                 }
                 let (ptr, _, off) = self.place(inner)?;
                 Ok(self.place_addr(ptr, off))
@@ -1835,6 +2146,20 @@ impl FnCg<'_, '_> {
         ))
     }
 
+    fn callee_function<'c>(&'c self, callee: &'c Expr) -> Option<&'c FunctionInfo> {
+        let mut expr = callee;
+        if let ExprKind::Deref(inner) = &expr.kind {
+            expr = inner;
+        }
+        if let ExprKind::Addr(inner) = &expr.kind {
+            expr = inner;
+        }
+        match &expr.kind {
+            ExprKind::Ident(name) => self.lookup_fn(name),
+            _ => None,
+        }
+    }
+
     fn call(&mut self, callee: &Expr, args: &[Option<Expr>]) -> Result<Value, CodegenError> {
         let ExprKind::Ident(name) = &callee.kind else {
             let address = if let ExprKind::Deref(inner) = &callee.kind {
@@ -1842,20 +2167,50 @@ impl FnCg<'_, '_> {
             } else {
                 self.expr(callee)?
             };
+            let info = self.callee_function(callee).cloned();
             let mut values = Vec::new();
             let mut signature = self.module.make_signature();
-            for arg in args {
+            if let Some(info) = &info {
+                for (_, ty) in &info.params {
+                    signature
+                        .params
+                        .push(AbiParam::new(clif_ty(ty, self.ptr_ty)));
+                }
+                if !info.ret.is_void() {
+                    signature
+                        .returns
+                        .push(AbiParam::new(clif_ty(&info.ret, self.ptr_ty)));
+                }
+            }
+            for (index, arg) in args.iter().enumerate() {
                 let value = match arg {
                     Some(expr) => self.expr(expr)?,
                     None => self.bcx.ins().iconst(types::I64, 0),
                 };
-                signature.params.push(AbiParam::new(self.value_ty(value)));
+                let value = info
+                    .as_ref()
+                    .and_then(|info| info.params.get(index))
+                    .map_or(value, |(_, ty)| {
+                        self.coerce_to(value, clif_ty(ty, self.ptr_ty))
+                    });
+                if info.is_none() {
+                    signature.params.push(AbiParam::new(self.value_ty(value)));
+                }
                 values.push(value);
             }
+            if info.is_none() && values.len() != signature.params.len() {
+                // Keep the previous inferred-argument signature.
+            }
             let signature = self.bcx.import_signature(signature);
-            self.bcx.ins().call_indirect(signature, address, &values);
+            let call = self.bcx.ins().call_indirect(signature, address, &values);
+            let results = self.bcx.inst_results(call);
+            let value = if results.is_empty() {
+                self.bcx.ins().iconst(types::I64, 0)
+            } else {
+                results[0]
+            };
             self.after_call()?;
-            return Ok(self.bcx.ins().iconst(types::I64, 0));
+            return Ok(value);
         };
         if name == "Print" {
             return self.call_print(args);
@@ -1863,14 +2218,9 @@ impl FnCg<'_, '_> {
         if name == "GrPrint" {
             return self.call_gr_print(args);
         }
-        let id = *self
-            .func_ids
-            .get(name)
-            .ok_or_else(|| CodegenError::Msg(format!("unknown function `{name}`")))?;
+        let id = self.func_id(name)?;
         let params = self
-            .sema
-            .functions
-            .get(name)
+            .lookup_fn(name)
             .map(|info| info.params.clone())
             .unwrap_or_default();
         let local = self.module.declare_func_in_func(id, self.bcx.func);

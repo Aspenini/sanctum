@@ -140,6 +140,7 @@ pub enum Stmt {
     Empty {
         span: Span,
     },
+    Fn(FnDecl),
 }
 
 impl Stmt {
@@ -163,6 +164,7 @@ impl Stmt {
             | Stmt::NoWarn { span, .. }
             | Stmt::Empty { span } => *span,
             Stmt::Decl(d) => d.span,
+            Stmt::Fn(function) => function.span,
         }
     }
 }

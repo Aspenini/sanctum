@@ -909,4 +909,80 @@ Main;
         .unwrap();
         assert_eq!(tos_runtime::capture_take().unwrap(), b"1\n");
     }
+
+    #[test]
+    fn nested_function_reads_and_writes_outer_locals() {
+        tos_runtime::capture_begin();
+        run_source(
+            "nested.HC",
+            r#"
+U0 Main()
+{
+  I64 n=3;
+  I64 Add()
+  {
+    return n+1;
+  }
+  U0 Bump()
+  {
+    n++;
+  }
+  Bump;
+  "%d %d\n",Add,n;
+}
+Main;
+"#,
+        )
+        .unwrap();
+        assert_eq!(tos_runtime::capture_take().unwrap(), b"5 4\n");
+    }
+
+    #[test]
+    fn nested_function_pointer_keeps_outer_locals() {
+        tos_runtime::capture_begin();
+        run_source(
+            "nested_ptr.HC",
+            r#"
+U0 Main()
+{
+  I64 n=7;
+  I64 Get()
+  {
+    return n;
+  }
+  "%d\n",(*&Get)();
+}
+Main;
+"#,
+        )
+        .unwrap();
+        assert_eq!(tos_runtime::capture_take().unwrap(), b"7\n");
+    }
+
+    #[test]
+    fn nested_function_sees_grandparent_locals() {
+        tos_runtime::capture_begin();
+        run_source(
+            "nested_depth.HC",
+            r#"
+U0 Main()
+{
+  I64 a=10;
+  U0 Mid()
+  {
+    I64 b=2;
+    I64 Inner()
+    {
+      return a+b;
+    }
+    "%d\n",Inner;
+  }
+  Mid;
+}
+Main;
+"#,
+        )
+        .unwrap();
+        assert_eq!(tos_runtime::capture_take().unwrap(), b"12\n");
+    }
 }

@@ -12,6 +12,7 @@ pub struct FunctionInfo {
     pub variadic: bool,
     pub is_builtin: bool,
     pub link_name: String,
+    pub parent_link: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -44,6 +45,7 @@ pub struct Sema {
     errors: Vec<SyntaxError>,
     path: String,
     src: String,
+    current_link: String,
 }
 
 impl Sema {
@@ -55,6 +57,7 @@ impl Sema {
             errors: Vec::new(),
             path: path.into(),
             src: src.into(),
+            current_link: String::new(),
         };
         s.add_builtin(
             "Print",
@@ -896,32 +899,98 @@ impl Sema {
                 variadic,
                 is_builtin: true,
                 link_name: format!("tos_{name}"),
+                parent_link: None,
             },
         );
+    }
+
+    fn register_function(&mut self, function: &FnDecl, parent_link: Option<String>) {
+        let link_name = match &parent_link {
+            Some(parent) => Self::nested_link_name(parent, &function.name),
+            None => function.name.clone(),
+        };
+        let ret = resolve_ty(&function.ret, &self.classes);
+        let params = function
+            .params
+            .iter()
+            .map(|p| (p.name.clone(), resolve_ty(&p.ty, &self.classes)))
+            .collect();
+        self.functions.insert(
+            link_name.clone(),
+            FunctionInfo {
+                name: function.name.clone(),
+                ret,
+                params,
+                variadic: function.variadic,
+                is_builtin: false,
+                link_name: link_name.clone(),
+                parent_link,
+            },
+        );
+        if let Some(body) = &function.body {
+            for stmt in body {
+                self.register_nested(stmt, &link_name);
+            }
+        }
+    }
+
+    fn register_nested(&mut self, stmt: &Stmt, parent_link: &str) {
+        match stmt {
+            Stmt::Fn(function) => self.register_function(function, Some(parent_link.to_string())),
+            Stmt::Block { stmts, .. } | Stmt::Start { body: stmts, .. } => {
+                for stmt in stmts {
+                    self.register_nested(stmt, parent_link);
+                }
+            }
+            Stmt::If { then, else_, .. } => {
+                self.register_nested(then, parent_link);
+                if let Some(else_) = else_ {
+                    self.register_nested(else_, parent_link);
+                }
+            }
+            Stmt::While { body, .. }
+            | Stmt::DoWhile { body, .. }
+            | Stmt::For { body, .. }
+            | Stmt::Switch { body, .. } => self.register_nested(body, parent_link),
+            Stmt::Try { body, catch, .. } => {
+                self.register_nested(body, parent_link);
+                self.register_nested(catch, parent_link);
+            }
+            _ => {}
+        }
+    }
+
+    pub fn nested_link_name(parent: &str, name: &str) -> String {
+        format!("{parent}__{name}")
+    }
+
+    pub fn lookup_function(&self, name: &str) -> Option<&FunctionInfo> {
+        self.lookup_function_from(name, &self.current_link)
+    }
+
+    pub fn lookup_function_from(&self, name: &str, from_link: &str) -> Option<&FunctionInfo> {
+        let mut current = if from_link.is_empty() {
+            None
+        } else {
+            Some(from_link.to_string())
+        };
+        while let Some(link) = current {
+            let mangled = Self::nested_link_name(&link, name);
+            if let Some(info) = self.functions.get(&mangled) {
+                return Some(info);
+            }
+            current = self
+                .functions
+                .get(&link)
+                .and_then(|info| info.parent_link.clone());
+        }
+        self.functions.get(name)
     }
 
     pub fn run(&mut self, module: &mut Module) -> Result<(), SyntaxError> {
         for item in &module.items {
             match item {
-                Item::Fn(f) => {
-                    let ret = resolve_ty(&f.ret, &self.classes);
-                    let params = f
-                        .params
-                        .iter()
-                        .map(|p| (p.name.clone(), resolve_ty(&p.ty, &self.classes)))
-                        .collect();
-                    self.functions.insert(
-                        f.name.clone(),
-                        FunctionInfo {
-                            name: f.name.clone(),
-                            ret,
-                            params,
-                            variadic: f.variadic,
-                            is_builtin: false,
-                            link_name: f.name.clone(),
-                        },
-                    );
-                }
+                Item::Fn(f) => self.register_function(f, None),
                 Item::Class(c) => {
                     let info = layout_class(c, &self.classes);
                     self.classes.insert(c.name.clone(), info);
@@ -947,11 +1016,7 @@ impl Sema {
                 self.rewrite_stmt(stmt);
             }
             if let Item::Fn(f) = item {
-                if let Some(body) = &mut f.body {
-                    for s in body {
-                        self.rewrite_stmt(s);
-                    }
-                }
+                self.rewrite_function(f);
             }
         }
         if let Some(e) = self.errors.pop() {
@@ -964,7 +1029,7 @@ impl Sema {
         match stmt {
             Stmt::Expr { expr, span } => {
                 self.rewrite_expr(expr);
-                Self::callify_function_ident(expr, &self.functions);
+                self.callify_function_ident(expr);
                 let _ = span;
             }
             Stmt::Block { stmts, .. } => {
@@ -1035,18 +1100,35 @@ impl Sema {
             Stmt::Decl(v) => {
                 if let Some(init) = &mut v.init {
                     self.rewrite_expr(init);
-                    Self::callify_function_ident(init, &self.functions);
+                    self.callify_function_ident(init);
                 }
             }
+            Stmt::Fn(function) => self.rewrite_function(function),
             _ => {}
         }
     }
 
-    fn callify_function_ident(expr: &mut Expr, functions: &HashMap<String, FunctionInfo>) {
+    fn rewrite_function(&mut self, function: &mut FnDecl) {
+        let Some(body) = &mut function.body else {
+            return;
+        };
+        let link = if self.current_link.is_empty() {
+            function.name.clone()
+        } else {
+            Self::nested_link_name(&self.current_link, &function.name)
+        };
+        let previous = std::mem::replace(&mut self.current_link, link);
+        for stmt in body {
+            self.rewrite_stmt(stmt);
+        }
+        self.current_link = previous;
+    }
+
+    fn callify_function_ident(&self, expr: &mut Expr) {
         let ExprKind::Ident(name) = &expr.kind else {
             return;
         };
-        if functions.contains_key(name) {
+        if self.lookup_function(name).is_some() {
             let callee = expr.clone();
             expr.kind = ExprKind::Call {
                 callee: Box::new(callee),
@@ -1074,7 +1156,7 @@ impl Sema {
                 self.rewrite_expr(expr)
             }
             ExprKind::Addr(inner) => {
-                if !matches!(&inner.kind, ExprKind::Ident(n) if self.functions.contains_key(n)) {
+                if !matches!(&inner.kind, ExprKind::Ident(n) if self.lookup_function(n).is_some()) {
                     self.rewrite_expr(inner);
                 }
             }
@@ -1082,7 +1164,7 @@ impl Sema {
                 self.rewrite_expr(lhs);
                 self.rewrite_expr(rhs);
                 if op.is_assign() {
-                    Self::callify_function_ident(rhs, &self.functions);
+                    self.callify_function_ident(rhs);
                 }
             }
             ExprKind::ChainCmp { first, rest } => {
@@ -1100,7 +1182,7 @@ impl Sema {
                 self.rewrite_expr(callee);
                 for a in args.iter_mut().flatten() {
                     self.rewrite_expr(a);
-                    Self::callify_function_ident(a, &self.functions);
+                    self.callify_function_ident(a);
                 }
             }
             ExprKind::Index { base, index } => {
@@ -1126,15 +1208,15 @@ impl Sema {
                     expr.kind = ExprKind::Float(f64::MAX);
                 } else if let Some(value) = builtin_integer_constant(name) {
                     expr.kind = ExprKind::Int(value);
-                } else if let Some(f) = self.functions.get(name) {
-                    // `tS` / `Dir` — no-arg (or all-default) call without `()`.
-                    if f.params.is_empty() {
-                        let callee = expr.clone();
-                        expr.kind = ExprKind::Call {
-                            callee: Box::new(callee),
-                            args: vec![],
-                        };
-                    }
+                } else if self
+                    .lookup_function(name)
+                    .is_some_and(|function| function.params.is_empty())
+                {
+                    let callee = expr.clone();
+                    expr.kind = ExprKind::Call {
+                        callee: Box::new(callee),
+                        args: vec![],
+                    };
                 }
             }
             _ => {}
@@ -1226,6 +1308,13 @@ fn collect_registry_globals(stmt: &Stmt, out: &mut HashMap<String, Ty>) {
         Stmt::Try { body, catch, .. } => {
             collect_registry_globals(body, out);
             collect_registry_globals(catch, out);
+        }
+        Stmt::Fn(function) => {
+            if let Some(body) = &function.body {
+                for stmt in body {
+                    collect_registry_globals(stmt, out);
+                }
+            }
         }
         _ => {}
     }

@@ -55,7 +55,7 @@ independent of the Sanctum GUI.
 
 The implemented language/runtime subset includes preprocessing, TempleOS
 operator precedence, packed classes and unions, globals, pointers, callbacks,
-control flow including `goto` and `try`/`catch`, integer and `F64` arithmetic
+control flow including `goto`, `try`/`catch`, and nested functions, integer and `F64` arithmetic
 (including the HolyC power operator), tasks, menus and settings, heap and queue
 primitives, indexed graphics with 3D mesh sprites and circles, mouse and
 keyboard input, registry

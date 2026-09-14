@@ -703,15 +703,7 @@ impl<'a> Parser<'a> {
         if self.looks_like_decl() {
             match self.parse_decl_item()? {
                 Item::Stmt(s) => return Ok(s),
-                Item::Fn(f) => {
-                    // nested function — treat as not allowed; error
-                    return Err(SyntaxError::at(
-                        &self.path,
-                        self.src,
-                        f.span,
-                        "nested functions are not supported yet",
-                    ));
-                }
+                Item::Fn(f) => return Ok(Stmt::Fn(f)),
                 Item::Class(c) => {
                     self.types.insert(c.name.clone());
                     return Ok(Stmt::Empty { span: c.span });
@@ -1235,5 +1227,15 @@ mod tests {
         assert_eq!(m.items.len(), 2);
         assert!(matches!(m.items[0], Item::Fn(_)));
         assert!(matches!(m.items[1], Item::Stmt(Stmt::Expr { .. })));
+    }
+
+    #[test]
+    fn nested_function_is_a_statement() {
+        let module = parse("U0 Main() { U0 Inner() { } Inner; } Main;");
+        let Item::Fn(main) = &module.items[0] else {
+            panic!("expected Main");
+        };
+        let body = main.body.as_ref().unwrap();
+        assert!(matches!(body[0], Stmt::Fn(_)));
     }
 }
