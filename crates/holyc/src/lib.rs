@@ -830,6 +830,65 @@ Main;
     }
 
     #[test]
+    fn postfix_cast_bitcasts_f64_to_i64() {
+        tos_runtime::capture_begin();
+        run_source(
+            "postfix_cast.HC",
+            r#"
+U0 Main()
+{
+  "%d %d %d\n",(π/32)(I64)!=0,TEXT_ROWS,CH_SPACE;
+}
+Main;
+"#,
+        )
+        .unwrap();
+        assert_eq!(tos_runtime::capture_take().unwrap(), b"1 60 32\n");
+    }
+
+    #[test]
+    fn print_repeats_aux_format_chars() {
+        tos_runtime::capture_begin();
+        run_source(
+            "print_h.HC",
+            r#"
+U0 Main()
+{
+  "%h*c",3,'x';
+  "\n";
+}
+Main;
+"#,
+        )
+        .unwrap();
+        assert_eq!(tos_runtime::capture_take().unwrap(), b"xxx\n");
+    }
+
+    #[test]
+    fn line_invokes_the_plot_callback() {
+        tos_runtime::capture_begin();
+        run_source(
+            "line.HC",
+            r#"
+I64 n=0;
+Bool Plot(U8 *,I64,I64,I64)
+{
+  n++;
+  return TRUE;
+}
+U0 Main()
+{
+  Line(NULL,0,0,0,2,0,0,&Plot);
+  "%d\n",n;
+}
+Main;
+"#,
+        )
+        .unwrap();
+        assert_eq!(tos_runtime::capture_take().unwrap(), b"3\n");
+    }
+
+    #[test]
     fn goto_jumps_to_labels() {
         tos_runtime::capture_begin();
         run_source(

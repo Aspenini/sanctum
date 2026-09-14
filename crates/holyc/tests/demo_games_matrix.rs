@@ -33,10 +33,7 @@ const MATRIX: &[(&str, Expect)] = &[
         "BomberGolf.HC",
         Expect::Blocked("unknown function `GrRect3`"),
     ),
-    (
-        "CastleFrankenstein.HC",
-        Expect::Blocked("unknown function `Line`"),
-    ),
+    ("CastleFrankenstein.HC", Expect::Compiles),
     (
         "CharDemo.HC",
         Expect::Blocked("cannot type field base for `hide_row`"),
@@ -48,9 +45,12 @@ const MATRIX: &[(&str, Expect)] = &[
     ),
     (
         "Digits.HC",
-        Expect::Blocked("no member `text_attr` on CTask"),
+        Expect::Blocked("unknown identifier `PressAKey`"),
     ),
-    ("DunGen.HC", Expect::Blocked("unknown function `Line`")),
+    (
+        "DunGen.HC",
+        Expect::Blocked("cannot type field base for `dc2`"),
+    ),
     (
         "ElephantWalk.HC",
         Expect::Blocked("cannot type field base for `flags`"),
@@ -63,7 +63,10 @@ const MATRIX: &[(&str, Expect)] = &[
         Expect::Blocked("cannot type field base for `next_spring`"),
     ),
     ("Maze.HC", Expect::Blocked("expected (")),
-    ("RainDrops.HC", Expect::Blocked("unknown function `GrLine`")),
+    (
+        "RainDrops.HC",
+        Expect::Blocked("cannot type field base for `down_bitmap`"),
+    ),
     (
         "RawHide.HC",
         Expect::Blocked("unknown identifier `MAP_HEIGHT`"),
@@ -86,13 +89,13 @@ const MATRIX: &[(&str, Expect)] = &[
         Expect::Blocked("expected identifier"),
     ),
     ("Talons.HC", Expect::Compiles),
-    ("TheDead.HC", Expect::Blocked("unknown function `GrLine`")),
+    ("TheDead.HC", Expect::Blocked("unknown function `ScanMsg`")),
     ("TicTacToe.HC", Expect::Compiles),
     ("TreeCheckers.HC", Expect::Blocked("expected (")),
     ("Varoom.HC", Expect::Blocked("unknown function `R2P`")),
     (
         "Wenceslas.HC",
-        Expect::Blocked("unknown function `GrPlot3`"),
+        Expect::Blocked("unknown function `Mat4x4RotY`"),
     ),
     ("Whap.HC", Expect::Blocked("unknown function `GrRect`")),
     ("Zing.HC", Expect::Blocked("unknown function `GrBorder`")),

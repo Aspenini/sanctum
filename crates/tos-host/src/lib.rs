@@ -75,6 +75,7 @@ pub fn jit_symbols() -> Vec<(&'static str, *const u8)> {
     vec![
         ("tos_Refresh", tos_Refresh as *const u8),
         ("tos_ScanKey", tos_ScanKey as *const u8),
+        ("tos_GetKey", tos_GetKey as *const u8),
         ("tos_SndTaskEndCB", audio::tos_SndTaskEndCB as *const u8),
         ("tos_Beep", audio::tos_Beep as *const u8),
         ("tos_Snd", audio::tos_Snd as *const u8),
@@ -547,6 +548,28 @@ pub unsafe extern "C" fn tos_ScanKey(ch: *mut i64, scan_code: *mut i64, _echo: i
         unsafe { *scan_code = 0 };
     }
     1
+}
+
+#[unsafe(no_mangle)]
+/// Block until `ScanKey` reports a key, presenting frames like TempleOS's
+/// window manager while the foreground task waits.
+///
+/// # Safety
+///
+/// Non-null `scan_code` must be valid and writable for one `i64`.
+pub unsafe extern "C" fn tos_GetKey(scan_code: *mut i64, echo: i64, _raw_cursor: i64) -> i64 {
+    loop {
+        let mut ch = 0_i64;
+        let mut sc = 0_i64;
+        if unsafe { tos_ScanKey(&mut ch, &mut sc, echo) } != 0 {
+            if !scan_code.is_null() {
+                unsafe { *scan_code = sc };
+            }
+            return ch;
+        }
+        tos_Refresh();
+        std::thread::sleep(std::time::Duration::from_millis(8));
+    }
 }
 
 #[cfg(test)]

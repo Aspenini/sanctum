@@ -107,6 +107,10 @@ pub fn jit_symbols() -> Vec<(&'static str, *const u8)> {
         ("tos_RandU32", tos_RandU32 as *const u8),
         ("tos_RandI16", tos_RandI16 as *const u8),
         ("tos_RandI64", tos_RandI64 as *const u8),
+        ("tos_RandU64", tos_RandU64 as *const u8),
+        ("tos_Seed", tos_Seed as *const u8),
+        ("tos_RoundI64", tos_RoundI64 as *const u8),
+        ("tos_Noise", tos_Noise as *const u8),
         ("tos_Abs", tos_Abs as *const u8),
         ("tos_SqrI64", tos_SqrI64 as *const u8),
         ("tos_ClampI64", tos_ClampI64 as *const u8),
@@ -145,6 +149,14 @@ pub fn jit_symbols() -> Vec<(&'static str, *const u8)> {
         (
             "tos_Mat4x4TranslationEqu",
             tos_Mat4x4TranslationEqu as *const u8,
+        ),
+        (
+            "tos_Mat4x4TranslationAdd",
+            tos_Mat4x4TranslationAdd as *const u8,
+        ),
+        (
+            "tos_Mat4x4MulMat4x4Equ",
+            tos_Mat4x4MulMat4x4Equ as *const u8,
         ),
         ("tos_Mat4x4Scale", tos_Mat4x4Scale as *const u8),
         ("tos_D3Sub", tos_D3Sub as *const u8),
@@ -349,7 +361,7 @@ pub extern "C" fn tos_Sign(value: f64) -> f64 {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn tos_Mat4x4IdentNew() -> *mut i64 {
+pub extern "C" fn tos_Mat4x4IdentNew(_task: *mut tos_abi::CTask) -> *mut i64 {
     // TempleOS callers own this result and release it with `Free`, so it must
     // come from the same header-bearing heap as `MAlloc`/`CAlloc`.
     let matrix = unsafe { heap::calloc((16 * size_of::<i64>()) as i64) }.cast::<i64>();
@@ -452,6 +464,27 @@ pub extern "C" fn tos_RandI64() -> i64 {
 }
 
 #[unsafe(no_mangle)]
+pub extern "C" fn tos_RandU64() -> i64 {
+    rand::rand_u64()
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn tos_Seed(seed: i64, _task: *mut tos_abi::CTask) -> i64 {
+    rand::seed(seed);
+    seed
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn tos_RoundI64(num: i64, to: i64) -> i64 {
+    if to == 0 { num } else { num - num % to }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn tos_Noise(_ms: i64, _min_ona: f64, _max_ona: f64) -> *mut tos_abi::CTask {
+    std::ptr::null_mut()
+}
+
+#[unsafe(no_mangle)]
 pub extern "C" fn tos_Abs(x: i64) -> i64 {
     x.abs()
 }
@@ -533,6 +566,20 @@ pub unsafe extern "C" fn tos_Mat4x4MulXYZ(r: *const i64, x: *mut i64, y: *mut i6
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn tos_Mat4x4TranslationEqu(r: *mut i64, x: i64, y: i64, z: i64) -> *mut i64 {
     unsafe { math::mat_translate(r, x, y, z) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tos_Mat4x4TranslationAdd(r: *mut i64, x: i64, y: i64, z: i64) -> *mut i64 {
+    unsafe { math::mat_translate_add(r, x, y, z) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tos_Mat4x4MulMat4x4Equ(
+    dst: *mut i64,
+    m1: *const i64,
+    m2: *const i64,
+) -> *mut i64 {
+    unsafe { math::mat_mul_equ(dst, m1, m2) }
 }
 
 #[unsafe(no_mangle)]
@@ -644,6 +691,11 @@ fn format_tos(fmt: &str, args: &[i64]) -> String {
             width = width.saturating_mul(10) + usize::from(*digit - b'0');
             index += 1;
         }
+        if bytes.get(index) == Some(&b'*') {
+            index += 1;
+            width = args.get(arg_index).copied().unwrap_or(0).max(0) as usize;
+            arg_index += 1;
+        }
         let precision = if bytes.get(index) == Some(&b'.') {
             index += 1;
             let mut places = 0usize;
@@ -655,6 +707,27 @@ fn format_tos(fmt: &str, args: &[i64]) -> String {
         } else {
             None
         };
+        let mut aux_count = 1usize;
+        if bytes.get(index) == Some(&b'h') {
+            index += 1;
+            if bytes.get(index) == Some(&b'*') {
+                index += 1;
+                aux_count = args.get(arg_index).copied().unwrap_or(0).max(0) as usize;
+                arg_index += 1;
+            } else {
+                let mut count = 0usize;
+                let mut negative = false;
+                if bytes.get(index) == Some(&b'-') {
+                    negative = true;
+                    index += 1;
+                }
+                while let Some(digit) = bytes.get(index).filter(|byte| byte.is_ascii_digit()) {
+                    count = count.saturating_mul(10) + usize::from(*digit - b'0');
+                    index += 1;
+                }
+                aux_count = if negative { 0 } else { count };
+            }
+        }
         let Some(specifier) = bytes.get(index).copied() else {
             result.push('%');
             break;
@@ -670,7 +743,10 @@ fn format_tos(fmt: &str, args: &[i64]) -> String {
                     .to_string_lossy()
                     .into_owned()
             },
-            b'c' => char::from(argument as u8).to_string(),
+            b'c' => {
+                let ch = char::from(argument as u8);
+                ch.to_string().repeat(aux_count)
+            }
             b'd' | b'i' | b'n' | b'D' => argument.to_string(),
             b'u' => (argument as u64).to_string(),
             b'x' => format!("{:x}", argument as u64),
@@ -759,11 +835,12 @@ mod tests {
             format_tos("v=%5.2f n=%04d x=%X", &args),
             "v= 1.50 n=0007 x=AB"
         );
+        assert_eq!(format_tos("%h*c", &[3, b'\n' as i64]), "\n\n\n");
     }
 
     #[test]
     fn new_matrix_uses_the_templeos_heap() {
-        let matrix = tos_Mat4x4IdentNew();
+        let matrix = tos_Mat4x4IdentNew(std::ptr::null_mut());
         assert!(!matrix.is_null());
         assert!(unsafe { tos_MSize(matrix.cast()) } >= (16 * size_of::<i64>()) as i64);
         unsafe { tos_Free(matrix.cast()) };

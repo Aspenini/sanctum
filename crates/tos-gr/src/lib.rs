@@ -13,6 +13,8 @@ const DCF_SYMMETRY: i32 = 0x200;
 const DCF_JUST_MIRROR: i32 = 0x400;
 const DCF_NO_TRANSPARENTS: i32 = 0x4;
 const DCF_ALIAS: i32 = 0x2000;
+const DCF_RECORD_EXTENTS: i32 = 0x10000;
+const DEFAULT_LIGHT: i32 = 37_837;
 const COLORROP_COLORS_MASK: u32 = 0x00ff_00ff;
 const ROPB_EQU: u32 = 0;
 const ROPB_XOR: u32 = 1;
@@ -160,20 +162,69 @@ pub fn jit_symbols() -> Vec<(&'static str, *const u8)> {
         ("tos_DCSymmetry3Set", tos_DCSymmetry3Set as *const u8),
         ("tos_DCClipLine", tos_DCClipLine as *const u8),
         ("tos_GrLine3", tos_GrLine3 as *const u8),
+        ("tos_GrLine", tos_GrLine as *const u8),
+        ("tos_GrPlot3", tos_GrPlot3 as *const u8),
+        ("tos_GrPeek", tos_GrPeek as *const u8),
         ("tos_GrCircle3", tos_GrCircle3 as *const u8),
         ("tos_GrArrow3", tos_GrArrow3 as *const u8),
         ("tos_GrFillPoly3", tos_GrFillPoly3 as *const u8),
         ("tos_GrBlot", tos_GrBlot as *const u8),
         ("tos_GrPrint", tos_GrPrint as *const u8),
+        ("tos_Line", tos_Line as *const u8),
         ("tos_Sprite3", tos_Sprite3 as *const u8),
         ("tos_Sprite3B", tos_Sprite3B as *const u8),
+        ("tos_Sprite3Mat4x4B", tos_Sprite3Mat4x4B as *const u8),
+        ("tos_Sprite2DC", tos_Sprite2DC as *const u8),
         ("tos_SpriteInterpolate", tos_SpriteInterpolate as *const u8),
         ("tos_SpriteTransform", tos_SpriteTransform as *const u8),
     ]
 }
 
 fn identity_matrix() -> *mut i64 {
-    tos_runtime::tos_Mat4x4IdentNew()
+    tos_runtime::tos_Mat4x4IdentNew(ptr::null_mut())
+}
+
+fn new_cdc(
+    width: i32,
+    height: i32,
+    flags: i32,
+    body: *mut u8,
+    owns_body: bool,
+    depth_buf: *mut i32,
+    owns_depth_buf: bool,
+) -> CDC {
+    CDC {
+        width,
+        height,
+        flags,
+        color: 0,
+        r: identity_matrix(),
+        x: 0,
+        y: 0,
+        z: 0,
+        thick: 1,
+        transform: Some(tos_DCTransform),
+        body,
+        depth_buf,
+        ls: CD3I32 {
+            x: DEFAULT_LIGHT,
+            y: DEFAULT_LIGHT,
+            z: DEFAULT_LIGHT,
+        },
+        sym_x: 0,
+        sym_y: 0,
+        sym_z: 0,
+        sym_nx: 1.0,
+        sym_ny: 0.0,
+        sym_nz: 0.0,
+        dither_probability_u16: 0,
+        owns_body,
+        owns_depth_buf,
+        min_x: 0,
+        max_x: 0,
+        min_y: 0,
+        max_y: 0,
+    }
 }
 
 /// Screen device context used when HolyC omits `DCAlias`/`DCFill`/`Gr*` arguments.
@@ -204,32 +255,15 @@ pub extern "C" fn tos_DCNew(
         let len = (width as usize).saturating_mul(height as usize);
         unsafe { tos_runtime::tos_CAlloc(len.min(i64::MAX as usize) as i64, ptr::null_mut()) }
     };
-    Box::into_raw(Box::new(CDC {
+    Box::into_raw(Box::new(new_cdc(
         width,
         height,
-        flags: 0,
-        color: 0,
-        r: identity_matrix(),
-        x: 0,
-        y: 0,
-        z: 0,
-        thick: 1,
-        transform: Some(tos_DCTransform),
+        0,
         body,
-        depth_buf: ptr::null_mut(),
-        sym_x: 0,
-        sym_y: 0,
-        sym_z: 0,
-        sym_nx: 1.0,
-        sym_ny: 0.0,
-        sym_nz: 0.0,
-        light_x: 37_837,
-        light_y: 37_837,
-        light_z: 37_837,
-        dither_probability_u16: 0,
-        owns_body: !body.is_null(),
-        owns_depth_buf: false,
-    }))
+        !body.is_null(),
+        ptr::null_mut(),
+        false,
+    )))
 }
 
 #[unsafe(no_mangle)]
@@ -239,32 +273,17 @@ pub unsafe extern "C" fn tos_DCAlias(dc: *mut CDC, _task: *mut CTask) -> *mut CD
         return ptr::null_mut();
     }
     let src = unsafe { &*dc };
-    Box::into_raw(Box::new(CDC {
-        width: src.width,
-        height: src.height,
-        flags: src.flags & !(DCF_TRANSFORMATION | DCF_SYMMETRY | DCF_JUST_MIRROR) | DCF_ALIAS,
-        color: tos_abi::BLACK,
-        r: identity_matrix(),
-        x: 0,
-        y: 0,
-        z: 0,
-        thick: 1,
-        transform: Some(tos_DCTransform),
-        body: src.body,
-        depth_buf: src.depth_buf,
-        sym_x: 0,
-        sym_y: 0,
-        sym_z: 0,
-        sym_nx: 1.0,
-        sym_ny: 0.0,
-        sym_nz: 0.0,
-        light_x: 37_837,
-        light_y: 37_837,
-        light_z: 37_837,
-        dither_probability_u16: 0,
-        owns_body: false,
-        owns_depth_buf: false,
-    }))
+    let mut alias = new_cdc(
+        src.width,
+        src.height,
+        src.flags & !(DCF_TRANSFORMATION | DCF_SYMMETRY | DCF_JUST_MIRROR) | DCF_ALIAS,
+        src.body,
+        false,
+        src.depth_buf,
+        false,
+    );
+    alias.color = tos_abi::BLACK;
+    Box::into_raw(Box::new(alias))
 }
 
 #[unsafe(no_mangle)]
@@ -566,8 +585,14 @@ unsafe fn plot(dc: *mut CDC, x: i64, y: i64, z: i64) -> bool {
         return false;
     }
     let dc = unsafe { &mut *dc };
+    if dc.flags & DCF_RECORD_EXTENTS != 0 {
+        dc.min_x = dc.min_x.min(x);
+        dc.max_x = dc.max_x.max(x);
+        dc.min_y = dc.min_y.min(y);
+        dc.max_y = dc.max_y.max(y);
+    }
     if x < 0 || y < 0 || x >= dc.width as i64 || y >= dc.height as i64 || dc.body.is_null() {
-        return false;
+        return dc.flags & DCF_RECORD_EXTENTS != 0 && dc.body.is_null();
     }
     let index = y as usize * dc.width as usize + x as usize;
     if !dc.depth_buf.is_null() {
@@ -663,9 +688,9 @@ unsafe fn light_triangle(dc: *mut CDC, points: &[CD3I32; 3], mut color: u32) {
         normal.1 *= scale;
         normal.2 *= scale;
     }
-    let mut illumination = ((normal.0 * f64::from(ctx.light_x)
-        + normal.1 * f64::from(ctx.light_y)
-        + normal.2 * f64::from(ctx.light_z))
+    let mut illumination = ((normal.0 * f64::from(ctx.ls.x)
+        + normal.1 * f64::from(ctx.ls.y)
+        + normal.2 * f64::from(ctx.ls.z))
         / 65_536.0) as i64;
     if color & ROPF_TWO_SIDED != 0 {
         color &= !ROPF_TWO_SIDED;
@@ -885,6 +910,190 @@ pub unsafe extern "C" fn tos_GrLine3(
         }
     }
     changed + unsafe { raster_line(dc, x1, y1, z1, x2, y2, z2, step, start) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tos_GrLine(
+    dc: *mut CDC,
+    x1: i64,
+    y1: i64,
+    x2: i64,
+    y2: i64,
+    step: i64,
+    start: i64,
+) -> i64 {
+    let dc = resolve_dc(dc);
+    let old_depth = unsafe { dc.as_mut() }.map(|ctx| {
+        let depth = ctx.depth_buf;
+        ctx.depth_buf = ptr::null_mut();
+        depth
+    });
+    let changed = unsafe { raster_line(dc, x1, y1, 0, x2, y2, 0, step, start) };
+    if let Some(ctx) = unsafe { dc.as_mut() }
+        && let Some(depth) = old_depth
+    {
+        ctx.depth_buf = depth;
+    }
+    changed
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tos_GrPlot3(dc: *mut CDC, mut x: i64, mut y: i64, mut z: i64) -> i64 {
+    let dc = resolve_dc(dc);
+    if let Some(ctx) = unsafe { dc.as_ref() }
+        && ctx.flags & DCF_TRANSFORMATION != 0
+        && let Some(transform) = ctx.transform
+    {
+        unsafe { transform(dc, &mut x, &mut y, &mut z) };
+    }
+    let mut changed = 0_i64;
+    if let Some(flags) = unsafe { dc.as_ref() }.map(|ctx| ctx.flags)
+        && flags & DCF_SYMMETRY != 0
+    {
+        let (mut mx, mut my, mut mz) = (x, y, z);
+        unsafe { reflect(dc, &mut mx, &mut my, &mut mz) };
+        changed += unsafe { plot_brush(dc, mx, my, mz) };
+        if flags & DCF_JUST_MIRROR != 0 {
+            return changed;
+        }
+    }
+    changed + unsafe { plot_brush(dc, x, y, z) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tos_GrPeek(dc: *mut CDC, x: i64, y: i64) -> i64 {
+    let dc = resolve_dc(dc);
+    let Some(ctx) = (unsafe { dc.as_ref() }) else {
+        return -1;
+    };
+    if x < 0
+        || y < 0
+        || x >= i64::from(ctx.width)
+        || y >= i64::from(ctx.height)
+        || ctx.body.is_null()
+    {
+        return -1;
+    }
+    i64::from(unsafe { *ctx.body.add(y as usize * ctx.width as usize + x as usize) })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tos_Line(
+    aux: *mut u8,
+    mut x1: i64,
+    mut y1: i64,
+    mut z1: i64,
+    x2: i64,
+    y2: i64,
+    z2: i64,
+    fp_plot: *const u8,
+    step: i64,
+    start: i64,
+) -> i64 {
+    type PlotFn = unsafe extern "C" fn(*mut u8, i64, i64, i64) -> i64;
+    if fp_plot.is_null() {
+        return 1;
+    }
+    let plot: PlotFn = unsafe { std::mem::transmute(fp_plot) };
+    let mut dx = x2 - x1;
+    let mut dy = y2 - y1;
+    let mut dz = z2 - z1;
+    let adx = dx.abs();
+    let ady = dy.abs();
+    let adz = dz.abs();
+    let mut d;
+    if adx >= ady {
+        if adx >= adz {
+            d = adx;
+            if d != 0 {
+                dx = if dx >= 0 {
+                    0x1_0000_0000
+                } else {
+                    -0x1_0000_0000
+                };
+                dy = (dy << 32) / d;
+                dz = (dz << 32) / d;
+            }
+        } else {
+            d = adz;
+            if d != 0 {
+                dx = (dx << 32) / d;
+                dy = (dy << 32) / d;
+                dz = if dz >= 0 {
+                    0x1_0000_0000
+                } else {
+                    -0x1_0000_0000
+                };
+            }
+        }
+    } else if ady >= adz {
+        d = ady;
+        if d != 0 {
+            dx = (dx << 32) / d;
+            dy = if dy >= 0 {
+                0x1_0000_0000
+            } else {
+                -0x1_0000_0000
+            };
+            dz = (dz << 32) / d;
+        }
+    } else {
+        d = adz;
+        if d != 0 {
+            dx = (dx << 32) / d;
+            dy = (dy << 32) / d;
+            dz = if dz >= 0 {
+                0x1_0000_0000
+            } else {
+                -0x1_0000_0000
+            };
+        }
+    }
+    x1 <<= 32;
+    y1 <<= 32;
+    z1 <<= 32;
+    for _ in 0..start {
+        x1 = x1.wrapping_add(dx);
+        y1 = y1.wrapping_add(dy);
+        z1 = z1.wrapping_add(dz);
+    }
+    let original_step = step;
+    if step != 1 && step != 0 {
+        dx = dx.wrapping_mul(step);
+        dy = dy.wrapping_mul(step);
+        dz = dz.wrapping_mul(step);
+        d /= step;
+    }
+    let mut first = true;
+    let mut last_x = 0_i64;
+    let mut last_y = 0_i64;
+    let mut last_z = 0_i64;
+    let mut i = start;
+    while i <= d {
+        let px = (x1 >> 32) as i32 as i64;
+        let py = (y1 >> 32) as i32 as i64;
+        let pz = (z1 >> 32) as i32 as i64;
+        if (px != last_x || py != last_y || pz != last_z || first)
+            && unsafe { plot(aux, px, py, pz) } == 0
+        {
+            return 0;
+        }
+        first = false;
+        last_x = px;
+        last_y = py;
+        last_z = pz;
+        x1 = x1.wrapping_add(dx);
+        y1 = y1.wrapping_add(dy);
+        z1 = z1.wrapping_add(dz);
+        i += 1;
+    }
+    if original_step == 1
+        && (last_x != x2 || last_y != y2 || last_z != z2)
+        && unsafe { plot(aux, x2, y2, z2) } == 0
+    {
+        return 0;
+    }
+    1
 }
 
 unsafe fn raster_circle(
@@ -1825,6 +2034,84 @@ pub extern "C" fn tos_Sprite3(dc: *mut CDC, x: i64, y: i64, z: i64, elems: *mut 
 }
 
 #[unsafe(no_mangle)]
+pub extern "C" fn tos_Sprite3Mat4x4B(
+    dc: *mut CDC,
+    x: i64,
+    y: i64,
+    z: i64,
+    elems: *mut u8,
+    m: *mut i64,
+) {
+    let dc = resolve_dc(dc);
+    if dc.is_null() || elems.is_null() || m.is_null() {
+        return;
+    }
+    let (old_r, old_transform) = unsafe {
+        let ctx = &mut *dc;
+        let old = (ctx.r, ctx.flags & DCF_TRANSFORMATION);
+        ctx.flags |= DCF_TRANSFORMATION;
+        old
+    };
+    let mut composed = [0_i64; 16];
+    let mut local = [0_i64; 16];
+    unsafe { ptr::copy_nonoverlapping(m, local.as_mut_ptr(), 16) };
+    unsafe { tos_runtime::tos_Mat4x4TranslationAdd(local.as_mut_ptr(), x, y, z) };
+    unsafe {
+        tos_runtime::tos_Mat4x4MulMat4x4Equ(composed.as_mut_ptr(), old_r, local.as_ptr());
+        (*dc).r = composed.as_mut_ptr();
+    }
+    tos_Sprite3(dc, 0, 0, 0, elems, 0);
+    unsafe {
+        (*dc).r = old_r;
+        (*dc).flags = (*dc).flags & !DCF_TRANSFORMATION | old_transform;
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn tos_Sprite2DC(elems: *mut u8) -> *mut CDC {
+    if elems.is_null() {
+        return ptr::null_mut();
+    }
+    let scratch = tos_DCNew(i64::from(i32::MAX), i64::from(i32::MAX), ptr::null_mut(), 1);
+    if scratch.is_null() {
+        return ptr::null_mut();
+    }
+    unsafe {
+        (*scratch).flags |= DCF_RECORD_EXTENTS;
+        (*scratch).min_x = i64::MAX;
+        (*scratch).max_x = i64::MIN;
+        (*scratch).min_y = i64::MAX;
+        (*scratch).max_y = i64::MIN;
+    }
+    let origin = i64::from(i32::MAX / 2);
+    tos_Sprite3(scratch, origin, origin, origin, elems, 0);
+    let (min_x, max_x, min_y, max_y) = unsafe {
+        (
+            (*scratch).min_x - origin,
+            (*scratch).max_x - origin,
+            (*scratch).min_y - origin,
+            (*scratch).max_y - origin,
+        )
+    };
+    unsafe { tos_DCDel(scratch) };
+    let width = if min_x <= max_x { max_x - min_x + 1 } else { 1 };
+    let height = if min_y <= max_y { max_y - min_y + 1 } else { 1 };
+    let result = tos_DCNew(width, height, ptr::null_mut(), 0);
+    if result.is_null() {
+        return ptr::null_mut();
+    }
+    tos_Sprite3(
+        result,
+        if min_x <= max_x { -min_x } else { 0 },
+        if min_y <= max_y { -min_y } else { 0 },
+        0,
+        elems,
+        0,
+    );
+    result
+}
+
+#[unsafe(no_mangle)]
 pub extern "C" fn tos_Sprite3B(dc: *mut CDC, x: i64, y: i64, z: i64, elems: *mut u8) {
     if elems.is_null() || dc.is_null() {
         return;
@@ -2224,6 +2511,54 @@ mod tests {
         }
     }
 
+    extern "C" fn collect_line_points(aux: *mut u8, x: i64, y: i64, z: i64) -> i64 {
+        let points = unsafe { &mut *(aux as *mut Vec<(i64, i64, i64)>) };
+        points.push((x, y, z));
+        1
+    }
+
+    #[test]
+    fn line_steps_through_integer_coordinates() {
+        let mut points = Vec::new();
+        unsafe {
+            assert_eq!(
+                tos_Line(
+                    (&mut points as *mut Vec<(i64, i64, i64)>).cast(),
+                    0,
+                    0,
+                    0,
+                    2,
+                    0,
+                    0,
+                    collect_line_points as *const u8,
+                    1,
+                    0,
+                ),
+                1
+            );
+        }
+        assert_eq!(points, vec![(0_i64, 0_i64, 0_i64), (1, 0, 0), (2, 0, 0)]);
+    }
+
+    #[test]
+    fn sprite2dc_then_grpeek_reads_filled_pixels() {
+        // Color GREEN, then an axis-aligned rectangle from (0,0) to (4,4).
+        let mut sprite = vec![1u8, tos_abi::GREEN as u8, 12];
+        for value in [0_i32, 0, 4, 4] {
+            sprite.extend_from_slice(&value.to_le_bytes());
+        }
+        sprite.push(0);
+        let dc = tos_Sprite2DC(sprite.as_mut_ptr());
+        unsafe {
+            assert!(!dc.is_null());
+            assert!((*dc).width >= 4, "width {}", (*dc).width);
+            assert!((*dc).height >= 4, "height {}", (*dc).height);
+            assert_eq!(tos_GrPeek(dc, 1, 1), i64::from(tos_abi::GREEN as u8));
+            assert_eq!(tos_GrPeek(dc, 100, 100), -1);
+            tos_DCDel(dc);
+        }
+    }
+
     #[test]
     fn clips_lines_without_changing_their_projected_slope() {
         let dc = tos_DCNew(640, 480, ptr::null_mut(), 0);
@@ -2583,7 +2918,7 @@ mod tests {
         }
         sprite.push(0);
 
-        let matrix = tos_runtime::tos_Mat4x4IdentNew();
+        let matrix = tos_runtime::tos_Mat4x4IdentNew(ptr::null_mut());
         unsafe {
             tos_runtime::tos_Mat4x4TranslationEqu(matrix, 20, 30, 40);
             let transformed = tos_SpriteTransform(sprite.as_mut_ptr(), matrix);

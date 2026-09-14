@@ -187,6 +187,13 @@ impl Sema {
         s.add_builtin("RandU32", Ty::I64, vec![], false);
         s.add_builtin("RandI16", Ty::I64, vec![], false);
         s.add_builtin("RandI64", Ty::I64, vec![], false);
+        s.add_builtin("RandU64", Ty::I64, vec![], false);
+        s.add_builtin(
+            "RoundI64",
+            Ty::I64,
+            vec![("num", Ty::I64), ("to", Ty::I64)],
+            false,
+        );
         s.add_builtin("Abs", Ty::I64, vec![("x", Ty::I64)], false);
         s.add_builtin("SqrI64", Ty::I64, vec![("x", Ty::I64)], false);
         s.add_builtin(
@@ -212,7 +219,39 @@ impl Sema {
             vec![("r", i64_ptr.clone())],
             false,
         );
-        s.add_builtin("Mat4x4IdentNew", i64_ptr.clone(), vec![], false);
+        s.add_builtin(
+            "Mat4x4IdentNew",
+            i64_ptr.clone(),
+            vec![(
+                "task",
+                Ty::Ptr(Box::new(Ty::Class {
+                    name: "CTask".into(),
+                    size: 80,
+                })),
+            )],
+            false,
+        );
+        s.add_builtin(
+            "Mat4x4TranslationAdd",
+            i64_ptr.clone(),
+            vec![
+                ("r", i64_ptr.clone()),
+                ("x", Ty::I64),
+                ("y", Ty::I64),
+                ("z", Ty::I64),
+            ],
+            false,
+        );
+        s.add_builtin(
+            "Mat4x4MulMat4x4Equ",
+            i64_ptr.clone(),
+            vec![
+                ("dst", i64_ptr.clone()),
+                ("m1", i64_ptr.clone()),
+                ("m2", i64_ptr.clone()),
+            ],
+            false,
+        );
         for name in ["Mat4x4RotX", "Mat4x4RotZ", "Mat4x4Scale"] {
             s.add_builtin(
                 name,
@@ -286,8 +325,14 @@ impl Sema {
         s.add_builtin("mp_cnt", Ty::I64, vec![], false);
         let task_ptr = Ty::Ptr(Box::new(Ty::Class {
             name: "CTask".into(),
-            size: 72,
+            size: 80,
         }));
+        s.add_builtin(
+            "Seed",
+            Ty::I64,
+            vec![("seed", Ty::I64), ("task", task_ptr.clone())],
+            false,
+        );
         s.add_builtin(
             "Spawn",
             task_ptr.clone(),
@@ -307,6 +352,12 @@ impl Sema {
             "Beep",
             Ty::U0,
             vec![("ona", Ty::I64), ("busy", Ty::I64)],
+            false,
+        );
+        s.add_builtin(
+            "Noise",
+            task_ptr.clone(),
+            vec![("ms", Ty::I64), ("min_ona", Ty::F64), ("max_ona", Ty::F64)],
             false,
         );
         s.add_builtin("Snd", Ty::U0, vec![("ona", Ty::I64)], false);
@@ -396,9 +447,19 @@ impl Sema {
             ],
             false,
         );
+        s.add_builtin(
+            "GetKey",
+            Ty::I64,
+            vec![
+                ("scan_code", Ty::Ptr(Box::new(Ty::I64))),
+                ("echo", Ty::I64),
+                ("raw_cursor", Ty::I64),
+            ],
+            false,
+        );
         let cdc_ptr = Ty::Ptr(Box::new(Ty::Class {
             name: "CDC".into(),
-            size: 64,
+            size: 76,
         }));
         let u8_ptr = Ty::Ptr(Box::new(Ty::U8));
         let i32_ptr = Ty::Ptr(Box::new(Ty::I32));
@@ -538,6 +599,23 @@ impl Sema {
             false,
         );
         s.add_builtin(
+            "Line",
+            Ty::I64,
+            vec![
+                ("aux", u8_ptr.clone()),
+                ("x1", Ty::I64),
+                ("y1", Ty::I64),
+                ("z1", Ty::I64),
+                ("x2", Ty::I64),
+                ("y2", Ty::I64),
+                ("z2", Ty::I64),
+                ("fp_plot", u8_ptr.clone()),
+                ("step", Ty::I64),
+                ("start", Ty::I64),
+            ],
+            false,
+        );
+        s.add_builtin(
             "GrLine3",
             Ty::I64,
             vec![
@@ -551,6 +629,37 @@ impl Sema {
                 ("step", Ty::I64),
                 ("start", Ty::I64),
             ],
+            false,
+        );
+        s.add_builtin(
+            "GrLine",
+            Ty::I64,
+            vec![
+                ("dc", cdc_ptr.clone()),
+                ("x1", Ty::I64),
+                ("y1", Ty::I64),
+                ("x2", Ty::I64),
+                ("y2", Ty::I64),
+                ("step", Ty::I64),
+                ("start", Ty::I64),
+            ],
+            false,
+        );
+        s.add_builtin(
+            "GrPlot3",
+            Ty::I64,
+            vec![
+                ("dc", cdc_ptr.clone()),
+                ("x", Ty::I64),
+                ("y", Ty::I64),
+                ("z", Ty::I64),
+            ],
+            false,
+        );
+        s.add_builtin(
+            "GrPeek",
+            Ty::I64,
+            vec![("dc", cdc_ptr.clone()), ("x", Ty::I64), ("y", Ty::I64)],
             false,
         );
         s.add_builtin(
@@ -649,6 +758,25 @@ impl Sema {
             false,
         );
         s.add_builtin(
+            "Sprite3Mat4x4B",
+            Ty::U0,
+            vec![
+                ("dc", cdc_ptr.clone()),
+                ("x", Ty::I64),
+                ("y", Ty::I64),
+                ("z", Ty::I64),
+                ("elems", u8_ptr.clone()),
+                ("m", i64_ptr.clone()),
+            ],
+            false,
+        );
+        s.add_builtin(
+            "Sprite2DC",
+            cdc_ptr.clone(),
+            vec![("elems", u8_ptr.clone())],
+            false,
+        );
+        s.add_builtin(
             "SpriteInterpolate",
             u8_ptr.clone(),
             vec![("t", Ty::F64), ("a", u8_ptr.clone()), ("b", u8_ptr.clone())],
@@ -677,14 +805,14 @@ impl Sema {
             "CTask".into(),
             ClassInfo {
                 name: "CTask".into(),
-                size: 72,
+                size: 80,
                 union_: false,
                 members: vec![
                     MemberInfo {
                         name: "addr".into(),
                         ty: Ty::Ptr(Box::new(Ty::Class {
                             name: "CTask".into(),
-                            size: 72,
+                            size: 80,
                         })),
                         offset: 0,
                         size: 8,
@@ -735,6 +863,12 @@ impl Sema {
                         name: "pix_top".into(),
                         ty: Ty::I64,
                         offset: 64,
+                        size: 8,
+                    },
+                    MemberInfo {
+                        name: "text_attr".into(),
+                        ty: Ty::I64,
+                        offset: 72,
                         size: 8,
                     },
                 ],
@@ -819,6 +953,13 @@ impl Sema {
                     ("transform", Ty::Ptr(Box::new(Ty::U8))),
                     ("body", Ty::Ptr(Box::new(Ty::U8))),
                     ("depth_buf", Ty::Ptr(Box::new(Ty::I32))),
+                    (
+                        "ls",
+                        Ty::Class {
+                            name: "CD3I32".into(),
+                            size: 12,
+                        },
+                    ),
                 ],
             ),
         );
@@ -963,7 +1104,7 @@ impl Sema {
         if let Some(f) = s.functions.get_mut("Fs") {
             f.ret = Ty::Ptr(Box::new(Ty::Class {
                 name: "CTask".into(),
-                size: 72,
+                size: 80,
             }));
         }
         if let Some(f) = s.functions.get_mut("Gs") {
@@ -1310,6 +1451,34 @@ impl Sema {
             }
             _ => {}
         }
+        self.rewrite_postfix_cast(expr);
+    }
+
+    fn rewrite_postfix_cast(&mut self, expr: &mut Expr) {
+        let ExprKind::Call { callee, args } = &expr.kind else {
+            return;
+        };
+        let [Some(arg)] = args.as_slice() else {
+            return;
+        };
+        let ExprKind::Ident(type_name) = &arg.kind else {
+            return;
+        };
+        if self.lookup_function(type_name).is_some() {
+            return;
+        }
+        if Ty::from_builtin(type_name).is_none() && !self.classes.contains_key(type_name) {
+            return;
+        }
+        if let ExprKind::Ident(name) = &callee.kind
+            && self.lookup_function(name).is_some()
+        {
+            return;
+        }
+        expr.kind = ExprKind::Cast {
+            expr: callee.clone(),
+            ty: TypeRef::Name(type_name.clone()),
+        };
     }
 
     pub fn err(&mut self, span: Span, msg: impl Into<String>) {
@@ -1356,9 +1525,12 @@ fn builtin_integer_constant(name: &str) -> Option<i64> {
         "SC_CURSOR_RIGHT" => 0x4d,
         "CH_ESC" => 0x1b,
         "CH_SHIFT_ESC" => 0x1c,
+        "CH_SPACE" => 0x20,
         "FONT_WIDTH" | "FONT_HEIGHT" => 8,
         "GR_WIDTH" => 640,
         "GR_HEIGHT" => 480,
+        "TEXT_ROWS" => 60,
+        "TEXT_COLS" => 80,
         "JIFFY_FREQ" => 1000,
         "MP_PROCESSORS_NUM" => 128,
         "U16_MAX" => 0xffff,

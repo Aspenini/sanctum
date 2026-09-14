@@ -37,3 +37,17 @@ pub fn rand_i16() -> i64 {
 pub fn rand_i64() -> i64 {
     next() as i64
 }
+
+pub fn rand_u64() -> i64 {
+    next() as i64
+}
+
+pub fn seed(seed: i64) {
+    STATE.with(|state| {
+        state.set(if seed == 0 {
+            0xC0FFEE_u64.wrapping_mul(0x9E37_79B9_7F4A_7C15)
+        } else {
+            seed as u64
+        })
+    });
+}

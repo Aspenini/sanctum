@@ -80,6 +80,7 @@ pub struct CTask {
     pub animate_task: *mut CTask,
     pub pix_left: i64,
     pub pix_top: i64,
+    pub text_attr: i64,
 }
 
 impl CTask {
@@ -94,6 +95,7 @@ impl CTask {
             animate_task: std::ptr::null_mut(),
             pix_left: 0,
             pix_top: 0,
+            text_attr: (BLACK << 4 | WHITE) as i64,
         }
     }
 }
@@ -196,6 +198,9 @@ pub struct CDC {
     pub transform: Option<unsafe extern "C" fn(*mut CDC, *mut i64, *mut i64, *mut i64)>,
     pub body: *mut u8,
     pub depth_buf: *mut i32,
+    // HolyC-visible light source (`CDC.ls`). TempleOS keeps this with the
+    // public color fields; Sanctum appends it so existing offsets stay put.
+    pub ls: CD3I32,
     // Host-side extension used to model TempleOS `CGrSym`. Appending these
     // fields preserves every HolyC-visible offset above.
     pub sym_x: i32,
@@ -204,15 +209,16 @@ pub struct CDC {
     pub sym_nx: f64,
     pub sym_ny: f64,
     pub sym_nz: f64,
-    // More host-only state used by TempleOS's default mesh lighting callback.
-    pub light_x: i32,
-    pub light_y: i32,
-    pub light_z: i32,
     pub dither_probability_u16: u32,
     // Host-only ownership markers. `DCAlias` shares the source image and
     // depth buffers, while every context owns its header and rotation matrix.
     pub owns_body: bool,
     pub owns_depth_buf: bool,
+    // Host-only extent markers for `Sprite2DC` / `DCF_RECORD_EXTENTS`.
+    pub min_x: i64,
+    pub max_x: i64,
+    pub min_y: i64,
+    pub max_y: i64,
 }
 
 #[cfg(test)]
@@ -241,7 +247,15 @@ mod tests {
         assert_eq!(offset_of!(CTask, pix_width), 8);
         assert_eq!(offset_of!(CTask, pix_left), 56);
         assert_eq!(offset_of!(CTask, pix_top), 64);
-        assert_eq!(size_of::<CTask>(), 72);
+        assert_eq!(offset_of!(CTask, text_attr), 72);
+        assert_eq!(size_of::<CTask>(), 80);
+    }
+
+    #[test]
+    fn device_context_exposes_light_source_after_depth_buf() {
+        assert_eq!(offset_of!(CDC, depth_buf), 56);
+        assert_eq!(offset_of!(CDC, ls), 64);
+        assert_eq!(offset_of!(CDC, ls) + offset_of!(CD3I32, z), 72);
     }
 
     #[test]

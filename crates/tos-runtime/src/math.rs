@@ -84,6 +84,37 @@ pub unsafe fn mat_translate(ptr: *mut i64, x: i64, y: i64, z: i64) -> *mut i64 {
     ptr
 }
 
+pub unsafe fn mat_translate_add(ptr: *mut i64, x: i64, y: i64, z: i64) -> *mut i64 {
+    let Some(matrix) = (unsafe { matrix_mut(ptr) }) else {
+        return ptr;
+    };
+    matrix[3] = matrix[3].wrapping_add(x.wrapping_shl(32));
+    matrix[7] = matrix[7].wrapping_add(y.wrapping_shl(32));
+    matrix[11] = matrix[11].wrapping_add(z.wrapping_shl(32));
+    matrix[15] = FIXED_ONE;
+    ptr
+}
+
+pub unsafe fn mat_mul_equ(dst: *mut i64, m1: *const i64, m2: *const i64) -> *mut i64 {
+    if dst.is_null() || m1.is_null() || m2.is_null() {
+        return dst;
+    }
+    let lhs = unsafe { &*m1.cast::<[i64; 16]>() };
+    let rhs = unsafe { &*m2.cast::<[i64; 16]>() };
+    let mut result = [0_i64; 16];
+    for row in 0..4 {
+        for col in 0..4 {
+            let mut sum = 0_i128;
+            for k in 0..4 {
+                sum += i128::from(lhs[row * 4 + k]) * i128::from(rhs[k * 4 + col]);
+            }
+            result[row * 4 + col] = (sum >> 32) as i64;
+        }
+    }
+    unsafe { *dst.cast::<[i64; 16]>() = result };
+    dst
+}
+
 pub unsafe fn mat_scale(ptr: *mut i64, scale: f64) -> *mut i64 {
     let Some(matrix) = (unsafe { matrix_mut(ptr) }) else {
         return ptr;

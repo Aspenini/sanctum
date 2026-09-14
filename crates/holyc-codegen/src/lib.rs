@@ -825,6 +825,8 @@ impl FnCg<'_, '_> {
                 .bcx
                 .ins()
                 .f64const(Ieee64::with_float(std::f64::consts::TAU)),
+            ("Line", 8) | ("GrLine", 5) | ("GrLine3", 7) => self.bcx.ins().iconst(types::I64, 1),
+            ("Line", 9) | ("GrLine", 6) | ("GrLine3", 8) => self.bcx.ins().iconst(types::I64, 0),
             _ => self.zero(clif_ty(ty, self.ptr_ty)),
         }
     }
@@ -1029,6 +1031,23 @@ impl FnCg<'_, '_> {
             self.bcx.ins().fcvt_to_sint_sat(target, value)
         } else {
             value
+        }
+    }
+
+    fn bitcast_or_coerce(&mut self, value: Value, target: Type) -> Value {
+        let source = self.value_ty(value);
+        if source == target {
+            value
+        } else if source == types::F64 && target == types::I64 {
+            self.bcx
+                .ins()
+                .bitcast(types::I64, MemFlagsData::new(), value)
+        } else if source == types::I64 && target == types::F64 {
+            self.bcx
+                .ins()
+                .bitcast(types::F64, MemFlagsData::new(), value)
+        } else {
+            self.coerce_to(value, target)
         }
     }
 
@@ -1857,7 +1876,11 @@ impl FnCg<'_, '_> {
                 let (ptr, ty, off) = self.place(expr)?;
                 self.read_place(ptr, &ty, off)
             }
-            ExprKind::Cast { expr, .. } => self.expr(expr),
+            ExprKind::Cast { expr, ty } => {
+                let value = self.expr(expr)?;
+                let target = clif_ty(&resolve_ty(ty, &self.sema.classes), self.ptr_ty);
+                Ok(self.bitcast_or_coerce(value, target))
+            }
             ExprKind::Sizeof(ty) => {
                 let t = resolve_ty(ty, &self.sema.classes);
                 Ok(self.bcx.ins().iconst(types::I64, t.size()))
@@ -2219,13 +2242,18 @@ impl FnCg<'_, '_> {
             return self.call_gr_print(args);
         }
         let id = self.func_id(name)?;
-        let params = self
+        let (params, variadic) = self
             .lookup_fn(name)
-            .map(|info| info.params.clone())
+            .map(|info| (info.params.clone(), info.variadic))
             .unwrap_or_default();
         let local = self.module.declare_func_in_func(id, self.bcx.func);
         let mut vals = Vec::new();
-        for (index, a) in args.iter().enumerate() {
+        let used = if variadic {
+            args.len()
+        } else {
+            args.len().min(params.len())
+        };
+        for (index, a) in args.iter().take(used).enumerate() {
             if let Some(e) = a {
                 let value = self.expr(e)?;
                 let value = params.get(index).map_or(value, |(_, ty)| {
@@ -2240,7 +2268,7 @@ impl FnCg<'_, '_> {
                 vals.push(self.missing_arg(name, index, &ty));
             }
         }
-        for (index, (_, ty)) in params.iter().enumerate().skip(args.len()) {
+        for (index, (_, ty)) in params.iter().enumerate().skip(used) {
             vals.push(self.missing_arg(name, index, ty));
         }
         let call = self.bcx.ins().call(local, &vals);
