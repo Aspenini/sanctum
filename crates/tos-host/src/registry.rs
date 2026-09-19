@@ -7,8 +7,10 @@ use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Component, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Mutex, OnceLock};
 
 static PERSISTENT: AtomicBool = AtomicBool::new(false);
+static DATA_ROOT: OnceLock<Mutex<Option<PathBuf>>> = OnceLock::new();
 
 thread_local! {
     static MEMORY: RefCell<HashMap<String, String>> = RefCell::new(HashMap::new());
@@ -30,6 +32,13 @@ pub struct GlobalBinding<'a> {
 
 pub fn set_persistent(persistent: bool) {
     PERSISTENT.store(persistent, Ordering::Release);
+}
+
+pub fn set_data_root(root: Option<PathBuf>) {
+    *DATA_ROOT
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .expect("registry data root poisoned") = root;
 }
 
 pub fn reset() {
@@ -58,6 +67,14 @@ pub fn bind(bindings: &[GlobalBinding<'_>]) {
 }
 
 fn registry_root() -> Option<PathBuf> {
+    if let Some(path) = DATA_ROOT
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .expect("registry data root poisoned")
+        .clone()
+    {
+        return Some(path.join("registry"));
+    }
     if let Some(path) = std::env::var_os("SANCTUM_DATA_DIR") {
         return Some(PathBuf::from(path).join("registry"));
     }
@@ -354,5 +371,16 @@ mod tests {
     fn rejects_registry_path_traversal() {
         assert!(registry_file("../outside").is_none());
         assert!(registry_file("TempleOS/Talons").is_some());
+    }
+
+    #[test]
+    fn explicit_data_root_controls_persistent_save_location() {
+        let root = std::env::temp_dir().join("sanctum-registry-root-test");
+        set_data_root(Some(root.clone()));
+        assert_eq!(
+            registry_file("TempleOS/Talons"),
+            Some(root.join("registry/TempleOS/Talons.HC"))
+        );
+        set_data_root(None);
     }
 }

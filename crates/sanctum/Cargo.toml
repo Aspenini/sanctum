@@ -10,7 +10,7 @@ name = "sanctum"
 path = "src/main.rs"
 
 [lib]
-name = "sanctum"
+name = "sanctum_core"
 path = "src/lib.rs"
 crate-type = ["rlib", "cdylib"]
 

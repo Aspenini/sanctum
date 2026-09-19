@@ -4,7 +4,7 @@
 //! `onActivityResult` into JNI. Kotlin copies the picked tree or file into
 //! app storage so HolyC sees ordinary filesystem paths.
 
-use jni::objects::{JClass, JObject, JString};
+use jni::objects::{JObject, JString};
 use jni::sys::{jint, jobject};
 use jni::{JNIEnv, JavaVM};
 use std::cell::RefCell;
@@ -55,6 +55,8 @@ fn start_picker(kind: PickerKind) -> Result<(), String> {
     let mut env = vm
         .attach_current_thread()
         .map_err(|error| error.to_string())?;
+    // `activity_as_ptr` is owned by Android. `JObject` is only used as a
+    // borrowed JNI handle for the duration of these calls.
     let activity = unsafe { JObject::from_raw(app.activity_as_ptr() as jobject) };
     match kind {
         PickerKind::LibraryFolder | PickerKind::TempleOsFolder => {
@@ -76,7 +78,6 @@ fn start_picker(kind: PickerKind) -> Result<(), String> {
             .map_err(|error| error.to_string())?;
         }
     }
-    std::mem::forget(activity);
     Ok(())
 }
 
@@ -97,7 +98,7 @@ fn deliver(path: Option<PathBuf>) {
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_dev_sanctum_app_SlintActivity_nativeOnPicked(
     mut env: JNIEnv,
-    _class: JClass,
+    _activity: JObject,
     _request_code: jint,
     path: JString,
 ) {

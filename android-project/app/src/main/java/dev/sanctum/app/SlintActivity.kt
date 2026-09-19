@@ -11,7 +11,7 @@ import java.io.FileOutputStream
 class SlintActivity : NativeActivity() {
     companion object {
         init {
-            System.loadLibrary("sanctum")
+            System.loadLibrary("sanctum_core")
         }
 
         const val REQ_FOLDER = 1
@@ -88,10 +88,11 @@ class SlintActivity : NativeActivity() {
         for (child in src.listFiles()) {
             val childName = safeName(child.name ?: continue)
             if (child.isDirectory) {
-                total = copyTreeInto(child, File(dest, childName), total)
+                val childDest = uniqueDir(File(dest, childName))
+                total = copyTreeInto(child, childDest, total)
                 if (total < 0) return -1
             } else if (child.isFile) {
-                val out = File(dest, childName)
+                val out = uniqueFile(File(dest, childName))
                 total = copyUriToFile(child.uri, out, total)
                 if (total < 0) return -1
             }

@@ -345,14 +345,9 @@ impl InputSettings {
         if let Some(stock) = default_presets()
             .into_iter()
             .find(|preset| preset.name == name)
+            && let Some(current) = self.presets.iter_mut().find(|preset| preset.name == name)
         {
-            if let Some(current) = self
-                .presets
-                .iter_mut()
-                .find(|preset| preset.name == name)
-            {
-                *current = stock;
-            }
+            *current = stock;
         }
     }
 }
@@ -723,6 +718,12 @@ pub struct InputRuntime {
     pub last_capture: Option<String>,
 }
 
+impl Default for InputRuntime {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl InputRuntime {
     pub fn new() -> Self {
         Self {
@@ -783,13 +784,13 @@ impl InputRuntime {
         )
     }
 
-    pub fn overlay_release(&mut self, id: &str) -> Vec<InputEvent> {
-        self.held.remove(&format!("overlay:{id}"));
-        if id == "mouse" {
-            self.mouse_left = false;
-            return vec![self.mouse_event()];
-        }
-        Vec::new()
+    pub fn overlay_release(&mut self, preset: &InputPreset, id: &str) -> Vec<InputEvent> {
+        let hold_id = format!("overlay:{id}");
+        self.held.remove(&hold_id);
+        let Some(control) = preset.overlay.iter().find(|item| item.id == id) else {
+            return Vec::new();
+        };
+        self.apply_control(&hold_id, &control.action, None, false, 1, 1)
     }
 
     pub fn repeats(&mut self) -> Vec<InputEvent> {
@@ -858,13 +859,17 @@ impl InputRuntime {
             }
         }
         for source in released {
-            self.held.remove(&format!("pad:{source:?}"));
-            if source == GamepadSource::RightTrigger {
-                self.mouse_left = false;
-                events.push(self.mouse_event());
-            } else if source == GamepadSource::LeftTrigger {
-                self.mouse_right = false;
-                events.push(self.mouse_event());
+            let hold_id = format!("pad:{source:?}");
+            self.held.remove(&hold_id);
+            if let Some(map) = preset.gamepad.iter().find(|item| item.source == source) {
+                events.extend(self.apply_control(
+                    &hold_id,
+                    &map.action,
+                    None,
+                    false,
+                    frame_width,
+                    frame_height,
+                ));
             }
         }
         events.extend(self.apply_stick(
@@ -922,12 +927,14 @@ impl InputRuntime {
     ) -> Vec<InputEvent> {
         match action {
             Action::MouseMove => {
-                let (nx, ny) = pos.unwrap_or((0.5, 0.5));
-                self.mouse_x = ((nx.clamp(0.0, 1.0) as f64) * (frame_width.saturating_sub(1) as f64))
-                    .round() as i64;
-                self.mouse_y = ((ny.clamp(0.0, 1.0) as f64)
-                    * (frame_height.saturating_sub(1) as f64))
-                    .round() as i64;
+                if let Some((nx, ny)) = pos {
+                    self.mouse_x = ((nx.clamp(0.0, 1.0) as f64)
+                        * (frame_width.saturating_sub(1) as f64))
+                        .round() as i64;
+                    self.mouse_y = ((ny.clamp(0.0, 1.0) as f64)
+                        * (frame_height.saturating_sub(1) as f64))
+                        .round() as i64;
+                }
                 if hold_id.contains("mouse") || hold_id.contains("overlay:mouse") {
                     self.mouse_left = pressed;
                 }
@@ -942,6 +949,10 @@ impl InputRuntime {
                 vec![self.mouse_event()]
             }
             Action::Key { .. } | Action::Dpad { .. } => {
+                if !pressed {
+                    self.held.remove(hold_id);
+                    return Vec::new();
+                }
                 let dir = pos.and_then(|(x, y)| dpad_direction(x, y));
                 if let Some((ch, scan)) = action_key(action, dir) {
                     self.held.insert(
@@ -992,11 +1003,7 @@ impl InputRuntime {
     }
 
     pub fn bind_gamepad(preset: &mut InputPreset, source: GamepadSource, action: Action) {
-        if let Some(existing) = preset
-            .gamepad
-            .iter_mut()
-            .find(|item| item.source == source)
-        {
+        if let Some(existing) = preset.gamepad.iter_mut().find(|item| item.source == source) {
             existing.action = action;
         } else {
             preset.gamepad.push(GamepadMap { source, action });
@@ -1057,6 +1064,51 @@ mod tests {
                 .iter()
                 .any(|event| matches!(event, InputEvent::Key(ch, scan) if *ch == b' ' as i64 && *scan == 0x39))
         );
+    }
+
+    #[test]
+    fn releasing_a_remapped_overlay_button_releases_the_mouse() {
+        let mut preset = templeos_preset();
+        assert!(InputRuntime::bind_overlay_action(
+            &mut preset,
+            "a",
+            Action::MouseRight
+        ));
+        let mut runtime = InputRuntime {
+            gilrs: None,
+            ..InputRuntime::new()
+        };
+
+        let pressed = runtime.overlay_press(&preset, "a", 0.5, 0.5, 640, 480);
+        assert!(matches!(
+            pressed.as_slice(),
+            [InputEvent::Mouse { right: true, .. }]
+        ));
+        let released = runtime.overlay_release(&preset, "a");
+        assert!(matches!(
+            released.as_slice(),
+            [InputEvent::Mouse { right: false, .. }]
+        ));
+    }
+
+    #[test]
+    fn releasing_the_mouse_pad_keeps_its_last_position() {
+        let preset = templeos_preset();
+        let mut runtime = InputRuntime {
+            gilrs: None,
+            ..InputRuntime::new()
+        };
+        runtime.overlay_press(&preset, "mouse", 0.75, 0.25, 640, 480);
+        let released = runtime.overlay_release(&preset, "mouse");
+        assert!(matches!(
+            released.as_slice(),
+            [InputEvent::Mouse {
+                x: 479,
+                y: 120,
+                left: false,
+                ..
+            }]
+        ));
     }
 
     #[test]

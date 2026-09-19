@@ -1,6 +1,6 @@
-pub mod app;
 #[cfg(all(target_os = "android", feature = "android-backend"))]
 pub mod android_picker;
+pub mod app;
 pub mod controls;
 pub mod model;
 pub mod protocol;

@@ -41,6 +41,12 @@ pub struct RunnerSession {
     stopping_since: Option<Instant>,
 }
 
+type AttachedStream = (
+    Arc<Mutex<TcpStream>>,
+    mpsc::Receiver<RunnerEvent>,
+    mpsc::Sender<RunnerEvent>,
+);
+
 impl RunnerSession {
     pub fn spawn(entry: &Path, templeos_root: Option<&Path>, data_root: &Path) -> io::Result<Self> {
         if cfg!(target_os = "android") {
@@ -180,10 +186,16 @@ impl RunnerSession {
         let finished = match &mut self.proc {
             RunnerProc::Child(child) => child.try_wait()?.is_some(),
             RunnerProc::Thread { done, handle } => {
-                done.load(Ordering::Acquire) || handle.as_ref().is_some_and(|item| item.is_finished())
+                done.load(Ordering::Acquire)
+                    || handle.as_ref().is_some_and(|item| item.is_finished())
             }
         };
         if finished {
+            if let RunnerProc::Thread { handle, .. } = &mut self.proc
+                && let Some(handle) = handle.take()
+            {
+                let _ = handle.join();
+            }
             return Ok(false);
         }
         if self
@@ -202,13 +214,35 @@ impl RunnerSession {
                 let _ = child.kill();
                 let _ = child.wait();
             }
-            RunnerProc::Thread { handle, .. } => {
-                let _ = protocol::write_message(
-                    &mut *self.writer.lock().unwrap(),
-                    protocol::STOP,
-                    &[],
+            RunnerProc::Thread { done, handle } => {
+                if let Ok(mut writer) = self.writer.lock() {
+                    let _ = protocol::write_message(&mut *writer, protocol::STOP, &[]);
+                }
+
+                let timeout = Duration::from_secs(2).saturating_sub(
+                    self.stopping_since
+                        .map_or(Duration::ZERO, |started| started.elapsed()),
                 );
-                let _ = handle.take();
+                let deadline = Instant::now() + timeout;
+                while !done.load(Ordering::Acquire)
+                    && !handle.as_ref().is_some_and(|item| item.is_finished())
+                    && Instant::now() < deadline
+                {
+                    thread::sleep(Duration::from_millis(10));
+                }
+
+                if done.load(Ordering::Acquire)
+                    || handle.as_ref().is_some_and(|item| item.is_finished())
+                {
+                    if let Some(handle) = handle.take() {
+                        let _ = handle.join();
+                    }
+                } else {
+                    // Rust cannot forcibly terminate a thread. Detach only as
+                    // the last resort after the same two-second grace period
+                    // used by the desktop child-process runner.
+                    let _ = handle.take();
+                }
             }
         }
     }
@@ -335,13 +369,7 @@ fn accept_runner(
     Ok(stream)
 }
 
-fn attach_stream(
-    stream: TcpStream,
-) -> io::Result<(
-    Arc<Mutex<TcpStream>>,
-    mpsc::Receiver<RunnerEvent>,
-    mpsc::Sender<RunnerEvent>,
-)> {
+fn attach_stream(stream: TcpStream) -> io::Result<AttachedStream> {
     let (tx, events) = mpsc::channel();
     let reader = stream.try_clone()?;
     let event_tx = tx.clone();
@@ -364,7 +392,13 @@ pub fn run_child(entry: PathBuf) -> Result<(), String> {
     let token = std::env::var("SANCTUM_RUNNER_TOKEN").map_err(|_| "missing runner token")?;
     let templeos_root = std::env::var_os("SANCTUM_TEMPLEOS_ROOT").map(PathBuf::from);
     let data_root = std::env::var_os("SANCTUM_DATA_DIR").map(PathBuf::from);
-    run_session(entry, address, token, templeos_root, data_root.unwrap_or_default())
+    run_session(
+        entry,
+        address,
+        token,
+        templeos_root,
+        data_root.unwrap_or_default(),
+    )
 }
 
 fn run_session(
@@ -374,9 +408,9 @@ fn run_session(
     templeos_root: Option<PathBuf>,
     data_root: PathBuf,
 ) -> Result<(), String> {
-    if !data_root.as_os_str().is_empty() {
-        unsafe { std::env::set_var("SANCTUM_DATA_DIR", &data_root) };
-    }
+    templeos_compat::host::set_data_root(
+        (!data_root.as_os_str().is_empty()).then_some(data_root.clone()),
+    );
     let stream = TcpStream::connect(address).map_err(|error| error.to_string())?;
     stream
         .set_nodelay(true)

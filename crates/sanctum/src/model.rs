@@ -186,7 +186,10 @@ impl StoragePaths {
     #[cfg(target_os = "android")]
     fn detect_android() -> io::Result<Self> {
         let root = ANDROID_DATA_DIR.get().cloned().ok_or_else(|| {
-            io::Error::new(io::ErrorKind::NotFound, "Android data directory unavailable")
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                "Android data directory unavailable",
+            )
         })?;
         Ok(Self {
             config: root.join("sanctum.json"),

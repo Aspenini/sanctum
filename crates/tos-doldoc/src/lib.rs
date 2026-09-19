@@ -31,6 +31,12 @@ struct BinHeader {
     size: usize,
 }
 
+// Text-mode copies can lose a few control bytes from an embedded sprite, but
+// a claimed payload vastly larger than the entire remaining file is a false
+// header match. Keep repair bounded so corrupt input cannot trigger enormous
+// zero-filled allocations.
+const MAX_MISSING_BIN_BYTES: usize = 4 * 1024;
+
 fn u32_at(bytes: &[u8], offset: usize) -> Option<u32> {
     Some(u32::from_le_bytes(
         bytes.get(offset..offset + 4)?.try_into().ok()?,
@@ -45,6 +51,7 @@ fn header_at(bytes: &[u8], offset: usize) -> Option<BinHeader> {
     let first_sprite_type = *bytes.get(offset + 16)? & 0x7f;
     if flags != 0
         || size == 0
+        || size > bytes.len().saturating_add(MAX_MISSING_BIN_BYTES)
         || use_count == 0
         || use_count > 64
         || first_sprite_type >= 30
@@ -548,6 +555,13 @@ mod tests {
         assert_eq!(bins.len(), 2);
         assert_eq!(bins[0].bytes, sprite1);
         assert_eq!(bins[1].bytes, [1, 7, 0]);
+    }
+
+    #[test]
+    fn rejects_implausibly_large_truncated_bin() {
+        let mut tail = header(1, u32::MAX - 74, 1);
+        tail.push(1);
+        assert!(parse_embedded_bins(&tail, &[1]).is_empty());
     }
 
     #[test]

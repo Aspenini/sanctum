@@ -1,19 +1,11 @@
-import org.gradle.internal.os.OperatingSystem
-
 plugins {
     alias(libs.plugins.android.application)
-    alias(libs.plugins.kotlin.android)
-}
-
-kotlin {
-    compilerOptions {
-        jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)
-    }
 }
 
 android {
     namespace = "dev.sanctum.app"
     compileSdk = 35
+    ndkVersion = "30.0.16248370"
 
     defaultConfig {
         applicationId = "dev.sanctum.app"
@@ -53,17 +45,23 @@ val ndkBuild = tasks.register<Exec>("ndkBuild") {
     val repoRoot = rootDir.parentFile
     workingDir = repoRoot
     val profile = if (isRelease) "release" else "dev"
+    val userHome = System.getProperty("user.home")
+    val hostOs = System.getProperty("os.name").lowercase()
+    val defaultSdkDir = when {
+        hostOs.contains("win") -> "${System.getenv("LOCALAPPDATA")}/Android/Sdk"
+        hostOs.contains("mac") -> "$userHome/Library/Android/sdk"
+        else -> "$userHome/Android/Sdk"
+    }
+    val sdkDir = System.getenv("ANDROID_HOME")
+        ?: System.getenv("ANDROID_SDK_ROOT")
+        ?: defaultSdkDir
     val ndkDir = System.getenv("ANDROID_NDK_ROOT")
         ?: System.getenv("ANDROID_NDK_HOME")
-        ?: "${System.getenv("ANDROID_HOME") ?: System.getenv("LOCALAPPDATA") + "/Android/Sdk"}/ndk/30.0.16248370"
+        ?: "$sdkDir/ndk/30.0.16248370"
     environment("ANDROID_NDK_HOME", ndkDir)
     environment("ANDROID_NDK_ROOT", ndkDir)
-    environment(
-        "ANDROID_HOME",
-        System.getenv("ANDROID_HOME")
-            ?: "${System.getenv("LOCALAPPDATA")}\\Android\\Sdk",
-    )
-    environment("JAVA_HOME", System.getenv("JAVA_HOME") ?: "C:\\Program Files\\Android\\Android Studio\\jbr")
+    environment("ANDROID_HOME", sdkDir)
+    environment("JAVA_HOME", System.getenv("JAVA_HOME") ?: System.getProperty("java.home"))
     commandLine(
         "cargo", "apk", "--",
         "build",
@@ -75,11 +73,13 @@ val ndkBuild = tasks.register<Exec>("ndkBuild") {
     )
 }
 
-val copyJniLib = tasks.register<Copy>("copyJniLib") {
+// Sync, rather than merely copy, so a library rename cannot leave a stale
+// native binary in the APK.
+val copyJniLib = tasks.register<Sync>("copyJniLib") {
     val isRelease = gradle.startParameter.taskNames.any { it.contains("Release", ignoreCase = true) }
     val profile = if (isRelease) "release" else "debug"
     dependsOn(ndkBuild)
-    from(rootDir.parentFile.resolve("target/aarch64-linux-android/$profile/libsanctum.so"))
+    from(rootDir.parentFile.resolve("target/aarch64-linux-android/$profile/libsanctum_core.so"))
     into("$projectDir/src/main/jniLibs/arm64-v8a")
 }
 

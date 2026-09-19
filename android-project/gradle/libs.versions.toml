@@ -1,6 +1,5 @@
 [versions]
-agp = "8.7.3"
-kotlin = "2.0.21"
+agp = "9.0.1"
 coreKtx = "1.15.0"
 documentfile = "1.0.1"
 
@@ -10,4 +9,3 @@ androidx-documentfile = { group = "androidx.documentfile", name = "documentfile"
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }
-kotlin-android = { id = "org.jetbrains.kotlin.android", version.ref = "kotlin" }

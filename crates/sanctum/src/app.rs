@@ -217,12 +217,7 @@ impl AppState {
                         let _ = runner.send_key(ch, scan);
                     }
                 }
-                InputEvent::Mouse {
-                    x,
-                    y,
-                    left,
-                    right,
-                } => {
+                InputEvent::Mouse { x, y, left, right } => {
                     if let Some(runner) = &self.runner {
                         let _ = runner.send_mouse(x, y, left, right);
                     }
@@ -1092,17 +1087,15 @@ fn install_main_callbacks(
         let shared = state.clone();
         ui.on_overlay_released(move |id| {
             let mut state = shared.borrow_mut();
-            let events = state.input.overlay_release(id.as_str());
+            let preset = state.config.input.active().clone();
+            let events = state.input.overlay_release(&preset, id.as_str());
             state.apply_input(events);
         });
         let weak = ui.as_weak();
         let shared = state.clone();
         ui.on_overlay_dragged(move |id, x, y| {
             let mut state = shared.borrow_mut();
-            let landscape = weak
-                .upgrade()
-                .map(|ui| ui.get_landscape())
-                .unwrap_or(false);
+            let landscape = weak.upgrade().map(|ui| ui.get_landscape()).unwrap_or(false);
             let size = state
                 .config
                 .input
@@ -1430,7 +1423,12 @@ fn sync_controls(ui: &MainWindow, state: &Rc<RefCell<AppState>>) {
         .iter()
         .map(|item| BindChoice {
             id: format!("gamepad:{}", item.source.id()).into(),
-            label: format!("{} → {}", item.source.label(), crate::controls::action_label(&item.action)).into(),
+            label: format!(
+                "{} → {}",
+                item.source.label(),
+                crate::controls::action_label(&item.action)
+            )
+            .into(),
         })
         .collect();
     ui.set_gamepad_choices(ModelRc::new(VecModel::from(pads)));
@@ -1456,19 +1454,19 @@ fn sync_controls(ui: &MainWindow, state: &Rc<RefCell<AppState>>) {
             label: "Mouse right".into(),
         },
     ];
-    bind_choices.extend(crate::controls::named_keys().into_iter().map(|key| BindChoice {
-        id: key.name.into(),
-        label: format!("Key {}", key.label).into(),
-    }));
-    ui.set_bind_choices(ModelRc::new(VecModel::from(bind_choices)));
-    ui.set_bind_title(
-        state
-            .bind_target
-            .as_deref()
-            .unwrap_or("Bind")
-            .into(),
+    bind_choices.extend(
+        crate::controls::named_keys()
+            .into_iter()
+            .map(|key| BindChoice {
+                id: key.name.into(),
+                label: format!("Key {}", key.label).into(),
+            }),
     );
-    ui.set_capture_hint("Choose a TempleOS action. Gamepad buttons follow this preset instantly.".into());
+    ui.set_bind_choices(ModelRc::new(VecModel::from(bind_choices)));
+    ui.set_bind_title(state.bind_target.as_deref().unwrap_or("Bind").into());
+    ui.set_capture_hint(
+        "Choose a TempleOS action. Gamepad buttons follow this preset instantly.".into(),
+    );
 }
 
 fn sync_main_only(ui: &MainWindow, state: &Rc<RefCell<AppState>>) {

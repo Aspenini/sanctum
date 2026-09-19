@@ -148,6 +148,15 @@ pub fn set_file_roots(project: Option<std::path::PathBuf>, system: Option<std::p
     fs::set_roots(project, system);
 }
 
+/// Select the Sanctum-owned directory used for persistent registry saves.
+///
+/// Passing `None` restores the platform/environment fallback. This explicit
+/// configuration avoids mutating process environment variables when Sanctum
+/// runs HolyC on a worker thread (notably on Android).
+pub fn set_data_root(root: Option<std::path::PathBuf>) {
+    registry::set_data_root(root);
+}
+
 pub fn bind_globals(bindings: &[GlobalBinding<'_>]) {
     registry::bind(bindings);
     if let Some(music) = bindings.iter().find(|binding| binding.name == "music") {
