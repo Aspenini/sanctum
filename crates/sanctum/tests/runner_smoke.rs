@@ -1,4 +1,4 @@
-use sanctum::runner::{RunnerEvent, RunnerSession};
+use sanctum_core::runner::{RunnerEvent, RunnerSession};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 

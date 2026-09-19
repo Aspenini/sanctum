@@ -1,7 +1,7 @@
 # Sanctum
 
 Sanctum is a Rust workspace for running TempleOS HolyC programs directly on
-Windows, Linux, and macOS. It has three related layers:
+Windows, Linux, macOS, and Android. It has three related layers:
 
 - **`holycc`** is the HolyC compiler command-line tool (backed by the `holyc`
   Rust crate). It parses, checks,
@@ -52,6 +52,25 @@ cargo run -p holyc --bin holycc -- --run tests/holyc/hello.HC
 
 Without `--run`, `holycc` performs compile-only validation. The CLI remains
 independent of the Sanctum GUI.
+
+## Build for Android
+
+The Android shell lives in `android-project` and packages the same Slint UI,
+compiler, and compatibility runtime into an ARM64 APK. Install Android SDK 35,
+NDK `30.0.16248370`, the Rust `aarch64-linux-android` target, and `cargo-apk`,
+then run:
+
+```text
+cd android-project
+./gradlew assembleDebug
+```
+
+Set `ANDROID_HOME` to the installed Android SDK before invoking Gradle.
+`ANDROID_NDK_ROOT`/`ANDROID_NDK_HOME` may override the NDK selected from that
+SDK; otherwise the build uses the pinned NDK version above. The APK is written
+under `android-project/app/build/outputs/apk/debug`. Android cannot spawn a child
+executable, so its runner uses the same authenticated IPC protocol over an
+in-process worker thread; desktop runners remain isolated child processes.
 
 The implemented language/runtime subset includes preprocessing, TempleOS
 operator precedence, packed classes and unions, globals, pointers, callbacks,

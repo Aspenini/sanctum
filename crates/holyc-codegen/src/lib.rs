@@ -8,6 +8,8 @@ use cranelift_codegen::ir::{
 };
 use cranelift_codegen::settings::{self, Configurable};
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
+#[cfg(target_arch = "x86_64")]
+use cranelift_jit::{ArenaMemoryProvider, BranchProtection, JITMemoryKind, JITMemoryProvider};
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{
     DataDescription, DataId, FuncId, Linkage, Module as _, default_libcall_names,
@@ -15,6 +17,8 @@ use cranelift_module::{
 use holyc_ast::*;
 use holyc_sema::{ClassInfo, FunctionInfo, Sema, resolve_ty};
 use std::collections::{HashMap, HashSet};
+#[cfg(target_arch = "x86_64")]
+use std::io;
 use std::mem;
 use thiserror::Error;
 
@@ -46,6 +50,66 @@ pub struct JitGlobal {
     pub name: String,
     pub address: *mut u8,
     pub size: usize,
+}
+
+#[cfg(target_arch = "x86_64")]
+struct BoundedJitMemory {
+    arena: ArenaMemoryProvider,
+    requested: usize,
+    allocations: usize,
+    recent: Vec<(usize, u64, &'static str)>,
+}
+
+#[cfg(target_arch = "x86_64")]
+impl BoundedJitMemory {
+    fn new(size: usize) -> Result<Self, CodegenError> {
+        let arena = ArenaMemoryProvider::new_with_size(size).map_err(|error| {
+            CodegenError::Cranelift(format!("unable to reserve JIT arena: {error}"))
+        })?;
+        Ok(Self {
+            arena,
+            requested: 0,
+            allocations: 0,
+            recent: Vec::new(),
+        })
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+impl JITMemoryProvider for BoundedJitMemory {
+    fn allocate(&mut self, size: usize, align: u64, kind: JITMemoryKind) -> io::Result<*mut u8> {
+        let kind_name = match kind {
+            JITMemoryKind::Executable => "executable",
+            JITMemoryKind::Writable => "writable",
+            JITMemoryKind::ReadOnly => "read-only",
+        };
+        self.requested = self.requested.saturating_add(size);
+        self.allocations += 1;
+        self.recent.push((size, align, kind_name));
+        if self.recent.len() > 8 {
+            self.recent.remove(0);
+        }
+        self.arena.allocate(size, align, kind).map_err(|error| {
+            io::Error::new(
+                error.kind(),
+                format!(
+                    "{error}; {} bytes requested across {} allocations; recent requests: {:?}",
+                    self.requested, self.allocations, self.recent
+                ),
+            )
+        })
+    }
+
+    unsafe fn free_memory(&mut self) {
+        unsafe { self.arena.free_memory() };
+    }
+
+    fn finalize(
+        &mut self,
+        branch_protection: BranchProtection,
+    ) -> cranelift_module::ModuleResult<()> {
+        self.arena.finalize(branch_protection)
+    }
 }
 
 impl JitProgram {
@@ -112,6 +176,9 @@ pub fn compile_jit(
     symbols: &[(&str, *const u8)],
     binary_resources: &HashMap<(u32, i64), Vec<u8>>,
 ) -> Result<JitProgram, CodegenError> {
+    #[cfg(target_arch = "x86_64")]
+    const JIT_ARENA_SIZE: usize = 128 * 1024 * 1024;
+
     fn collect_global_order(
         stmt: &Stmt,
         globals: &HashMap<String, Ty>,
@@ -146,6 +213,8 @@ pub fn compile_jit(
         .map_err(|e| CodegenError::Msg(e.to_string()))?;
 
     let mut builder = JITBuilder::with_isa(isa, default_libcall_names());
+    #[cfg(target_arch = "x86_64")]
+    builder.memory_provider(Box::new(BoundedJitMemory::new(JIT_ARENA_SIZE)?));
     for (name, ptr) in symbols {
         // JITBuilder::symbol takes a raw pointer to the host function.
         builder.symbol(*name, *ptr);
@@ -770,9 +839,27 @@ impl FnCg<'_, '_> {
             .func_ids
             .get(name)
             .ok_or_else(|| CodegenError::Msg(format!("missing runtime helper `{name}`")))?;
-        let local = self.module.declare_func_in_func(id, self.bcx.func);
-        let call = self.bcx.ins().call(local, args);
-        Ok(self.bcx.inst_results(call).to_vec())
+        Ok(self.call_function(id, args))
+    }
+
+    /// Emit calls through an absolute function address.
+    ///
+    /// Cranelift's x86 direct-call relocation is limited to a signed 32-bit
+    /// displacement. Windows ASLR can place host functions or separately
+    /// allocated JIT functions more than 2 GiB apart, so neither imported nor
+    /// HolyC-to-HolyC calls may rely on that relocation.
+    fn call_function(&mut self, id: FuncId, args: &[Value]) -> Vec<Value> {
+        let signature = self
+            .module
+            .declarations()
+            .get_function_decl(id)
+            .signature
+            .clone();
+        let function = self.module.declare_func_in_func(id, self.bcx.func);
+        let address = self.bcx.ins().func_addr(self.ptr_ty, function);
+        let signature = self.bcx.import_signature(signature);
+        let call = self.bcx.ins().call_indirect(signature, address, args);
+        self.bcx.inst_results(call).to_vec()
     }
 
     fn emit_unwind_return(&mut self) {
@@ -1271,10 +1358,9 @@ impl FnCg<'_, '_> {
             .func_ids
             .get("MemSet")
             .ok_or_else(|| CodegenError::Msg("MemSet missing".into()))?;
-        let local = self.module.declare_func_in_func(id, self.bcx.func);
         let v = self.bcx.ins().iconst(types::I64, val);
         let nv = self.bcx.ins().iconst(types::I64, n);
-        self.bcx.ins().call(local, &[ptr, v, nv]);
+        self.call_function(id, &[ptr, v, nv]);
         self.after_call()?;
         Ok(())
     }
@@ -1284,9 +1370,8 @@ impl FnCg<'_, '_> {
             .func_ids
             .get("MemCpy")
             .ok_or_else(|| CodegenError::Msg("MemCpy missing".into()))?;
-        let local = self.module.declare_func_in_func(id, self.bcx.func);
         let nv = self.bcx.ins().iconst(types::I64, n);
-        self.bcx.ins().call(local, &[dst, src, nv]);
+        self.call_function(id, &[dst, src, nv]);
         self.after_call()?;
         Ok(())
     }
@@ -2246,7 +2331,6 @@ impl FnCg<'_, '_> {
             .lookup_fn(name)
             .map(|info| (info.params.clone(), info.variadic))
             .unwrap_or_default();
-        let local = self.module.declare_func_in_func(id, self.bcx.func);
         let mut vals = Vec::new();
         let used = if variadic {
             args.len()
@@ -2271,8 +2355,7 @@ impl FnCg<'_, '_> {
         for (index, (_, ty)) in params.iter().enumerate().skip(used) {
             vals.push(self.missing_arg(name, index, ty));
         }
-        let call = self.bcx.ins().call(local, &vals);
-        let results = self.bcx.inst_results(call);
+        let results = self.call_function(id, &vals);
         let value = if results.is_empty() {
             self.bcx.ins().iconst(types::I64, 0)
         } else {
@@ -2308,9 +2391,8 @@ impl FnCg<'_, '_> {
         };
         let argc_v = self.bcx.ins().iconst(types::I64, argc);
         let id = self.func_ids["Print"];
-        let local = self.module.declare_func_in_func(id, self.bcx.func);
-        let call = self.bcx.ins().call(local, &[fmt, argc_v, argv]);
-        let value = self.bcx.inst_results(call)[0];
+        let results = self.call_function(id, &[fmt, argc_v, argv]);
+        let value = results[0];
         self.after_call()?;
         Ok(value)
     }
@@ -2350,9 +2432,8 @@ impl FnCg<'_, '_> {
         fixed.push(self.bcx.ins().iconst(types::I64, argc));
         fixed.push(argv);
         let id = self.func_ids["GrPrint"];
-        let local = self.module.declare_func_in_func(id, self.bcx.func);
-        let call = self.bcx.ins().call(local, &fixed);
-        let value = self.bcx.inst_results(call)[0];
+        let results = self.call_function(id, &fixed);
+        let value = results[0];
         self.after_call()?;
         Ok(value)
     }

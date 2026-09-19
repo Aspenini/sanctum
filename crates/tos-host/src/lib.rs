@@ -7,7 +7,9 @@ mod registry;
 
 pub use registry::GlobalBinding;
 
+#[cfg(not(target_os = "android"))]
 use minifb::{Key, KeyRepeat, MouseButton, MouseMode, Window, WindowOptions};
+#[cfg(not(target_os = "android"))]
 use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::ptr;
@@ -62,10 +64,12 @@ impl Default for FrameSnapshot {
     }
 }
 
+#[cfg(not(target_os = "android"))]
 thread_local! {
     static WINDOW: RefCell<Option<HostWindow>> = const { RefCell::new(None) };
 }
 
+#[cfg(not(target_os = "android"))]
 struct HostWindow {
     window: Window,
     pixels: Vec<u32>,
@@ -112,6 +116,7 @@ pub fn reset() {
     MS_Y.store(0, Ordering::Release);
     MS_BUTTONS.store(0, Ordering::Release);
     FRAMES_PRESENTED.store(0, Ordering::Release);
+    #[cfg(not(target_os = "android"))]
     WINDOW.with(|window| *window.borrow_mut() = None);
     key_queue().lock().expect("key queue poisoned").clear();
     *frame().lock().expect("frame snapshot poisoned") = FrameSnapshot::default();
@@ -141,6 +146,15 @@ pub fn shutdown() {
 
 pub fn set_file_roots(project: Option<std::path::PathBuf>, system: Option<std::path::PathBuf>) {
     fs::set_roots(project, system);
+}
+
+/// Select the Sanctum-owned directory used for persistent registry saves.
+///
+/// Passing `None` restores the platform/environment fallback. This explicit
+/// configuration avoids mutating process environment variables when Sanctum
+/// runs HolyC on a worker thread (notably on Android).
+pub fn set_data_root(root: Option<std::path::PathBuf>) {
+    registry::set_data_root(root);
 }
 
 pub fn bind_globals(bindings: &[GlobalBinding<'_>]) {
@@ -276,6 +290,7 @@ pub fn framebuffer_rgb() -> Vec<u8> {
     rgb
 }
 
+#[cfg(not(target_os = "android"))]
 fn native_printable_char(key: Key, shift: bool) -> Option<char> {
     let base = match key {
         Key::A => 'a',
@@ -357,6 +372,7 @@ fn native_printable_char(key: Key, shift: bool) -> Option<char> {
     })
 }
 
+#[cfg(not(target_os = "android"))]
 fn native_key_event(key: Key, shift: bool, ctrl: bool, alt: bool) -> Option<(i64, i64)> {
     let flags = input::scan_flags(shift, ctrl, alt);
     match key {
@@ -397,6 +413,7 @@ fn native_key_event(key: Key, shift: bool, ctrl: bool, alt: bool) -> Option<(i64
     }
 }
 
+#[cfg(not(target_os = "android"))]
 fn push_native_key(key: Key, shift: bool, ctrl: bool, alt: bool) {
     if let Some(key) = native_key_event(key, shift, ctrl, alt) {
         key_queue()
@@ -406,6 +423,7 @@ fn push_native_key(key: Key, shift: bool, ctrl: bool, alt: bool) {
     }
 }
 
+#[cfg(not(target_os = "android"))]
 fn present_window(snapshot: &FrameSnapshot) {
     WINDOW.with(|slot| {
         let mut slot = slot.borrow_mut();
@@ -505,6 +523,7 @@ pub extern "C" fn tos_Refresh() {
         };
         *frame().lock().expect("frame snapshot poisoned") = snapshot.clone();
         if host_mode() == HostMode::NativeWindow {
+            #[cfg(not(target_os = "android"))]
             present_window(&snapshot);
         }
     } else if host_mode() == HostMode::NativeWindow {
@@ -584,6 +603,7 @@ mod tests {
         );
     }
 
+    #[cfg(not(target_os = "android"))]
     #[test]
     fn shares_window_keys_with_the_game_thread() {
         key_queue().lock().unwrap().clear();
@@ -597,6 +617,7 @@ mod tests {
         set_interactive(false);
     }
 
+    #[cfg(not(target_os = "android"))]
     #[test]
     fn native_window_maps_printable_and_extended_keys() {
         assert_eq!(

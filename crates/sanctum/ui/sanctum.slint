@@ -21,6 +21,21 @@ export struct MenuItem {
     enabled: bool,
 }
 
+export struct OverlayItem {
+    id: string,
+    kind: string,
+    label: string,
+    x: float,
+    y: float,
+    w: float,
+    h: float,
+}
+
+export struct BindChoice {
+    id: string,
+    label: string,
+}
+
 component FlatButton inherits Rectangle {
     in property <string> text;
     in property <bool> primary: false;
@@ -120,6 +135,52 @@ component SideButton inherits Rectangle {
     }
 }
 
+component BottomButton inherits Rectangle {
+    in property <Icon> icon;
+    in property <string> label;
+    in property <bool> active: false;
+    callback clicked;
+
+    horizontal-stretch: 1;
+    background: transparent;
+
+    VerticalLayout {
+        alignment: center;
+        spacing: 4px;
+
+        HorizontalLayout {
+            alignment: center;
+            Rectangle {
+                width: 56px;
+                height: 32px;
+                border-radius: 16px;
+                background: root.active ? #e4e4e4 : touch.pressed ? #3a3a3a : touch.has-hover ? #2e2e2e : transparent;
+
+                IconDisplay {
+                    icon: root.icon;
+                    size: 20px;
+                    stroke: root.active ? #171717 : #eeeeee;
+                    stroke-width: 1.8;
+                    x: (parent.width - self.width) / 2;
+                    y: (parent.height - self.height) / 2;
+                }
+            }
+        }
+
+        Text {
+            text: root.label;
+            color: root.active ? #f4f4f4 : #a8a8a8;
+            font-size: 11px;
+            font-weight: root.active ? 600 : 400;
+            horizontal-alignment: center;
+        }
+    }
+
+    touch := TouchArea {
+        clicked => { root.clicked(); }
+    }
+}
+
 component SelectButton inherits Rectangle {
     in property <string> text;
     in property <bool> active: false;
@@ -189,8 +250,8 @@ component GameTile inherits Rectangle {
 
         HorizontalLayout {
             padding-left: 12px;
-            padding-right: 10px;
-            spacing: 8px;
+            padding-right: 6px;
+            spacing: 4px;
             Text {
                 text: root.game.title;
                 color: #ffffff;
@@ -227,6 +288,13 @@ component GameTile inherits Rectangle {
                 root.options();
             }
         }
+    }
+
+    ToolButton {
+        x: parent.width - 40px;
+        y: parent.height - 40px;
+        icon: IconSet.EllipsisVertical;
+        clicked => { root.options(); }
     }
 }
 
@@ -297,12 +365,110 @@ component GameSurface inherits Rectangle {
     }
 }
 
+component OverlayWidget inherits Rectangle {
+    in property <OverlayItem> item;
+    in property <bool> editing: false;
+    in property <bool> selected: false;
+    in property <length> pad-width;
+    in property <length> pad-height;
+    callback pressed(float, float);
+    callback released;
+    callback moved(float, float);
+    callback dragged(float, float);
+
+    border-radius: root.item.kind == "dpad" || root.item.kind == "stick" || root.item.kind == "mouse" ? self.width / 2 : 18px;
+    background: touch.pressed ? #e8e8e8cc : root.selected ? #d0d0d0aa : #2a2a2acc;
+    border-width: root.selected ? 2px : 1px;
+    border-color: root.selected ? #ffffff : #5a5a5a;
+    property <length> grab-x: 0px;
+    property <length> grab-y: 0px;
+
+    Text {
+        text: root.item.label;
+        color: touch.pressed ? #111111 : #f2f2f2;
+        font-size: 13px;
+        font-weight: 600;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+
+    touch := TouchArea {
+        pointer-event(event) => {
+            if (event.kind == PointerEventKind.down) {
+                root.grab-x = self.mouse-x;
+                root.grab-y = self.mouse-y;
+                if (!root.editing) {
+                    root.pressed(
+                        Math.max(0, Math.min(1, self.mouse-x / Math.max(parent.width, 1px))),
+                        Math.max(0, Math.min(1, self.mouse-y / Math.max(parent.height, 1px)))
+                    );
+                }
+            }
+            if (event.kind == PointerEventKind.up && !root.editing) {
+                root.released();
+            }
+        }
+        moved => {
+            if (root.editing) {
+                root.dragged(
+                    (root.x + touch.mouse-x - root.grab-x) / Math.max(root.pad-width, 1px),
+                    (root.y + touch.mouse-y - root.grab-y) / Math.max(root.pad-height, 1px)
+                );
+            } else {
+                root.moved(
+                    Math.max(0, Math.min(1, touch.mouse-x / Math.max(parent.width, 1px))),
+                    Math.max(0, Math.min(1, touch.mouse-y / Math.max(parent.height, 1px)))
+                );
+            }
+        }
+        clicked => {
+            if (root.editing) {
+                root.pressed(0.5, 0.5);
+            }
+        }
+    }
+}
+
+component OnScreenPad inherits Rectangle {
+    in property <[OverlayItem]> items;
+    in property <bool> editing: false;
+    in property <bool> overlay-style: false;
+    in property <string> selected-id;
+    callback pressed(string, float, float);
+    callback released(string);
+    callback moved(string, float, float);
+    callback dragged(string, float, float);
+    callback selected(string);
+
+    background: root.overlay-style ? transparent : #101010;
+    clip: true;
+
+    for item in root.items : OverlayWidget {
+        x: item.x * parent.width;
+        y: item.y * parent.height;
+        width: Math.max(item.w * parent.width, 48px);
+        height: Math.max(item.h * parent.height, 48px);
+        item: item;
+        editing: root.editing;
+        selected: root.selected-id == item.id;
+        pad-width: parent.width;
+        pad-height: parent.height;
+        pressed(nx, ny) => {
+            root.selected(item.id);
+            root.pressed(item.id, nx, ny);
+        }
+        released => { root.released(item.id); }
+        moved(nx, ny) => { root.moved(item.id, nx, ny); }
+        dragged(nx, ny) => { root.dragged(item.id, nx, ny); }
+    }
+}
+
 export component MainWindow inherits Window {
     title: "Sanctum";
     preferred-width: 1180px;
     preferred-height: 780px;
-    min-width: 760px;
-    min-height: 520px;
+    min-width: 320px;
+    min-height: 480px;
     background: #1b1b1b;
 
     in property <[GameItem]> games;
@@ -332,14 +498,35 @@ export component MainWindow inherits Window {
     in property <string> storage-action;
     in property <bool> portable-available: true;
     in property <bool> fit-scaling: false;
-
+    in property <bool> desktop-chrome: true;
+    in property <bool> compact-layout: false;
+    in property <bool> landscape: false;
+    in property <bool> overlay-enabled: false;
+    in property <bool> controls-editor-open: false;
+    in property <bool> bind-open: false;
+    in property <[OverlayItem]> overlay-items;
+    in property <[BindChoice]> bind-choices;
+    in property <[BindChoice]> preset-choices;
+    in property <[BindChoice]> gamepad-choices;
+    in property <string> overlay-selected;
+    in property <string> active-preset;
+    in property <string> preset-name-edit;
+    in property <string> bind-title;
+    in property <string> capture-hint;
+    property <bool> split-controls: root.overlay-enabled && !root.landscape && root.running && (!root.detached || !root.desktop-chrome);
     property <length> sidebar-width: 88px;
-    property <length> content-padding: 26px;
-    property <length> tile-gap: 16px;
-    property <int> tile-columns: root.width >= 1720px ? 6 : root.width >= 1440px ? 5 : root.width >= 1120px ? 4 : root.width >= 850px ? 3 : 2;
-    property <length> tile-area-width: root.width - root.sidebar-width - root.content-padding * 2;
+    property <length> nav-gutter: root.compact-layout ? 0px : root.sidebar-width;
+    property <length> bottom-bar-height: 64px;
+    property <bool> show-bottom-bar: root.compact-layout && !root.running;
+    property <length> content-padding: root.compact-layout ? 16px : 26px;
+    property <length> tile-gap: root.compact-layout ? 12px : 16px;
+    property <length> content-width: root.width - root.safe-area-insets.left - root.safe-area-insets.right - root.nav-gutter;
+    property <int> tile-columns: root.content-width >= 1720px ? 6 : root.content-width >= 1440px ? 5 : root.content-width >= 1120px ? 4 : root.content-width >= 850px ? 3 : root.content-width >= 560px ? 2 : 1;
+    property <length> tile-area-width: max(root.content-width - root.content-padding * 2, 1px);
     property <length> tile-width: (root.tile-area-width - (root.tile-columns - 1) * root.tile-gap) / root.tile-columns;
     property <length> tile-height: root.tile-width * 0.75;
+    property <length> dialog-width: min(520px, root.width - 24px);
+    property <length> dialog-max-height: min(520px, root.height - 24px);
 
     callback add-library;
     callback run-file;
@@ -372,55 +559,93 @@ export component MainWindow inherits Window {
     callback invoke-menu(string);
     callback game-key(string, bool, bool, bool);
     callback game-pointer(int, int, bool, bool);
+    callback toggle-overlay;
+    callback overlay-pressed(string, float, float);
+    callback overlay-released(string);
+    callback overlay-moved(string, float, float);
+    callback overlay-dragged(string, float, float);
+    callback select-overlay(string);
+    callback open-controls-editor;
+    callback close-controls-editor;
+    callback select-preset(string);
+    callback save-preset;
+    callback new-preset;
+    callback delete-preset;
+    callback reset-preset;
+    callback preset-name-changed(string);
+    callback open-bind(string);
+    callback close-bind;
+    callback choose-bind(string);
 
-    HorizontalLayout {
+    VerticalLayout {
+        padding-top: root.safe-area-insets.top;
+        padding-left: root.safe-area-insets.left;
+        padding-right: root.safe-area-insets.right;
+        padding-bottom: root.show-bottom-bar ? 0px : root.safe-area-insets.bottom;
         spacing: 0px;
 
-        Rectangle {
-            width: root.sidebar-width;
-            background: #171717;
-            border-width: 0px;
+        HorizontalLayout {
+            spacing: 0px;
+            vertical-stretch: 1;
 
-            VerticalLayout {
-                padding: 8px;
-                spacing: 6px;
-                alignment: center;
+            if !root.compact-layout : Rectangle {
+                width: root.sidebar-width;
+                background: #171717;
+                border-width: 0px;
 
-                SideButton { icon: IconSet.Library; label: "Library"; active: !root.running && !root.settings-open; clicked => { root.close-settings(); root.show-library(); } }
-                SideButton { icon: IconSet.FilePlay; label: "Run"; clicked => { root.close-settings(); root.run-file(); } }
-                SideButton { icon: IconSet.Plus; label: "Add"; clicked => { root.close-settings(); root.add-library(); } }
-                SideButton { icon: IconSet.Settings; label: "Settings"; active: root.settings-open; clicked => { root.show-settings(); } }
+                VerticalLayout {
+                    padding: 8px;
+                    spacing: 6px;
+                    alignment: center;
+
+                    SideButton { icon: IconSet.Library; label: "Library"; active: !root.running && !root.settings-open; clicked => { root.close-settings(); root.show-library(); } }
+                    SideButton { icon: IconSet.FilePlay; label: "Run"; clicked => { root.close-settings(); root.run-file(); } }
+                    SideButton { icon: IconSet.Plus; label: "Add"; clicked => { root.close-settings(); root.add-library(); } }
+                    SideButton { icon: IconSet.Settings; label: "Settings"; active: root.settings-open; clicked => { root.show-settings(); } }
+                }
             }
-        }
 
-        if !root.running : Rectangle {
-            background: #1d1d1d;
+            if !root.running : Rectangle {
+                background: #1d1d1d;
 
-            VerticalLayout {
-                padding: root.content-padding;
-                spacing: 16px;
+                VerticalLayout {
+                    padding: root.content-padding;
+                    spacing: root.compact-layout ? 12px : 16px;
 
-                HorizontalLayout {
-                    height: 42px;
-                    spacing: 10px;
-                    PageTitle { text: "Library"; horizontal-stretch: 1; }
-                    LineEdit {
-                        width: 250px;
-                        placeholder-text: "Search";
-                        input-type: search;
-                        edited(value) => { root.search-changed(value); }
+                    if !root.compact-layout : HorizontalLayout {
+                        height: 42px;
+                        spacing: 10px;
+                        PageTitle { text: "Library"; horizontal-stretch: 1; }
+                        LineEdit {
+                            width: 250px;
+                            placeholder-text: "Search";
+                            input-type: search;
+                            edited(value) => { root.search-changed(value); }
+                        }
                     }
-                }
 
-                HorizontalLayout {
-                    height: 30px;
-                    spacing: 4px;
-                    Text { text: root.games.length + (root.games.length == 1 ? " program" : " programs"); color: #858585; font-size: 12px; vertical-alignment: center; horizontal-stretch: 1; }
-                    Text { text: "Sort"; color: #777777; font-size: 12px; vertical-alignment: center; }
-                    SelectButton { text: "Title"; active: root.sort-index == 0; clicked => { root.set-sort(0); } }
-                    SelectButton { text: "Recent"; active: root.sort-index == 1; clicked => { root.set-sort(1); } }
-                    SelectButton { text: "Added"; active: root.sort-index == 2; clicked => { root.set-sort(2); } }
-                }
+                    if root.compact-layout : VerticalLayout {
+                        spacing: 10px;
+                        PageTitle { text: "Library"; }
+                        LineEdit {
+                            placeholder-text: "Search";
+                            input-type: search;
+                            edited(value) => { root.search-changed(value); }
+                        }
+                    }
+
+                    HorizontalLayout {
+                        height: 30px;
+                        spacing: 4px;
+                        if !root.compact-layout : Text { text: root.games.length + (root.games.length == 1 ? " program" : " programs"); color: #858585; font-size: 12px; vertical-alignment: center; horizontal-stretch: 1; }
+                        if root.compact-layout : Rectangle { horizontal-stretch: 1; background: transparent; }
+                        if !root.compact-layout : Text { text: "Sort"; color: #777777; font-size: 12px; vertical-alignment: center; }
+                        SelectButton { text: "Title"; active: root.sort-index == 0; clicked => { root.set-sort(0); } }
+                        SelectButton { text: "Recent"; active: root.sort-index == 1; clicked => { root.set-sort(1); } }
+                        SelectButton { text: "Added"; active: root.sort-index == 2; clicked => { root.set-sort(2); } }
+                    }
+
+                    if root.compact-layout : Text { text: root.games.length + (root.games.length == 1 ? " program" : " programs"); color: #858585; font-size: 12px; height: 16px; vertical-alignment: center; }
 
                 if root.games.length == 0 : Rectangle {
                     vertical-stretch: 1;
@@ -452,9 +677,9 @@ export component MainWindow inherits Window {
 
                 Text { text: root.status; color: #777777; font-size: 11px; height: 16px; vertical-alignment: center; overflow: elide; }
             }
-        }
+            }
 
-        if root.running : Rectangle {
+            if root.running : Rectangle {
             background: #1d1d1d;
 
             VerticalLayout {
@@ -475,10 +700,11 @@ export component MainWindow inherits Window {
                         ToolButton { icon: IconSet.CircleStop; clicked => { root.stop-runner(); } }
                         ToolButton { icon: IconSet.RotateCcw; clicked => { root.restart-runner(); } }
                         ToolButton { icon: root.muted ? IconSet.VolumeX : IconSet.Volume2; active: root.muted; clicked => { root.toggle-mute(); } }
-                        ToolButton { icon: root.fullscreen ? IconSet.Minimize : IconSet.Maximize; active: root.fullscreen; clicked => { root.toggle-fullscreen(); } }
-                        ToolButton { icon: root.detached ? IconSet.Dock : IconSet.PictureInPicture2; active: root.detached; clicked => { root.toggle-detached(); } }
+                        if root.desktop-chrome : ToolButton { icon: root.fullscreen ? IconSet.Minimize : IconSet.Maximize; active: root.fullscreen; clicked => { root.toggle-fullscreen(); } }
+                        if root.desktop-chrome : ToolButton { icon: root.detached ? IconSet.Dock : IconSet.PictureInPicture2; active: root.detached; clicked => { root.toggle-detached(); } }
+                        ToolButton { icon: IconSet.Gamepad2; active: root.overlay-enabled; clicked => { root.toggle-overlay(); } }
                         Rectangle { horizontal-stretch: 1; background: transparent; }
-                        Text { text: root.status; color: #9a9a9a; font-size: 12px; vertical-alignment: center; }
+                        Text { text: root.status; color: #9a9a9a; font-size: 12px; vertical-alignment: center; overflow: elide; }
                         ToolButton { icon: IconSet.Menu; active: root.log-open; clicked => { root.toggle-log(); } }
                     }
                 }
@@ -498,19 +724,65 @@ export component MainWindow inherits Window {
                     }
                 }
 
-                if !root.detached : GameSurface {
+                if !root.detached || !root.desktop-chrome : Rectangle {
                     vertical-stretch: 1;
-                    frame: root.game-frame;
-                    frame-ready: root.frame-ready;
-                    fit-scaling: root.fit-scaling;
-                    frame-width: root.frame-width;
-                    frame-height: root.frame-height;
-                    status: root.status;
-                    game-key(text, shift, control, alt) => { root.game-key(text, shift, control, alt); }
-                    game-pointer(x, y, left, right) => { root.game-pointer(x, y, left, right); }
+                    background: #000000;
+
+                    if root.split-controls : VerticalLayout {
+                        spacing: 0px;
+                        GameSurface {
+                            vertical-stretch: 1;
+                            frame: root.game-frame;
+                            frame-ready: root.frame-ready;
+                            fit-scaling: root.fit-scaling;
+                            frame-width: root.frame-width;
+                            frame-height: root.frame-height;
+                            status: root.status;
+                            game-key(text, shift, control, alt) => { root.game-key(text, shift, control, alt); }
+                            game-pointer(x, y, left, right) => { root.game-pointer(x, y, left, right); }
+                        }
+                        OnScreenPad {
+                            vertical-stretch: 1;
+                            min-height: 160px;
+                            items: root.overlay-items;
+                            overlay-style: false;
+                            selected-id: root.overlay-selected;
+                            pressed(id, nx, ny) => { root.overlay-pressed(id, nx, ny); }
+                            released(id) => { root.overlay-released(id); }
+                            moved(id, nx, ny) => { root.overlay-moved(id, nx, ny); }
+                            dragged(id, nx, ny) => { root.overlay-dragged(id, nx, ny); }
+                            selected(id) => { root.select-overlay(id); }
+                        }
+                    }
+
+                    if !root.split-controls : GameSurface {
+                        width: parent.width;
+                        height: parent.height;
+                        frame: root.game-frame;
+                        frame-ready: root.frame-ready;
+                        fit-scaling: root.fit-scaling;
+                        frame-width: root.frame-width;
+                        frame-height: root.frame-height;
+                        status: root.status;
+                        game-key(text, shift, control, alt) => { root.game-key(text, shift, control, alt); }
+                        game-pointer(x, y, left, right) => { root.game-pointer(x, y, left, right); }
+                    }
+
+                    if !root.split-controls && root.overlay-enabled : OnScreenPad {
+                        width: parent.width;
+                        height: parent.height;
+                        items: root.overlay-items;
+                        overlay-style: true;
+                        selected-id: root.overlay-selected;
+                        pressed(id, nx, ny) => { root.overlay-pressed(id, nx, ny); }
+                        released(id) => { root.overlay-released(id); }
+                        moved(id, nx, ny) => { root.overlay-moved(id, nx, ny); }
+                        dragged(id, nx, ny) => { root.overlay-dragged(id, nx, ny); }
+                        selected(id) => { root.select-overlay(id); }
+                    }
                 }
 
-                if root.detached : Rectangle {
+                if root.detached && root.desktop-chrome : Rectangle {
                     vertical-stretch: 1;
                     background: #222222;
                     VerticalLayout {
@@ -523,7 +795,7 @@ export component MainWindow inherits Window {
                 }
 
                 if root.log-open : Rectangle {
-                    height: 150px;
+                    height: root.compact-layout ? 120px : 150px;
                     background: #111111;
                     border-width: 1px;
                     border-color: #383838;
@@ -539,6 +811,27 @@ export component MainWindow inherits Window {
                     }
                 }
             }
+            }
+        }
+
+        if root.show-bottom-bar : Rectangle {
+            height: root.bottom-bar-height + root.safe-area-insets.bottom;
+            background: #141414;
+
+            VerticalLayout {
+                spacing: 0px;
+                Rectangle { height: 1px; background: #2c2c2c; }
+                HorizontalLayout {
+                    height: root.bottom-bar-height;
+                    padding-left: 4px;
+                    padding-right: 4px;
+                    BottomButton { icon: IconSet.Library; label: "Library"; active: !root.settings-open; clicked => { root.close-settings(); root.show-library(); } }
+                    BottomButton { icon: IconSet.FilePlay; label: "Run"; clicked => { root.close-settings(); root.run-file(); } }
+                    BottomButton { icon: IconSet.Plus; label: "Add"; clicked => { root.close-settings(); root.add-library(); } }
+                    BottomButton { icon: IconSet.Settings; label: "Settings"; active: root.settings-open; clicked => { root.show-settings(); } }
+                }
+                Rectangle { height: root.safe-area-insets.bottom; background: #141414; }
+            }
         }
     }
 
@@ -546,8 +839,8 @@ export component MainWindow inherits Window {
         background: #00000099;
         TouchArea { }
         Rectangle {
-            width: 520px;
-            height: 382px;
+            width: root.dialog-width;
+            height: min(382px, root.dialog-max-height);
             x: (parent.width - self.width) / 2;
             y: (parent.height - self.height) / 2;
             border-radius: 6px;
@@ -584,14 +877,16 @@ export component MainWindow inherits Window {
     }
 
     if root.settings-open : Rectangle {
-        x: root.sidebar-width;
-        width: root.width - root.sidebar-width;
+        x: root.safe-area-insets.left + root.nav-gutter;
+        y: root.safe-area-insets.top;
+        width: root.width - root.safe-area-insets.left - root.safe-area-insets.right - root.nav-gutter;
+        height: root.height - root.safe-area-insets.top - (root.show-bottom-bar ? root.bottom-bar-height + root.safe-area-insets.bottom : root.safe-area-insets.bottom);
         background: #1d1d1d;
         TouchArea { }
 
         VerticalLayout {
-            padding: 28px;
-            spacing: 24px;
+            padding: root.compact-layout ? 18px : 28px;
+            spacing: root.compact-layout ? 16px : 24px;
 
             HorizontalLayout {
                 height: 40px;
@@ -604,41 +899,102 @@ export component MainWindow inherits Window {
                 viewport-width: self.width;
 
                 VerticalLayout {
-                    width: 680px;
+                    width: min(680px, root.content-width - (root.compact-layout ? 36px : 56px));
                     spacing: 14px;
 
                     Text { text: "Game"; color: #f0f0f0; font-size: 16px; font-weight: 600; }
-                    HorizontalLayout {
+                    if !root.compact-layout : HorizontalLayout {
                         height: 36px;
                         Text { text: "Canvas scaling"; color: #dddddd; font-size: 13px; vertical-alignment: center; width: 180px; }
                         SelectButton { text: "Integer"; active: !root.fit-scaling; clicked => { root.set-scaling(false); } }
                         SelectButton { text: "Fit window"; active: root.fit-scaling; clicked => { root.set-scaling(true); } }
                         Rectangle { horizontal-stretch: 1; background: transparent; }
                     }
+                    if root.compact-layout : VerticalLayout {
+                        spacing: 8px;
+                        Text { text: "Canvas scaling"; color: #dddddd; font-size: 13px; }
+                        HorizontalLayout {
+                            height: 36px;
+                            spacing: 4px;
+                            SelectButton { text: "Integer"; active: !root.fit-scaling; clicked => { root.set-scaling(false); } }
+                            SelectButton { text: "Fit"; active: root.fit-scaling; clicked => { root.set-scaling(true); } }
+                            Rectangle { horizontal-stretch: 1; background: transparent; }
+                        }
+                    }
 
                     Rectangle { height: 18px; background: transparent; }
                     Text { text: "TempleOS files"; color: #f0f0f0; font-size: 16px; font-weight: 600; }
-                    Text { text: root.templeos-path; color: #999999; font-size: 12px; overflow: elide; }
+                    Text { text: root.templeos-path; color: #999999; font-size: 12px; overflow: elide; wrap: word-wrap; }
                     HorizontalLayout {
-                        FlatButton { width: 270px; text: "Choose extracted TempleOS folder"; clicked => { root.choose-templeos(); } }
+                        FlatButton { min-width: 180px; text: "Choose extracted TempleOS folder"; clicked => { root.choose-templeos(); } }
                         Rectangle { horizontal-stretch: 1; background: transparent; }
                     }
 
                     Rectangle { height: 18px; background: transparent; }
                     Text { text: "Storage"; color: #f0f0f0; font-size: 16px; font-weight: 600; }
                     Text { text: root.storage-label; color: #d0d0d0; font-size: 12px; }
-                    Text { text: root.data-path; color: #8f8f8f; font-size: 12px; overflow: elide; }
-                    HorizontalLayout {
+                    Text { text: root.data-path; color: #8f8f8f; font-size: 12px; overflow: elide; wrap: word-wrap; }
+                    if root.desktop-chrome : HorizontalLayout {
                         FlatButton { width: 220px; text: root.storage-action; enabled: root.portable-available; clicked => { root.request-storage-change(); } }
                         Rectangle { horizontal-stretch: 1; background: transparent; }
                     }
-                    if !root.portable-available : Text {
+                    if root.desktop-chrome && !root.portable-available : Text {
                         text: "Portable mode is unavailable because the executable folder is not writable.";
                         color: #d8a47d;
                         font-size: 12px;
                         wrap: word-wrap;
                     }
-                    Text { text: "Imported projects always remain in their original folders."; color: #858585; font-size: 12px; }
+                    if !root.desktop-chrome : Text {
+                        text: "On Android, Sanctum always uses app storage. Portable mode is a desktop feature.";
+                        color: #858585;
+                        font-size: 12px;
+                        wrap: word-wrap;
+                    }
+                    Text { text: "Imported projects always remain in their original folders."; color: #858585; font-size: 12px; wrap: word-wrap; }
+
+                    Rectangle { height: 18px; background: transparent; }
+                    Text { text: "Controls"; color: #f0f0f0; font-size: 16px; font-weight: 600; }
+                    Text { text: "On-screen controls and controller bindings share the same presets."; color: #858585; font-size: 12px; wrap: word-wrap; }
+                    HorizontalLayout {
+                        height: 36px;
+                        Text { text: "On-screen pad"; color: #dddddd; font-size: 13px; vertical-alignment: center; horizontal-stretch: 1; }
+                        SelectButton { text: "On"; active: root.overlay-enabled; clicked => { if (!root.overlay-enabled) { root.toggle-overlay(); } } }
+                        SelectButton { text: "Off"; active: !root.overlay-enabled; clicked => { if (root.overlay-enabled) { root.toggle-overlay(); } } }
+                    }
+                    Text { text: "Preset"; color: #aaaaaa; font-size: 12px; }
+                    Flickable {
+                        height: 36px;
+                        viewport-height: self.height;
+                        viewport-width: Math.max(root.preset-choices.length * 110px, self.width);
+                        for preset[index] in root.preset-choices : SelectButton {
+                            x: index * 110px;
+                            width: 104px;
+                            text: preset.label;
+                            active: preset.id == root.active-preset;
+                            clicked => { root.select-preset(preset.id); }
+                        }
+                    }
+                    Text { text: "Preset name"; color: #aaaaaa; font-size: 12px; }
+                    LineEdit { text: root.preset-name-edit; edited(value) => { root.preset-name-changed(value); } }
+                    HorizontalLayout {
+                        spacing: 8px;
+                        FlatButton { text: "Save"; clicked => { root.save-preset(); } }
+                        FlatButton { text: "Save as new"; clicked => { root.new-preset(); } }
+                        FlatButton { text: "Delete"; clicked => { root.delete-preset(); } }
+                    }
+                    HorizontalLayout {
+                        spacing: 8px;
+                        FlatButton { text: "Edit layout"; primary: true; clicked => { root.open-controls-editor(); } }
+                        FlatButton { text: "Reset layout"; clicked => { root.reset-preset(); } }
+                    }
+                    Text { text: "Controller"; color: #aaaaaa; font-size: 12px; }
+                    Text { text: "Tap a binding, then choose a TempleOS key. Connected controllers use this map immediately."; color: #858585; font-size: 12px; wrap: word-wrap; }
+                    for pad in root.gamepad-choices : HorizontalLayout {
+                        height: 34px;
+                        spacing: 8px;
+                        Text { text: pad.label; color: #d0d0d0; font-size: 12px; vertical-alignment: center; horizontal-stretch: 1; overflow: elide; }
+                        FlatButton { text: "Bind"; clicked => { root.open-bind(pad.id); } }
+                    }
                 }
             }
         }
@@ -648,8 +1004,8 @@ export component MainWindow inherits Window {
         background: #000000aa;
         TouchArea { }
         Rectangle {
-            width: 560px;
-            height: 480px;
+            width: min(560px, root.width - 24px);
+            height: min(480px, root.height - 24px);
             x: (parent.width - self.width) / 2;
             y: (parent.height - self.height) / 2;
             border-radius: 6px;
@@ -676,12 +1032,12 @@ export component MainWindow inherits Window {
         }
     }
 
-    if root.storage-confirm-open : Rectangle {
+    if root.storage-confirm-open && root.desktop-chrome : Rectangle {
         background: #000000bb;
         TouchArea { }
         Rectangle {
-            width: 510px;
-            height: 245px;
+            width: min(510px, root.width - 24px);
+            height: min(245px, root.height - 24px);
             x: (parent.width - self.width) / 2;
             y: (parent.height - self.height) / 2;
             border-radius: 6px;
@@ -704,6 +1060,106 @@ export component MainWindow inherits Window {
                     Rectangle { horizontal-stretch: 1; background: transparent; }
                     FlatButton { text: "Cancel"; clicked => { root.cancel-storage-change(); } }
                     FlatButton { text: "Move and restart"; primary: true; clicked => { root.confirm-storage-change(); } }
+                }
+            }
+        }
+    }
+
+    if root.controls-editor-open : Rectangle {
+        background: #111111;
+        TouchArea { }
+
+        VerticalLayout {
+            padding-top: root.safe-area-insets.top + 8px;
+            padding-left: 10px;
+            padding-right: 10px;
+            padding-bottom: root.safe-area-insets.bottom + 8px;
+            spacing: 8px;
+
+            HorizontalLayout {
+                height: 40px;
+                spacing: 8px;
+                PageTitle { text: "Edit controls"; font-size: 20px; horizontal-stretch: 1; }
+                FlatButton { text: "Bind"; enabled: root.overlay-selected != ""; clicked => { root.open-bind("overlay:" + root.overlay-selected); } }
+                ToolButton { icon: IconSet.X; clicked => { root.close-controls-editor(); } }
+            }
+            Text {
+                text: root.landscape ? "Landscape overlay — drag to rearrange, then Bind." : "Portrait pad — drag to rearrange, then Bind.";
+                color: #8f8f8f;
+                font-size: 12px;
+            }
+
+            if !root.landscape : VerticalLayout {
+                vertical-stretch: 1;
+                spacing: 0px;
+                Rectangle {
+                    vertical-stretch: 1;
+                    background: #000000;
+                    Text { text: "Screen"; color: #555555; font-size: 16px; horizontal-alignment: center; vertical-alignment: center; }
+                }
+                OnScreenPad {
+                    vertical-stretch: 1;
+                    min-height: 180px;
+                    items: root.overlay-items;
+                    editing: true;
+                    overlay-style: false;
+                    selected-id: root.overlay-selected;
+                    pressed(id, nx, ny) => { root.select-overlay(id); }
+                    released(id) => { }
+                    moved(id, nx, ny) => { }
+                    dragged(id, nx, ny) => { root.overlay-dragged(id, nx, ny); }
+                    selected(id) => { root.select-overlay(id); }
+                }
+            }
+
+            if root.landscape : Rectangle {
+                vertical-stretch: 1;
+                background: #000000;
+                Text { text: "Screen"; color: #444444; font-size: 16px; horizontal-alignment: center; vertical-alignment: center; }
+                OnScreenPad {
+                    width: parent.width;
+                    height: parent.height;
+                    items: root.overlay-items;
+                    editing: true;
+                    overlay-style: true;
+                    selected-id: root.overlay-selected;
+                    pressed(id, nx, ny) => { root.select-overlay(id); }
+                    released(id) => { }
+                    moved(id, nx, ny) => { }
+                    dragged(id, nx, ny) => { root.overlay-dragged(id, nx, ny); }
+                    selected(id) => { root.select-overlay(id); }
+                }
+            }
+        }
+    }
+
+    if root.bind-open : Rectangle {
+        background: #000000aa;
+        TouchArea { clicked => { root.close-bind(); } }
+        Rectangle {
+            width: min(420px, root.width - 24px);
+            height: min(520px, root.height - 24px);
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            border-radius: 6px;
+            background: #242424;
+            border-width: 1px;
+            border-color: #484848;
+            VerticalLayout {
+                padding: 18px;
+                spacing: 10px;
+                HorizontalLayout {
+                    PageTitle { text: root.bind-title; horizontal-stretch: 1; font-size: 18px; }
+                    ToolButton { icon: IconSet.X; clicked => { root.close-bind(); } }
+                }
+                Text { text: root.capture-hint; color: #9a9a9a; font-size: 12px; wrap: word-wrap; }
+                ListView {
+                    vertical-stretch: 1;
+                    for choice in root.bind-choices : FlatButton {
+                        width: parent.width;
+                        text: choice.label;
+                        clicked => { root.choose-bind(choice.id); }
+                    }
                 }
             }
         }

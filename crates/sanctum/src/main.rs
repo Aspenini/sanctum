@@ -8,12 +8,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let Some(entry) = args.next().map(PathBuf::from) else {
             std::process::exit(2)
         };
-        if let Err(error) = sanctum::runner::run_child(entry) {
+        if let Err(error) = sanctum_core::runner::run_child(entry) {
             eprintln!("{error}");
             std::process::exit(1);
         }
         return Ok(());
     }
-    sanctum::app::run()?;
+    sanctum_core::app::run()?;
     Ok(())
 }

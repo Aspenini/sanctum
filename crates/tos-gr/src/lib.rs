@@ -1446,7 +1446,7 @@ fn format_graphics_text(fmt: &[u8], args: &[i64]) -> String {
             b'X' => format!("{:X}", argument as u64),
             b'c' => char::from(argument as u8).to_string(),
             b's' if argument != 0 => unsafe {
-                CStr::from_ptr(argument as *const i8)
+                CStr::from_ptr(argument as *const std::ffi::c_char)
                     .to_string_lossy()
                     .into_owned()
             },
@@ -2027,14 +2027,34 @@ unsafe fn draw_sprite(
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn tos_Sprite3(dc: *mut CDC, x: i64, y: i64, z: i64, elems: *mut u8, just_one: i64) {
+/// Draw a TempleOS sprite stream into a device context.
+///
+/// # Safety
+///
+/// `dc` must be null or point to a valid device context, and `elems` must be
+/// null, a recognized opaque sprite handle, or a readable terminated sprite
+/// stream.
+pub unsafe extern "C" fn tos_Sprite3(
+    dc: *mut CDC,
+    x: i64,
+    y: i64,
+    z: i64,
+    elems: *mut u8,
+    just_one: i64,
+) {
     if !elems.is_null() && !unsafe { draw_sprite(dc, x, y, z, elems, just_one != 0) } {
         draw_sprite_placeholder(dc, x, y, z, tos_abi::YELLOW);
     }
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn tos_Sprite3Mat4x4B(
+/// Draw a sprite using a caller-provided TempleOS transformation matrix.
+///
+/// # Safety
+///
+/// `dc`, `elems`, and `m` must be null or valid for the reads and writes
+/// performed by this function. A non-null matrix must contain 16 `i64`s.
+pub unsafe extern "C" fn tos_Sprite3Mat4x4B(
     dc: *mut CDC,
     x: i64,
     y: i64,
@@ -2060,7 +2080,7 @@ pub extern "C" fn tos_Sprite3Mat4x4B(
         tos_runtime::tos_Mat4x4MulMat4x4Equ(composed.as_mut_ptr(), old_r, local.as_ptr());
         (*dc).r = composed.as_mut_ptr();
     }
-    tos_Sprite3(dc, 0, 0, 0, elems, 0);
+    unsafe { tos_Sprite3(dc, 0, 0, 0, elems, 0) };
     unsafe {
         (*dc).r = old_r;
         (*dc).flags = (*dc).flags & !DCF_TRANSFORMATION | old_transform;
@@ -2068,7 +2088,13 @@ pub extern "C" fn tos_Sprite3Mat4x4B(
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn tos_Sprite2DC(elems: *mut u8) -> *mut CDC {
+/// Render a sprite into a newly allocated device context.
+///
+/// # Safety
+///
+/// `elems` must be null, a recognized opaque sprite handle, or a readable
+/// terminated sprite stream. The returned context belongs to the caller.
+pub unsafe extern "C" fn tos_Sprite2DC(elems: *mut u8) -> *mut CDC {
     if elems.is_null() {
         return ptr::null_mut();
     }
@@ -2084,7 +2110,7 @@ pub extern "C" fn tos_Sprite2DC(elems: *mut u8) -> *mut CDC {
         (*scratch).max_y = i64::MIN;
     }
     let origin = i64::from(i32::MAX / 2);
-    tos_Sprite3(scratch, origin, origin, origin, elems, 0);
+    unsafe { tos_Sprite3(scratch, origin, origin, origin, elems, 0) };
     let (min_x, max_x, min_y, max_y) = unsafe {
         (
             (*scratch).min_x - origin,
@@ -2100,19 +2126,27 @@ pub extern "C" fn tos_Sprite2DC(elems: *mut u8) -> *mut CDC {
     if result.is_null() {
         return ptr::null_mut();
     }
-    tos_Sprite3(
-        result,
-        if min_x <= max_x { -min_x } else { 0 },
-        if min_y <= max_y { -min_y } else { 0 },
-        0,
-        elems,
-        0,
-    );
+    unsafe {
+        tos_Sprite3(
+            result,
+            if min_x <= max_x { -min_x } else { 0 },
+            if min_y <= max_y { -min_y } else { 0 },
+            0,
+            elems,
+            0,
+        )
+    };
     result
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn tos_Sprite3B(dc: *mut CDC, x: i64, y: i64, z: i64, elems: *mut u8) {
+/// Draw a sprite with its origin stored in the device context.
+///
+/// # Safety
+///
+/// `dc` must point to a writable device context and `elems` must be a readable
+/// terminated sprite stream or recognized opaque sprite handle.
+pub unsafe extern "C" fn tos_Sprite3B(dc: *mut CDC, x: i64, y: i64, z: i64, elems: *mut u8) {
     if elems.is_null() || dc.is_null() {
         return;
     }
@@ -2234,7 +2268,13 @@ unsafe fn mutate_sprite_points(
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn tos_SpriteInterpolate(t: f64, a: *mut u8, b: *mut u8) -> *mut u8 {
+/// Allocate an interpolated copy of two compatible sprite streams.
+///
+/// # Safety
+///
+/// `a` and `b` must each be recognized opaque sprite handles or readable
+/// terminated sprite streams. The returned allocation belongs to the caller.
+pub unsafe extern "C" fn tos_SpriteInterpolate(t: f64, a: *mut u8, b: *mut u8) -> *mut u8 {
     let a_len = unsafe { sprite_len(a) };
     let b_len = unsafe { sprite_len(b) };
     let source = if t < 0.5 { a } else { b };
@@ -2336,7 +2376,14 @@ pub extern "C" fn tos_SpriteInterpolate(t: f64, a: *mut u8, b: *mut u8) -> *mut 
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn tos_SpriteTransform(elems: *mut u8, r: *mut i64) -> *mut u8 {
+/// Allocate and transform a copy of a sprite stream.
+///
+/// # Safety
+///
+/// `elems` must be a recognized opaque sprite handle or readable terminated
+/// sprite stream. `r` must be null or point to 16 readable `i64`s. The returned
+/// allocation belongs to the caller.
+pub unsafe extern "C" fn tos_SpriteTransform(elems: *mut u8, r: *mut i64) -> *mut u8 {
     let result = unsafe { owned_sprite_copy(elems) };
     if result.is_null() || r.is_null() {
         return result;
@@ -2488,8 +2535,8 @@ mod tests {
         }
         sprite.push(0);
 
-        tos_Sprite3(dc, 0, 0, 0, sprite.as_mut_ptr(), 0);
         unsafe {
+            tos_Sprite3(dc, 0, 0, 0, sprite.as_mut_ptr(), 0);
             let pixels = slice::from_raw_parts((*dc).body, 12 * 8);
             assert_eq!(pixels[4 * 12 + 1], tos_abi::LTGREEN as u8);
             assert_eq!(pixels[4 * 12 + 2], tos_abi::GREEN as u8);
@@ -2548,8 +2595,8 @@ mod tests {
             sprite.extend_from_slice(&value.to_le_bytes());
         }
         sprite.push(0);
-        let dc = tos_Sprite2DC(sprite.as_mut_ptr());
         unsafe {
+            let dc = tos_Sprite2DC(sprite.as_mut_ptr());
             assert!(!dc.is_null());
             assert!((*dc).width >= 4, "width {}", (*dc).width);
             assert!((*dc).height >= 4, "height {}", (*dc).height);
@@ -2623,13 +2670,12 @@ mod tests {
     fn unresolved_sprite_handles_render_and_clone_safely() {
         let dc = tos_DCNew(8, 8, ptr::null_mut(), 0);
         let opaque = 2_usize as *mut u8;
-        tos_Sprite3(dc, 4, 4, 0, opaque, 0);
         unsafe {
+            tos_Sprite3(dc, 4, 4, 0, opaque, 0);
             assert_eq!(*(*dc).body.add(4 * 8 + 4), tos_abi::YELLOW as u8);
+            let interpolated = tos_SpriteInterpolate(0.25, opaque, 3_usize as *mut u8);
+            assert!(interpolated.is_null());
         }
-
-        let interpolated = tos_SpriteInterpolate(0.25, opaque, 3_usize as *mut u8);
-        assert!(interpolated.is_null());
     }
 
     #[test]
@@ -2640,8 +2686,10 @@ mod tests {
             line.extend_from_slice(&value.to_le_bytes());
         }
         line.push(0);
-        tos_Sprite3(dc, 0, 0, 0, line.as_mut_ptr(), 0);
-        unsafe { assert_eq!(*(*dc).body.add(2 * 16 + 4), tos_abi::LTRED as u8) };
+        unsafe {
+            tos_Sprite3(dc, 0, 0, 0, line.as_mut_ptr(), 0);
+            assert_eq!(*(*dc).body.add(2 * 16 + 4), tos_abi::LTRED as u8);
+        }
 
         let mut mesh = vec![24];
         mesh.extend_from_slice(&3_i32.to_le_bytes());
@@ -2655,8 +2703,10 @@ mod tests {
             mesh.extend_from_slice(&value.to_le_bytes());
         }
         mesh.push(0);
-        tos_Sprite3(dc, 0, 0, 0, mesh.as_mut_ptr(), 0);
-        unsafe { assert_eq!(*(*dc).body.add(6 * 16 + 3), tos_abi::LTGREEN as u8) };
+        unsafe {
+            tos_Sprite3(dc, 0, 0, 0, mesh.as_mut_ptr(), 0);
+            assert_eq!(*(*dc).body.add(6 * 16 + 3), tos_abi::LTGREEN as u8);
+        }
     }
 
     #[test]
@@ -2805,8 +2855,8 @@ mod tests {
         sprite.extend_from_slice(&[0xf4, 0x00]);
         sprite.push(0);
 
-        tos_Sprite3(dc, 0, 0, 0, sprite.as_mut_ptr(), 0);
         unsafe {
+            tos_Sprite3(dc, 0, 0, 0, sprite.as_mut_ptr(), 0);
             let pixels = slice::from_raw_parts((*dc).body, 144);
             assert_eq!(pixels[4 * 12 + 4], tos_abi::LTRED as u8);
             for (x, y) in [(8, 8), (9, 8), (9, 9), (8, 9)] {

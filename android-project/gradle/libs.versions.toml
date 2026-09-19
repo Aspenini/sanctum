@@ -1,0 +1,11 @@
+[versions]
+agp = "9.0.1"
+coreKtx = "1.15.0"
+documentfile = "1.0.1"
+
+[libraries]
+androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
+androidx-documentfile = { group = "androidx.documentfile", name = "documentfile", version.ref = "documentfile" }
+
+[plugins]
+android-application = { id = "com.android.application", version.ref = "agp" }
