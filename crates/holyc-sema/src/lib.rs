@@ -9,6 +9,7 @@ pub struct FunctionInfo {
     pub name: String,
     pub ret: Ty,
     pub params: Vec<(String, Ty)>,
+    pub defaults: Vec<Option<Expr>>,
     pub variadic: bool,
     pub is_builtin: bool,
     pub link_name: String,
@@ -1122,6 +1123,7 @@ impl Sema {
             FunctionInfo {
                 name: name.into(),
                 ret,
+                defaults: vec![None; params.len()],
                 params: params
                     .into_iter()
                     .map(|(n, t)| (n.to_string(), t))
@@ -1151,6 +1153,7 @@ impl Sema {
                 name: function.name.clone(),
                 ret,
                 params,
+                defaults: function.params.iter().map(|p| p.default.clone()).collect(),
                 variadic: function.variadic,
                 is_builtin: false,
                 link_name: link_name.clone(),
@@ -1339,17 +1342,25 @@ impl Sema {
     }
 
     fn rewrite_function(&mut self, function: &mut FnDecl) {
-        let Some(body) = &mut function.body else {
-            return;
-        };
         let link = if self.current_link.is_empty() {
             function.name.clone()
         } else {
             Self::nested_link_name(&self.current_link, &function.name)
         };
         let previous = std::mem::replace(&mut self.current_link, link);
-        for stmt in body {
-            self.rewrite_stmt(stmt);
+        for param in &mut function.params {
+            if let Some(default) = &mut param.default {
+                self.rewrite_expr(default);
+                self.callify_function_ident(default);
+            }
+        }
+        if let Some(info) = self.functions.get_mut(&self.current_link) {
+            info.defaults = function.params.iter().map(|p| p.default.clone()).collect();
+        }
+        if let Some(body) = &mut function.body {
+            for stmt in body {
+                self.rewrite_stmt(stmt);
+            }
         }
         self.current_link = previous;
     }
@@ -1409,7 +1420,12 @@ impl Sema {
                 }
             }
             ExprKind::Call { callee, args } => {
-                self.rewrite_expr(callee);
+                // A function name in callee position is already a call. Bare
+                // no-argument functions elsewhere still get callified.
+                if !matches!(&callee.kind, ExprKind::Ident(name) if self.lookup_function(name).is_some())
+                {
+                    self.rewrite_expr(callee);
+                }
                 for a in args.iter_mut().flatten() {
                     self.rewrite_expr(a);
                     self.callify_function_ident(a);

@@ -318,6 +318,36 @@ pub fn compile_jit(
             collect_fn_defs(function, None, &mut fn_defs);
         }
     }
+    let mut static_decls = Vec::new();
+    for (link, function) in &fn_defs {
+        if let Some(body) = &function.body {
+            for stmt in body {
+                collect_static_decls(stmt, link, &mut static_decls);
+            }
+        }
+    }
+    let mut local_statics = HashMap::new();
+    for (index, (link, variable)) in static_decls.iter().enumerate() {
+        let ty = resolve_ty(&variable.ty, &sema.classes);
+        let size = usize::try_from(ty.size().max(1))
+            .ok()
+            .filter(|size| *size <= i32::MAX as usize)
+            .ok_or_else(|| CodegenError::Msg(format!("static `{}` is too large", variable.name)))?;
+        let id =
+            module.declare_data(&format!("tos_static_{index}"), Linkage::Local, true, false)?;
+        let mut desc = DataDescription::new();
+        desc.define_zeroinit(size);
+        module.define_data(id, &desc)?;
+        if local_statics
+            .insert((link.clone(), variable.name.clone()), (id, ty))
+            .is_some()
+        {
+            return Err(CodegenError::Msg(format!(
+                "duplicate static `{}` in `{link}`",
+                variable.name
+            )));
+        }
+    }
     let mut env_layouts = HashMap::new();
     for (link, function) in &fn_defs {
         if let Some(layout) = env_layout_for(link, function, sema) {
@@ -356,6 +386,7 @@ pub fn compile_jit(
                     bins: &bins,
                     vars: HashMap::new(),
                     globals: &globals,
+                    local_statics: &local_statics,
                     module_scope: false,
                     break_targets: Vec::new(),
                     catch_targets: Vec::new(),
@@ -371,6 +402,12 @@ pub fn compile_jit(
                 for (i, (pname, ty)) in info.params.iter().enumerate() {
                     let val = cg.bcx.block_params(entry)[i];
                     cg.define_local(pname.clone(), ty.clone(), val)?;
+                }
+                if info.variadic {
+                    let argc = cg.bcx.block_params(entry)[info.params.len()];
+                    let argv = cg.bcx.block_params(entry)[info.params.len() + 1];
+                    cg.define_local("argc".into(), Ty::I64, argc)?;
+                    cg.define_local("argv".into(), Ty::Ptr(Box::new(Ty::I64)), argv)?;
                 }
                 cg.import_captures()?;
                 cg.prepare_labels(body)?;
@@ -413,6 +450,7 @@ pub fn compile_jit(
                 bins: &bins,
                 vars: HashMap::new(),
                 globals: &globals,
+                local_statics: &local_statics,
                 module_scope: true,
                 break_targets: Vec::new(),
                 catch_targets: Vec::new(),
@@ -424,6 +462,7 @@ pub fn compile_jit(
                 env_layouts: &env_layouts,
                 sema,
             };
+            cg.initialize_statics(&static_decls)?;
             cg.prepare_module_labels(&ast.items)?;
             for item in &ast.items {
                 if let Item::Stmt(s) = item {
@@ -516,6 +555,10 @@ fn make_sig(module: &mut JITModule, info: &FunctionInfo, ptr_ty: Type) -> Signat
     for (_, ty) in &info.params {
         sig.params.push(AbiParam::new(clif_ty(ty, ptr_ty)));
     }
+    if info.variadic {
+        sig.params.push(AbiParam::new(types::I64));
+        sig.params.push(AbiParam::new(ptr_ty));
+    }
     if !info.ret.is_void() {
         sig.returns.push(AbiParam::new(clif_ty(&info.ret, ptr_ty)));
     }
@@ -529,6 +572,32 @@ fn clif_ty(ty: &Ty, ptr_ty: Type) -> Type {
         Ty::U0 | Ty::I0 => types::I64,
         _ => types::I64,
     }
+}
+
+// TempleOS selects the higher raw type for an integer expression, while
+// deciding unsigned operations from either operand (Compiler/OptLib.HC).
+fn numeric_result_ty(lhs: Ty, rhs: Ty) -> Ty {
+    fn rank(ty: &Ty) -> u8 {
+        match ty {
+            Ty::I0 => 0,
+            Ty::U0 => 1,
+            Ty::I8 => 4,
+            Ty::U8 => 5,
+            Ty::I16 => 6,
+            Ty::U16 => 7,
+            Ty::I32 => 8,
+            Ty::U32 => 9,
+            Ty::I64 => 10,
+            Ty::U64 => 11,
+            Ty::F64 => 14,
+            _ => 0,
+        }
+    }
+    if rank(&lhs) > rank(&rhs) { lhs } else { rhs }
+}
+
+fn unsigned_operands(lhs: Option<&Ty>, rhs: Option<&Ty>) -> bool {
+    lhs.is_some_and(Ty::is_unsigned) || rhs.is_some_and(Ty::is_unsigned)
 }
 
 fn mem_clif(ty: &Ty) -> Type {
@@ -572,6 +641,7 @@ struct FnCg<'a, 'b> {
     bins: &'a HashMap<(u32, i64), DataId>,
     vars: HashMap<String, (LocalStorage, Ty)>,
     globals: &'a HashMap<String, GlobalInfo>,
+    local_statics: &'a HashMap<(String, String), (DataId, Ty)>,
     module_scope: bool,
     break_targets: Vec<Block>,
     catch_targets: Vec<Block>,
@@ -595,6 +665,7 @@ struct GlobalInfo {
 enum LocalStorage {
     Value(Variable),
     Stack(StackSlot),
+    Static(DataId),
     Env(i32),
     Captured { depth: u32, offset: i32 },
 }
@@ -647,6 +718,38 @@ fn walk_nested_fns<'a>(stmt: &'a Stmt, parent: &str, out: &mut Vec<(String, &'a 
     }
 }
 
+fn collect_static_decls<'a>(stmt: &'a Stmt, link: &str, out: &mut Vec<(String, &'a VarDecl)>) {
+    match stmt {
+        Stmt::Decl(variable) if variable.static_ => out.push((link.to_string(), variable)),
+        Stmt::Block { stmts, .. } | Stmt::Start { body: stmts, .. } => {
+            for stmt in stmts {
+                collect_static_decls(stmt, link, out);
+            }
+        }
+        Stmt::If { then, else_, .. } => {
+            collect_static_decls(then, link, out);
+            if let Some(else_) = else_ {
+                collect_static_decls(else_, link, out);
+            }
+        }
+        Stmt::While { body, .. } | Stmt::DoWhile { body, .. } | Stmt::Switch { body, .. } => {
+            collect_static_decls(body, link, out);
+        }
+        Stmt::For { init, body, .. } => {
+            if let Some(init) = init {
+                collect_static_decls(init, link, out);
+            }
+            collect_static_decls(body, link, out);
+        }
+        Stmt::Try { body, catch, .. } => {
+            collect_static_decls(body, link, out);
+            collect_static_decls(catch, link, out);
+        }
+        // Nested functions are collected separately under their own link.
+        _ => {}
+    }
+}
+
 fn stmt_has_nested_fn(stmt: &Stmt) -> bool {
     match stmt {
         Stmt::Fn(_) => true,
@@ -673,6 +776,9 @@ fn collect_env_decls(
 ) {
     match stmt {
         Stmt::Decl(variable) => {
+            if variable.static_ {
+                return;
+            }
             if slots.contains_key(&variable.name) {
                 return;
             }
@@ -724,6 +830,11 @@ fn env_layout_for(link: &str, function: &FnDecl, sema: &Sema) -> Option<EnvLayou
             offset = (offset + 7) & !7;
             slots.insert(name.clone(), (offset, ty.clone()));
             offset += size as i32;
+        }
+        if info.variadic {
+            slots.insert("argc".into(), (offset, Ty::I64));
+            slots.insert("argv".into(), (offset + 8, Ty::Ptr(Box::new(Ty::I64))));
+            offset += 16;
         }
     }
     for stmt in body {
@@ -804,6 +915,75 @@ fn gather_labels(stmt: &Stmt, names: &mut Vec<String>) {
 }
 
 impl FnCg<'_, '_> {
+    fn import_statics(&mut self, link: &str) {
+        for ((owner, name), (id, ty)) in self.local_statics {
+            if owner == link {
+                self.vars
+                    .entry(name.clone())
+                    .or_insert((LocalStorage::Static(*id), ty.clone()));
+            }
+        }
+    }
+
+    fn initialize_statics(
+        &mut self,
+        declarations: &[(String, &VarDecl)],
+    ) -> Result<(), CodegenError> {
+        if !declarations
+            .iter()
+            .any(|(_, variable)| variable.init.is_some())
+        {
+            return Ok(());
+        }
+        // Initialize before module statements, once for the lifetime of this
+        // JIT module. Declarations inside loops/branches never reinitialize.
+        let id =
+            self.module
+                .declare_data("tos_statics_initialized", Linkage::Local, true, false)?;
+        let mut desc = DataDescription::new();
+        desc.define_zeroinit(1);
+        self.module.define_data(id, &desc)?;
+        let global = self.module.declare_data_in_func(id, self.bcx.func);
+        let flag = self.bcx.ins().symbol_value(self.ptr_ty, global);
+        let initialized = self
+            .bcx
+            .ins()
+            .load(types::I8, MemFlagsData::trusted(), flag, 0);
+        let init_block = self.bcx.create_block();
+        let ready = self.bcx.create_block();
+        self.bcx
+            .ins()
+            .brif(initialized, ready, &[], init_block, &[]);
+        self.bcx.switch_to_block(init_block);
+        self.bcx.seal_block(init_block);
+        for (link, variable) in declarations {
+            let Some(init) = &variable.init else { continue };
+            self.current_link = link.clone();
+            self.vars.clear();
+            let mut scope = Some(link.clone());
+            while let Some(owner) = scope {
+                self.import_statics(&owner);
+                scope = self
+                    .sema
+                    .functions
+                    .get(&owner)
+                    .and_then(|info| info.parent_link.clone());
+            }
+            let (id, ty) = self.local_statics[&(link.clone(), variable.name.clone())].clone();
+            let global = self.module.declare_data_in_func(id, self.bcx.func);
+            let ptr = self.bcx.ins().symbol_value(self.ptr_ty, global);
+            self.initialize(ptr, &ty, init)?;
+        }
+        self.current_link.clear();
+        self.vars.clear();
+        let one = self.bcx.ins().iconst(types::I8, 1);
+        self.bcx.ins().store(MemFlagsData::trusted(), one, flag, 0);
+        self.bcx.ins().jump(ready, &[]);
+        self.bcx.switch_to_block(ready);
+        self.bcx.seal_block(ready);
+        Ok(())
+    }
+
     fn prepare_labels(&mut self, stmts: &[Stmt]) -> Result<(), CodegenError> {
         let mut names = Vec::new();
         for stmt in stmts {
@@ -968,6 +1148,7 @@ impl FnCg<'_, '_> {
             .get(&self.current_link)
             .and_then(|info| info.parent_link.clone());
         while let Some(link) = parent {
+            self.import_statics(&link);
             let captured = self.env_layouts.get(&link).map(|layout| {
                 layout
                     .slots
@@ -1045,10 +1226,7 @@ impl FnCg<'_, '_> {
 
     fn expr_ty(&self, e: &Expr) -> Option<Ty> {
         match &e.kind {
-            ExprKind::Call { callee, .. } => match &callee.kind {
-                ExprKind::Ident(n) => self.lookup_fn(n).map(|f| f.ret.clone()),
-                _ => None,
-            },
+            ExprKind::Call { callee, .. } => self.callee_function(callee).map(|f| f.ret.clone()),
             ExprKind::Ident(n) => self
                 .vars
                 .get(n)
@@ -1079,6 +1257,7 @@ impl FnCg<'_, '_> {
             ExprKind::Int(_) | ExprKind::Char(_) => Some(Ty::I64),
             ExprKind::Float(_) => Some(Ty::F64),
             ExprKind::Str(_) => Some(Ty::Ptr(Box::new(Ty::U8))),
+            ExprKind::Unary { op: UnOp::Not, .. } => Some(Ty::I64),
             ExprKind::Unary { expr, .. } => self.expr_ty(expr),
             ExprKind::Binary { op, lhs, rhs } => {
                 if op.is_assign() {
@@ -1091,10 +1270,8 @@ impl FnCg<'_, '_> {
                     self.expr_ty(lhs)
                 } else if op == &BinOp::Add && matches!(self.expr_ty(rhs), Some(Ty::Ptr(_))) {
                     self.expr_ty(rhs)
-                } else if self.expr_ty(lhs)?.is_float() || self.expr_ty(rhs)?.is_float() {
-                    Some(Ty::F64)
                 } else {
-                    Some(Ty::I64)
+                    Some(numeric_result_ty(self.expr_ty(lhs)?, self.expr_ty(rhs)?))
                 }
             }
             ExprKind::ChainCmp { .. } => Some(Ty::I64),
@@ -1186,6 +1363,10 @@ impl FnCg<'_, '_> {
                         LocalStorage::Value(var) if ty.is_aggregate() => self.bcx.use_var(var),
                         LocalStorage::Stack(slot) => {
                             self.bcx.ins().stack_addr(self.ptr_ty, slot, 0)
+                        }
+                        LocalStorage::Static(id) => {
+                            let global = self.module.declare_data_in_func(id, self.bcx.func);
+                            self.bcx.ins().symbol_value(self.ptr_ty, global)
                         }
                         LocalStorage::Env(offset) => {
                             let env = self.own_env_ptr()?;
@@ -1440,6 +1621,18 @@ impl FnCg<'_, '_> {
                     }
                     return Ok(());
                 }
+                if v.static_ {
+                    let (id, ty) = self
+                        .local_statics
+                        .get(&(self.current_link.clone(), v.name.clone()))
+                        .cloned()
+                        .ok_or_else(|| {
+                            CodegenError::Msg(format!("static `{}` was not declared", v.name))
+                        })?;
+                    self.vars
+                        .insert(v.name.clone(), (LocalStorage::Static(id), ty));
+                    return Ok(());
+                }
                 if ty.is_aggregate() {
                     if let Some(offset) = self.env_offsets.get(&v.name).copied() {
                         let env = self.own_env_ptr()?;
@@ -1590,6 +1783,7 @@ impl FnCg<'_, '_> {
                 Ok(())
             }
             Stmt::Switch { expr, body, .. } => {
+                let unsigned = self.expr_ty(expr).is_some_and(|ty| ty.is_unsigned());
                 let switch_value = self.expr(expr)?;
                 let exit = self.bcx.create_block();
                 let mut flat = Vec::new();
@@ -1651,14 +1845,18 @@ impl FnCg<'_, '_> {
                     let condition = if let Some(end) = range_end {
                         let high = self.expr(end)?;
                         let high = self.coerce_to(high, self.value_ty(switch_value));
-                        let ge =
-                            self.bcx
-                                .ins()
-                                .icmp(IntCC::SignedGreaterThanOrEqual, switch_value, low);
-                        let le =
-                            self.bcx
-                                .ins()
-                                .icmp(IntCC::SignedLessThanOrEqual, switch_value, high);
+                        let ge_cc = if unsigned {
+                            IntCC::UnsignedGreaterThanOrEqual
+                        } else {
+                            IntCC::SignedGreaterThanOrEqual
+                        };
+                        let le_cc = if unsigned {
+                            IntCC::UnsignedLessThanOrEqual
+                        } else {
+                            IntCC::SignedLessThanOrEqual
+                        };
+                        let ge = self.bcx.ins().icmp(ge_cc, switch_value, low);
+                        let le = self.bcx.ins().icmp(le_cc, switch_value, high);
                         self.bcx.ins().band(ge, le)
                     } else {
                         self.bcx.ins().icmp(IntCC::Equal, switch_value, low)
@@ -1924,17 +2122,21 @@ impl FnCg<'_, '_> {
             }
             ExprKind::Binary { op, lhs, rhs } => self.binop(*op, lhs, rhs),
             ExprKind::ChainCmp { first, rest } => {
-                // a<b<c → (a<b) && (b<c) with b evaluated once (we re-eval; fine for now)
+                // a<b<c → (a<b) && (b<c), with each operand evaluated once.
                 let mut prev = self.expr(first)?;
+                let mut prev_ty = self.expr_ty(first);
                 let mut acc: Option<Value> = None;
                 for (op, rhs) in rest {
+                    let rhs_ty = self.expr_ty(rhs);
                     let r = self.expr(rhs)?;
-                    let cmp = self.cmp(*op, prev, r)?;
+                    let unsigned = unsigned_operands(prev_ty.as_ref(), rhs_ty.as_ref());
+                    let cmp = self.cmp(*op, prev, r, unsigned)?;
                     acc = Some(match acc {
                         None => cmp,
                         Some(a) => self.bcx.ins().band(a, cmp),
                     });
                     prev = r;
+                    prev_ty = rhs_ty;
                 }
                 Ok(acc.unwrap())
             }
@@ -2033,7 +2235,13 @@ impl FnCg<'_, '_> {
         Err(CodegenError::Msg("++/-- target is not addressable".into()))
     }
 
-    fn cmp(&mut self, op: BinOp, l: Value, r: Value) -> Result<Value, CodegenError> {
+    fn cmp(
+        &mut self,
+        op: BinOp,
+        l: Value,
+        r: Value,
+        unsigned: bool,
+    ) -> Result<Value, CodegenError> {
         let (l, r, float) = self.promote_numeric(l, r);
         if float {
             let cc = match op {
@@ -2051,6 +2259,10 @@ impl FnCg<'_, '_> {
         let cc = match op {
             BinOp::Eq => IntCC::Equal,
             BinOp::Ne => IntCC::NotEqual,
+            BinOp::Lt if unsigned => IntCC::UnsignedLessThan,
+            BinOp::Le if unsigned => IntCC::UnsignedLessThanOrEqual,
+            BinOp::Gt if unsigned => IntCC::UnsignedGreaterThan,
+            BinOp::Ge if unsigned => IntCC::UnsignedGreaterThanOrEqual,
             BinOp::Lt => IntCC::SignedLessThan,
             BinOp::Le => IntCC::SignedLessThanOrEqual,
             BinOp::Gt => IntCC::SignedGreaterThan,
@@ -2070,10 +2282,11 @@ impl FnCg<'_, '_> {
         }
         let lhs_ty = self.expr_ty(lhs);
         let rhs_ty = self.expr_ty(rhs);
+        let unsigned = unsigned_operands(lhs_ty.as_ref(), rhs_ty.as_ref());
         let l = self.expr(lhs)?;
         let r = self.expr(rhs)?;
         if op.is_cmp() {
-            return self.cmp(op, l, r);
+            return self.cmp(op, l, r, unsigned);
         }
         match (&lhs_ty, &rhs_ty, op) {
             (Some(Ty::Ptr(elem)), Some(Ty::Ptr(_)), BinOp::Sub) => {
@@ -2128,12 +2341,15 @@ impl FnCg<'_, '_> {
             BinOp::Add => self.bcx.ins().iadd(l, r),
             BinOp::Sub => self.bcx.ins().isub(l, r),
             BinOp::Mul => self.bcx.ins().imul(l, r),
+            BinOp::Div if unsigned => self.bcx.ins().udiv(l, r),
             BinOp::Div => self.bcx.ins().sdiv(l, r),
+            BinOp::Mod if unsigned => self.bcx.ins().urem(l, r),
             BinOp::Mod => self.bcx.ins().srem(l, r),
             BinOp::BitAnd => self.bcx.ins().band(l, r),
             BinOp::BitOr => self.bcx.ins().bor(l, r),
             BinOp::BitXor => self.bcx.ins().bxor(l, r),
             BinOp::Shl => self.bcx.ins().ishl(l, r),
+            BinOp::Shr if unsigned => self.bcx.ins().ushr(l, r),
             BinOp::Shr => self.bcx.ins().sshr(l, r),
             BinOp::And => {
                 let z = self.bcx.ins().iconst(types::I64, 0);
@@ -2205,6 +2421,7 @@ impl FnCg<'_, '_> {
                 | ExprKind::Index { .. }
         ) {
             let (ptr, ty, off) = self.place(lhs)?;
+            let unsigned = unsigned_operands(Some(&ty), self.expr_ty(rhs).as_ref());
             if ty.is_aggregate() && op != BinOp::Assign {
                 return Err(CodegenError::Msg(
                     "compound assignment is invalid for aggregates".into(),
@@ -2236,12 +2453,15 @@ impl FnCg<'_, '_> {
                     (BinOp::AddEq, false) => self.bcx.ins().iadd(cur, r),
                     (BinOp::SubEq, false) => self.bcx.ins().isub(cur, r),
                     (BinOp::MulEq, false) => self.bcx.ins().imul(cur, r),
+                    (BinOp::DivEq, false) if unsigned => self.bcx.ins().udiv(cur, r),
                     (BinOp::DivEq, false) => self.bcx.ins().sdiv(cur, r),
+                    (BinOp::ModEq, false) if unsigned => self.bcx.ins().urem(cur, r),
                     (BinOp::ModEq, false) => self.bcx.ins().srem(cur, r),
                     (BinOp::AndEq, false) => self.bcx.ins().band(cur, r),
                     (BinOp::OrEq, false) => self.bcx.ins().bor(cur, r),
                     (BinOp::XorEq, false) => self.bcx.ins().bxor(cur, r),
                     (BinOp::ShlEq, false) => self.bcx.ins().ishl(cur, r),
+                    (BinOp::ShrEq, false) if unsigned => self.bcx.ins().ushr(cur, r),
                     (BinOp::ShrEq, false) => self.bcx.ins().sshr(cur, r),
                     _ => r,
                 }
@@ -2276,39 +2496,24 @@ impl FnCg<'_, '_> {
                 self.expr(callee)?
             };
             let info = self.callee_function(callee).cloned();
-            let mut values = Vec::new();
-            let mut signature = self.module.make_signature();
-            if let Some(info) = &info {
-                for (_, ty) in &info.params {
-                    signature
-                        .params
-                        .push(AbiParam::new(clif_ty(ty, self.ptr_ty)));
-                }
-                if !info.ret.is_void() {
-                    signature
-                        .returns
-                        .push(AbiParam::new(clif_ty(&info.ret, self.ptr_ty)));
-                }
-            }
-            for (index, arg) in args.iter().enumerate() {
-                let value = match arg {
-                    Some(expr) => self.expr(expr)?,
-                    None => self.bcx.ins().iconst(types::I64, 0),
-                };
-                let value = info
-                    .as_ref()
-                    .and_then(|info| info.params.get(index))
-                    .map_or(value, |(_, ty)| {
-                        self.coerce_to(value, clif_ty(ty, self.ptr_ty))
-                    });
-                if info.is_none() {
+            let (signature, values) = if let Some(info) = &info {
+                let signature = make_sig(self.module, info, self.ptr_ty);
+                (signature, self.call_arguments(info, args)?)
+            } else {
+                // Unprototyped callbacks retain the inferred fixed-argument
+                // signature used by TempleOS draw/transform callbacks.
+                let mut signature = self.module.make_signature();
+                let mut values = Vec::new();
+                for arg in args {
+                    let value = match arg {
+                        Some(expr) => self.expr(expr)?,
+                        None => self.bcx.ins().iconst(types::I64, 0),
+                    };
                     signature.params.push(AbiParam::new(self.value_ty(value)));
+                    values.push(value);
                 }
-                values.push(value);
-            }
-            if info.is_none() && values.len() != signature.params.len() {
-                // Keep the previous inferred-argument signature.
-            }
+                (signature, values)
+            };
             let signature = self.bcx.import_signature(signature);
             let call = self.bcx.ins().call_indirect(signature, address, &values);
             let results = self.bcx.inst_results(call);
@@ -2320,41 +2525,12 @@ impl FnCg<'_, '_> {
             self.after_call()?;
             return Ok(value);
         };
-        if name == "Print" {
-            return self.call_print(args);
-        }
-        if name == "GrPrint" {
-            return self.call_gr_print(args);
-        }
         let id = self.func_id(name)?;
-        let (params, variadic) = self
+        let info = self
             .lookup_fn(name)
-            .map(|info| (info.params.clone(), info.variadic))
-            .unwrap_or_default();
-        let mut vals = Vec::new();
-        let used = if variadic {
-            args.len()
-        } else {
-            args.len().min(params.len())
-        };
-        for (index, a) in args.iter().take(used).enumerate() {
-            if let Some(e) = a {
-                let value = self.expr(e)?;
-                let value = params.get(index).map_or(value, |(_, ty)| {
-                    self.coerce_to(value, clif_ty(ty, self.ptr_ty))
-                });
-                vals.push(value);
-            } else {
-                let ty = params
-                    .get(index)
-                    .map(|(_, ty)| ty.clone())
-                    .unwrap_or(Ty::I64);
-                vals.push(self.missing_arg(name, index, &ty));
-            }
-        }
-        for (index, (_, ty)) in params.iter().enumerate().skip(used) {
-            vals.push(self.missing_arg(name, index, ty));
-        }
+            .cloned()
+            .ok_or_else(|| CodegenError::Msg(format!("unknown function `{name}`")))?;
+        let vals = self.call_arguments(&info, args)?;
         let results = self.call_function(id, &vals);
         let value = if results.is_empty() {
             self.bcx.ins().iconst(types::I64, 0)
@@ -2365,76 +2541,68 @@ impl FnCg<'_, '_> {
         Ok(value)
     }
 
-    fn call_print(&mut self, args: &[Option<Expr>]) -> Result<Value, CodegenError> {
-        let fmt_expr = args
-            .first()
-            .and_then(|a| a.as_ref())
-            .ok_or_else(|| CodegenError::Msg("Print needs a format".into()))?;
-        let fmt = self.expr(fmt_expr)?;
-        let extra: Vec<&Expr> = args.iter().skip(1).filter_map(|a| a.as_ref()).collect();
-        let argc = extra.len() as i64;
-        let argv = if extra.is_empty() {
-            self.bcx.ins().iconst(self.ptr_ty, 0)
-        } else {
-            let slot = self.bcx.create_sized_stack_slot(StackSlotData::new(
-                StackSlotKind::ExplicitSlot,
-                (extra.len() * 8) as u32,
-                0,
-            ));
-            for (i, e) in extra.iter().enumerate() {
-                let v = self.expr(e)?;
-                self.bcx
-                    .ins()
-                    .stack_store(self.ptr_ty, v, slot, (i * 8) as i32);
-            }
-            self.bcx.ins().stack_addr(self.ptr_ty, slot, 0)
-        };
-        let argc_v = self.bcx.ins().iconst(types::I64, argc);
-        let id = self.func_ids["Print"];
-        let results = self.call_function(id, &[fmt, argc_v, argv]);
-        let value = results[0];
-        self.after_call()?;
-        Ok(value)
-    }
-
-    fn call_gr_print(&mut self, args: &[Option<Expr>]) -> Result<Value, CodegenError> {
-        let params = self.sema.functions["GrPrint"].params.clone();
-        let mut fixed = Vec::new();
-        for index in 0..4 {
-            let ty = clif_ty(&params[index].1, self.ptr_ty);
-            let value = match args.get(index).and_then(|a| a.as_ref()) {
+    fn call_arguments(
+        &mut self,
+        info: &FunctionInfo,
+        args: &[Option<Expr>],
+    ) -> Result<Vec<Value>, CodegenError> {
+        if info.is_builtin
+            && info.name == "Print"
+            && args.first().and_then(Option::as_ref).is_none()
+        {
+            return Err(CodegenError::Msg("Print needs a format".into()));
+        }
+        let mut values = Vec::new();
+        for (index, (_, ty)) in info.params.iter().enumerate() {
+            let supplied = args.get(index).and_then(Option::as_ref);
+            let default = info.defaults.get(index).and_then(Option::as_ref);
+            let value = match supplied.or(default) {
                 Some(expr) => {
                     let raw = self.expr(expr)?;
-                    self.coerce_to(raw, ty)
+                    self.coerce_to(raw, clif_ty(ty, self.ptr_ty))
                 }
-                None => self.zero(ty),
+                None => self.missing_arg(&info.name, index, ty),
             };
-            fixed.push(value);
+            values.push(value);
         }
-        let extra: Vec<&Expr> = args.iter().skip(4).filter_map(|a| a.as_ref()).collect();
-        let argc = extra.len() as i64;
-        let argv = if extra.is_empty() {
+        if info.variadic {
+            let extras = args.get(info.params.len()..).unwrap_or_default();
+            let (argc, argv) = self.pack_variadic(extras)?;
+            values.push(argc);
+            values.push(argv);
+        }
+        Ok(values)
+    }
+
+    fn pack_variadic(&mut self, args: &[Option<Expr>]) -> Result<(Value, Value), CodegenError> {
+        let argc = self.bcx.ins().iconst(types::I64, args.len() as i64);
+        let argv = if args.is_empty() {
             self.bcx.ins().iconst(self.ptr_ty, 0)
         } else {
+            let size = args
+                .len()
+                .checked_mul(8)
+                .and_then(|size| u32::try_from(size).ok())
+                .filter(|size| *size <= i32::MAX as u32)
+                .ok_or_else(|| CodegenError::Msg("too many variadic arguments".into()))?;
             let slot = self.bcx.create_sized_stack_slot(StackSlotData::new(
                 StackSlotKind::ExplicitSlot,
-                (extra.len() * 8) as u32,
-                0,
+                size,
+                3,
             ));
-            for (i, expr) in extra.iter().enumerate() {
-                let value = self.expr(expr)?;
+            for (i, arg) in args.iter().enumerate() {
+                let value = match arg {
+                    Some(expr) => self.expr(expr)?,
+                    None => self.bcx.ins().iconst(types::I64, 0),
+                };
+                // argv consists of raw 64-bit slots, including F64 bit patterns.
+                let value = self.bitcast_or_coerce(value, types::I64);
                 self.bcx
                     .ins()
                     .stack_store(self.ptr_ty, value, slot, (i * 8) as i32);
             }
             self.bcx.ins().stack_addr(self.ptr_ty, slot, 0)
         };
-        fixed.push(self.bcx.ins().iconst(types::I64, argc));
-        fixed.push(argv);
-        let id = self.func_ids["GrPrint"];
-        let results = self.call_function(id, &fixed);
-        let value = results[0];
-        self.after_call()?;
-        Ok(value)
+        Ok((argc, argv))
     }
 }

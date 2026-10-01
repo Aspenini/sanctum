@@ -74,7 +74,8 @@ in-process worker thread; desktop runners remain isolated child processes.
 
 The implemented language/runtime subset includes preprocessing, TempleOS
 operator precedence, packed classes and unions, globals, pointers, callbacks,
-control flow including `goto`, `try`/`catch`, and nested functions, integer and `F64` arithmetic
+control flow including `goto`, `try`/`catch`, and nested functions, persistent local
+`static` storage, user-defined variadic functions with `argc`/`argv`, integer and `F64` arithmetic
 (including the HolyC power operator), tasks, menus and settings, heap and queue
 primitives, indexed graphics with 3D mesh sprites and circles, mouse and
 keyboard input, registry
@@ -82,15 +83,31 @@ persistence, CP437 source/output handling, and CPAL square-wave audio. Missing
 or lost audio devices produce a warning and silent fallback instead of
 preventing launch.
 
+Unsigned integer division, remainder, shifts, and comparisons preserve HolyC's
+operand types, including compound assignments and chained comparisons. Integer
+conversion to `F64` remains signed, following TempleOS. User-defined default
+arguments work for omitted arguments and explicit argument holes. Variadic
+arguments use raw 64-bit slots, preserving floating-point bit patterns.
+Local statics initialize once before module-level code runs and retain their
+storage across function calls; initializers do not execute during compile-only
+validation. Compile-time `#exe` execution and inline assembly remain unsupported.
+
 Read-only TempleOS file calls (`FileRead`, `FileFind`, `FilesFind`, `Cd`,
 `IsDir`, `DirCur`) resolve inside the program directory and the selected
 TempleOS tree (`::/`). Writes are not implemented; paths cannot climb out of
 those roots.
 
 A checked-in compile matrix in `crates/holyc/tests/demo_games_matrix.rs`
-tracks every `TempleOS/Demo/Games` HolyC file: Talons and TicTacToe compile
+tracks every `TempleOS/Demo/Games` HolyC file: Talons, TicTacToe, and Castle Frankenstein compile
 today, and each remaining demo pins its current first error so progress or
-regressions show up in CI.
+regressions show up in local test runs. Run the complete suite with:
+
+```text
+cargo test --workspace --locked
+```
+
+The reference-game tests require the local `TempleOS/` tree; they skip when it
+is absent. Self-contained language and runner tests do not require that tree.
 
 `TempleOS/Demo/Games/Talons.HC` compiles end-to-end and has JIT acceptance tests
 covering terrain initialization, its real draw callback, a non-empty 640x480

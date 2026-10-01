@@ -639,7 +639,7 @@ impl<'a> Parser<'a> {
             let mut range_end = None;
             if !matches!(self.peek(), TokenKind::Colon) {
                 value = Some(self.parse_expr()?);
-                if self.eat_punct(TokenKind::DotDot) {
+                if self.eat_punct(TokenKind::DotDot) || self.eat_punct(TokenKind::Ellipsis) {
                     range_end = Some(self.parse_expr()?);
                 }
             }

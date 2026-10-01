@@ -279,6 +279,176 @@ Main;
     }
 
     #[test]
+    fn unsigned_high_bits_survive_arithmetic_and_comparisons() {
+        tos_runtime::capture_begin();
+        run_source(
+            "unsigned.HC",
+            r#"
+U0 Main()
+{
+  U64 high=0x8000000000000000,all=0xFFFFFFFFFFFFFFFF;
+  I64 signed=-8;
+  "%d %d %d\n",all/2,all%3,high>>1;
+  "%d %d %d %d\n",high>0,0<high<all,high>=all,high<=all;
+  "%d %d %d\n",(all+0)/2,(high|0)>>1,(all(U64))%3;
+  "%d %d %d\n",signed/2,signed%3,signed>>1;
+  // HolyC's integer-to-float conversion stays signed, even for U64.
+  "%d\n",all+0.0==-1.0;
+}
+Main;
+"#,
+        )
+        .unwrap();
+        assert_eq!(
+            tos_runtime::capture_take().unwrap(),
+            b"9223372036854775807 0 4611686018427387904\n1 1 0 1\n9223372036854775807 4611686018427387904 0\n-4 -2 -4\n1\n"
+        );
+    }
+
+    #[test]
+    fn unsigned_compound_assignments_keep_their_operand_types() {
+        tos_runtime::capture_begin();
+        run_source(
+            "unsigned_assign.HC",
+            r#"
+class Numbers { U64 high; U64 remainder; };
+U0 Main()
+{
+  Numbers n={0x8000000000000000,0xFFFFFFFFFFFFFFFF};
+  n.high>>=1;
+  n.remainder%=3;
+  U64 quotient=0xFFFFFFFFFFFFFFFF;
+  quotient/=2;
+  "%d %d %d\n",n.high,n.remainder,quotient;
+  I64 mixed=-1;
+  U8 divisor=3;
+  mixed%=divisor;
+  "%d\n",mixed;
+  U8 small=255;
+  I64 negative=-1;
+  "%d %d\n",small<negative,negative>small;
+  switch (quotient) {
+    case 0...0xFFFFFFFFFFFFFFFF: "unsigned range\n"; break;
+    default: "wrong range\n";
+  }
+}
+Main;
+"#,
+        )
+        .unwrap();
+        assert_eq!(
+            tos_runtime::capture_take().unwrap(),
+            b"4611686018427387904 0 9223372036854775807\n0\n1 1\nunsigned range\n"
+        );
+    }
+
+    #[test]
+    fn variadic_functions_receive_only_the_extra_arguments() {
+        tos_runtime::capture_begin();
+        run_source(
+            "variadic.HC",
+            r#"
+I64 Sum(I64 bias=10,...)
+{
+  I64 total=bias;
+  for (I64 i=0;i<argc;i++) total+=argv[i];
+  return total;
+}
+I64 Empty(...) { return argc==0 && argv==NULL; }
+I64 Recursive(I64 depth,...)
+{
+  I64 value=argv[0];
+  if (depth) value+=Recursive(depth-1,argv[0]+1);
+  return value;
+}
+"%d %d %d %d\n",Sum(),Sum(3,1,2,3),Sum(,4,5),Empty();
+"%d\n",(*&Sum)(2,6,7);
+"%d %d\n",Recursive(2,4),Sum(3,1,,3);
+"#,
+        )
+        .unwrap();
+        assert_eq!(
+            tos_runtime::capture_take().unwrap(),
+            b"10 9 19 1\n15\n15 7\n"
+        );
+    }
+
+    #[test]
+    fn variadic_arguments_preserve_float_bits_and_nested_captures() {
+        tos_runtime::capture_begin();
+        run_source(
+            "variadic_nested.HC",
+            r#"
+F64 SumF(...)
+{
+  F64 *values=argv,total=0.0;
+  for (I64 i=0;i<argc;i++) total+=values[i];
+  return total;
+}
+I64 Outer(I64 bias,...)
+{
+  I64 Inner() { return bias+argc+argv[0]+argv[1]; }
+  return Inner();
+}
+"%0.2f %d\n",SumF(1.25,2.5,-0.5),Outer(3,4,5);
+"#,
+        )
+        .unwrap();
+        assert_eq!(tos_runtime::capture_take().unwrap(), b"3.25 14\n");
+    }
+
+    #[test]
+    fn local_statics_keep_storage_across_calls_and_module_runs() {
+        let mut program = compile_source(
+            "statics.HC",
+            r#"
+I64 init_calls;
+I64 Init() { init_calls++; return 40; }
+I64 Counter() { static I64 count=Init(); return ++count; }
+I64 Other() { static I64 count=100; return ++count; }
+I64 *Storage() { static I64 slots[2]={5,9}; return slots; }
+F64 Step() { static F64 value=1.25; value+=0.5; return value; }
+I64 *a=Storage(),*b=Storage();
+a[1]++;
+"%d %d %d %d %d %0.2f\n",Counter(),Counter(),Other(),init_calls,a==b,Step();
+"%d %d\n",b[0],b[1];
+"#,
+        )
+        .unwrap();
+        tos_runtime::capture_begin();
+        program.run().unwrap();
+        program.run().unwrap();
+        assert_eq!(
+            tos_runtime::capture_take().unwrap(),
+            b"41 42 101 1 1 1.75\n5 10\n43 44 102 1 1 2.25\n5 11\n"
+        );
+    }
+
+    #[test]
+    fn nested_functions_share_the_parents_static_storage() {
+        tos_runtime::capture_begin();
+        run_source(
+            "static_capture.HC",
+            r#"
+I64 Outer()
+{
+  static I64 count=2;
+  I64 Inner()
+  {
+    static I64 own=10;
+    count++;
+    return count+own++;
+  }
+  return Inner();
+}
+"%d %d\n",Outer(),Outer();
+"#,
+        )
+        .unwrap();
+        assert_eq!(tos_runtime::capture_take().unwrap(), b"13 15\n");
+    }
+
+    #[test]
     fn if_while_for() {
         tos_runtime::capture_begin();
         run_source(
